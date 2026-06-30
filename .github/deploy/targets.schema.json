@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Deploy vendor manifest (.github/deploy/targets.json)",
+  "description": "Registry of deploy vendors. Each vendor is a thin reusable workflow gated by its enable Variable.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["vendors"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "vendors": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "enabledVar", "workflow", "consumes"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "enabledVar": { "type": "string", "pattern": "^ENABLE_DEPLOY_[A-Z0-9_]+$" },
+          "workflow": { "type": "string", "pattern": "^deploy-[a-z0-9-]+\\.yml$" },
+          "consumes": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "enum": ["container", "static", "worker"] }
+          },
+          "description": { "type": "string" }
+        }
+      }
+    }
+  }
+}

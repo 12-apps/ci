@@ -1,0 +1,55 @@
+name: 'DigitalOcean provision'
+description: >-
+  Create a DigitalOcean droplet and run the initial cloud-init deploy. Ships
+  scripts/ephemeral/deploy-cloud-init.sh so consumer repos never vendor it.
+  Secrets are passed as inputs because composite actions have no `secrets` context.
+
+inputs:
+  do_api_token:
+    description: 'DigitalOcean API token'
+    required: true
+  github_token:
+    description: 'Token for cloning a private repo on the droplet'
+    required: false
+    default: ''
+  google_client_id:
+    description: 'Optional Google OAuth client id'
+    required: false
+    default: ''
+  google_client_secret:
+    description: 'Optional Google OAuth client secret'
+    required: false
+    default: ''
+  image_tag:
+    description: 'GHCR image tag the droplet should run'
+    required: false
+    default: main
+  repo_url:
+    description: 'HTTPS clone URL of the repo to deploy (e.g. https://github.com/owner/repo.git)'
+    required: true
+  droplet_name:
+    description: 'Droplet name'
+    required: true
+  droplet_size:
+    description: 'Droplet size slug'
+    required: false
+    default: s-1vcpu-1gb
+  branch:
+    description: 'Git branch to deploy'
+    required: false
+    default: main
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        DO_API_TOKEN: ${{ inputs.do_api_token }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        GOOGLE_CLIENT_ID: ${{ inputs.google_client_id }}
+        GOOGLE_CLIENT_SECRET: ${{ inputs.google_client_secret }}
+        IMAGE_TAG: ${{ inputs.image_tag }}
+        REPO_URL: ${{ inputs.repo_url }}
+      run: |
+        bash "$GITHUB_ACTION_PATH/../../../scripts/ephemeral/deploy-cloud-init.sh" \
+          -n "${{ inputs.droplet_name }}" -b "${{ inputs.branch }}" -s "${{ inputs.droplet_size }}"

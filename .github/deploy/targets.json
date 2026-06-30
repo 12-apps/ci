@@ -1,0 +1,19 @@
+{
+  "$schema": "./targets.schema.json",
+  "vendors": [
+    {
+      "name": "digitalocean",
+      "enabledVar": "ENABLE_DEPLOY_DIGITALOCEAN",
+      "workflow": "deploy-digitalocean.yml",
+      "consumes": ["container"],
+      "description": "Single persistent droplet running the docker-compose stack; pulls prebuilt GHCR images and runs migrations one-shot."
+    },
+    {
+      "name": "cloudflare",
+      "enabledVar": "ENABLE_DEPLOY_CLOUDFLARE",
+      "workflow": "deploy-cloudflare.yml",
+      "consumes": ["static", "worker"],
+      "description": "Cloudflare Pages (static apps) + Workers (wrangler). Off until CF secrets exist."
+    }
+  ]
+}

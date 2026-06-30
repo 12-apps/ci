@@ -1,0 +1,211 @@
+name: Deploy · DigitalOcean
+
+# Reusable deploy adapter (called by cd.yml). Does NOT build — it pulls prebuilt
+# GHCR images onto a persistent single droplet and runs the docker-compose stack.
+# Redeploys SSH into the SAME box so postgres_data / redis_data volumes (and the
+# generated .env secrets) survive. Enabled by ENABLE_DEPLOY_DIGITALOCEAN (gated in cd.yml).
+#
+# Required secrets: DO_API_TOKEN, DO_SSH_PRIVATE_KEY_B64.
+# Optional secrets: GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET.
+# Required variable (after first provision): DEPLOY_HOST (droplet public IPv4).
+
+on:
+  workflow_call:
+    inputs:
+      action:
+        description: 'provision | deploy | destroy'
+        type: string
+        required: false
+        default: deploy
+      image_tag:
+        description: 'GHCR image tag to run (the commit SHA, passed by cd.yml)'
+        type: string
+        required: false
+        default: main
+      image_namespace:
+        description: 'GHCR namespace ghcr.io/<owner/repo> (from discovery)'
+        type: string
+        required: false
+        default: ''
+      droplet_name:
+        type: string
+        required: false
+        default: app-prod
+      droplet_size:
+        type: string
+        required: false
+        default: s-1vcpu-1gb
+      branch:
+        type: string
+        required: false
+        default: main
+
+jobs:
+  provision:
+    name: Provision droplet
+    if: inputs.action == 'provision'
+    runs-on: ubuntu-latest
+    env:
+      DROPLET_NAME: ${{ inputs.droplet_name }}
+      DROPLET_SIZE: ${{ inputs.droplet_size }}
+    steps:
+      # Engine lives in 12-apps/ci; this composite ships scripts/ephemeral/deploy-cloud-init.sh
+      # so consumer repos never vendor it. Secrets pass as inputs (composites have no secrets ctx).
+      - name: Create droplet + initial deploy
+        uses: 12-apps/ci/.github/actions/do-provision@v1
+        with:
+          do_api_token: ${{ secrets.DO_API_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          google_client_id: ${{ secrets.GOOGLE_CLIENT_ID }}
+          google_client_secret: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          image_tag: ${{ inputs.image_tag }}
+          repo_url: ${{ github.server_url }}/${{ github.repository }}.git
+          droplet_name: ${{ inputs.droplet_name }}
+          droplet_size: ${{ inputs.droplet_size }}
+          branch: ${{ inputs.branch }}
+      - name: Resolve IP and print next step
+        env:
+          DO_API_TOKEN: ${{ secrets.DO_API_TOKEN }}
+        run: |
+          IP=$(curl -sk "https://api.digitalocean.com/v2/droplets?name=$DROPLET_NAME" \
+            -H "Authorization: Bearer $DO_API_TOKEN" \
+            | jq -r '.droplets[0].networks.v4[] | select(.type=="public") | .ip_address' | head -1)
+          {
+            echo "## Droplet provisioned 🚀"
+            echo ""
+            echo "**IP:** \`$IP\`  (cloud-init is bringing the stack up — allow a few min)"
+            echo ""
+            echo "Set repo Variable **DEPLOY_HOST = $IP** so push-to-main deploys target it."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Redeploy
+    if: inputs.action == 'deploy'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Guard — DEPLOY_HOST must be set
+        run: |
+          if [ -z "${{ vars.DEPLOY_HOST }}" ]; then
+            echo "::error::DEPLOY_HOST variable is not set. Run cd.yml with action=provision (target=digitalocean) first, then add the DEPLOY_HOST repo variable."
+            exit 1
+          fi
+      - name: Setup SSH key
+        run: |
+          echo "${{ secrets.DO_SSH_PRIVATE_KEY_B64 }}" | tr -d ' \n\r\t' | base64 -d > /tmp/do_key
+          chmod 600 /tmp/do_key
+      - name: Pull prebuilt images and (re)start over SSH
+        run: |
+          ssh -i /tmp/do_key -o StrictHostKeyChecking=no -o LogLevel=ERROR \
+            root@${{ vars.DEPLOY_HOST }} 'bash -s' -- \
+            "${{ secrets.GITHUB_TOKEN }}" \
+            "${{ github.actor }}" \
+            "${{ inputs.image_tag }}" \
+            "${{ inputs.image_namespace }}" \
+            "${{ github.server_url }}/${{ github.repository }}.git" \
+            "${{ secrets.GOOGLE_CLIENT_ID }}" \
+            "${{ secrets.GOOGLE_CLIENT_SECRET }}" <<'REMOTE'
+          set -euo pipefail
+          # Optional trailing args (Google creds) may be empty → ssh drops them,
+          # so default-expand to avoid `$6: unbound variable` under set -u.
+          GH_TOKEN="$1"; GH_ACTOR="$2"; IMAGE_TAG="$3"; IMAGE_NS="${4:-}"; REPO_HTTPS="$5"; GID="${6:-}"; GSECRET="${7:-}"
+          CLONE_URL=$(printf '%s' "$REPO_HTTPS" | sed "s|https://|https://${GH_TOKEN}@|")
+
+          # The box no longer builds anything — it only needs the compose file and
+          # nginx config, so shallow-sync the repo for those.
+          if [ ! -d /app/.git ]; then
+            git clone --depth 1 --branch main "$CLONE_URL" /app
+          fi
+          cd /app
+          git remote set-url origin "$CLONE_URL"
+          git fetch --depth 1 origin main
+          git reset --hard origin/main
+          # Don't leave the token sitting in /app/.git/config at rest — point the
+          # remote back at the token-less URL now that the fetch is done.
+          git remote set-url origin "$REPO_HTTPS"
+
+          # Create .env ONLY if missing — preserve generated DB password / AUTH_SECRET
+          if [ ! -f /app/.env ]; then
+            IP=$(curl -sk http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address)
+            cat > /app/.env <<ENVEOF
+          POSTGRES_USER=app
+          POSTGRES_PASSWORD=app_secret_$(openssl rand -hex 8)
+          POSTGRES_DB=app
+          AUTH_SECRET=$(openssl rand -hex 32)
+          AUTH_URL=http://$IP
+          AUTH_TRUST_HOST=true
+          ENVEOF
+          fi
+
+          # Pin the image tag + namespace this deploy should run (replace prior values)
+          sed -i '/^IMAGE_TAG=/d;/^IMAGE_NAMESPACE=/d' /app/.env
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> /app/.env
+          if [ -n "$IMAGE_NS" ]; then echo "IMAGE_NAMESPACE=${IMAGE_NS}" >> /app/.env; fi
+
+          # Refresh optional Google OAuth creds without clobbering other vars
+          if [ -n "$GID" ] && [ -n "$GSECRET" ]; then
+            sed -i '/^GOOGLE_CLIENT_ID=/d;/^GOOGLE_CLIENT_SECRET=/d' /app/.env
+            printf 'GOOGLE_CLIENT_ID=%s\nGOOGLE_CLIENT_SECRET=%s\n' "$GID" "$GSECRET" >> /app/.env
+          fi
+
+          # Pull prebuilt images from GHCR (private) and run — no on-box build.
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
+          docker compose --profile tools pull
+          docker compose run --rm migrate
+          docker compose up -d --no-build
+          docker compose ps
+          REMOTE
+      - name: Summary
+        run: |
+          {
+            echo "## Redeployed ✅"
+            echo ""
+            echo "**Image tag:** \`${{ inputs.image_tag }}\`"
+            echo "**URL:** http://${{ vars.DEPLOY_HOST }}/"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Smoke/integration/e2e against the live droplet (parity with the Cloudflare
+  # adapter). post-cd.yml's WEB_URL/API_URL must point at the droplet for the
+  # checks to run; otherwise they no-op on the placeholder URLs.
+  trigger-post-cd:
+    name: Trigger Post-CD
+    needs: deploy
+    # createWorkflowDispatch needs actions:write; the caller (cd.yml) grants it.
+    permissions:
+      contents: read
+      actions: write
+    if: needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger post-cd workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'post-cd.yml',
+              ref: context.ref,
+              inputs: {
+                deployment_sha: context.sha
+              }
+            })
+
+  destroy:
+    name: Destroy droplet
+    if: inputs.action == 'destroy'
+    runs-on: ubuntu-latest
+    env:
+      DROPLET_NAME: ${{ inputs.droplet_name }}
+    steps:
+      - name: Delete droplet by name
+        env:
+          DO_API_TOKEN: ${{ secrets.DO_API_TOKEN }}
+        run: |
+          ID=$(curl -sk "https://api.digitalocean.com/v2/droplets?name=$DROPLET_NAME" \
+            -H "Authorization: Bearer $DO_API_TOKEN" | jq -r '.droplets[0].id // empty')
+          if [ -z "$ID" ]; then
+            echo "No droplet named $DROPLET_NAME found"; exit 0
+          fi
+          curl -sk -X DELETE "https://api.digitalocean.com/v2/droplets/$ID" \
+            -H "Authorization: Bearer $DO_API_TOKEN"
+          echo "## Destroyed droplet $ID 🗑️" >> "$GITHUB_STEP_SUMMARY"

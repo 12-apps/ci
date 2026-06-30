@@ -1,0 +1,117 @@
+name: Deploy · Cloudflare
+
+# Reusable deploy adapter (called by cd.yml). Does NOT build app source — cd.yml's
+# build-static job uploads per-app artifacts; this adapter downloads them and ships
+# via wrangler. Workers build in-adapter (wrangler-native). The targets arrive as
+# JSON inputs from discovery, so it deploys N apps/workers, not a hardcoded one.
+# Enabled by ENABLE_DEPLOY_CLOUDFLARE (gated in cd.yml).
+#
+# Required secrets (only when enabled): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID.
+
+on:
+  workflow_call:
+    inputs:
+      statics:
+        description: 'JSON array of static targets {app,artifact,projectName,...}'
+        type: string
+        required: false
+        default: '[]'
+      workers:
+        description: 'JSON array of worker targets {app,wranglerDir,command,...}'
+        type: string
+        required: false
+        default: '[]'
+
+jobs:
+  validate-secrets:
+    name: Validate Secrets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Cloudflare secrets
+        shell: bash
+        run: |
+          missing=""
+          if [ -z "${{ secrets.CLOUDFLARE_API_TOKEN }}" ]; then missing="CLOUDFLARE_API_TOKEN"; fi
+          if [ -z "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}" ]; then missing="${missing:+$missing, }CLOUDFLARE_ACCOUNT_ID"; fi
+          if [ -n "$missing" ]; then
+            echo "::error::Missing required secrets: $missing"
+            exit 1
+          fi
+          echo "All required secrets are configured"
+
+  deploy-workers:
+    name: Deploy Worker · ${{ matrix.app }}
+    needs: validate-secrets
+    if: ${{ inputs.workers != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(inputs.workers) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - name: Deploy worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: ${{ matrix.wranglerDir }}
+          command: ${{ matrix.command }}
+
+  deploy-pages:
+    name: Deploy Pages · ${{ matrix.app }}
+    needs: validate-secrets
+    if: ${{ inputs.statics != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(inputs.statics) }}
+    steps:
+      - name: Download static artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ./cf-out
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # --branch=main publishes to the production alias; without it wrangler
+          # would treat the upload as a preview deployment.
+          command: pages deploy ./cf-out --project-name=${{ matrix.projectName }} --branch=main
+
+  trigger-post-cd:
+    name: Trigger Post-CD
+    needs: [validate-secrets, deploy-workers, deploy-pages]
+    # createWorkflowDispatch needs actions:write; the caller (cd.yml) grants it.
+    permissions:
+      contents: read
+      actions: write
+    # Only when secrets validated AND at least one deploy actually succeeded —
+    # a deploy skipped by failed secret-validation must not signal a deployment.
+    if: >-
+      !cancelled() && needs.validate-secrets.result == 'success' &&
+      (needs.deploy-workers.result == 'success' || needs.deploy-pages.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger post-cd workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'post-cd.yml',
+              ref: context.ref,
+              inputs: {
+                deployment_sha: context.sha
+              }
+            })

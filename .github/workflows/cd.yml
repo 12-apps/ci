@@ -1,0 +1,165 @@
+name: CD (reusable)
+
+# Reusable CD orchestrator. Consuming repos call this with a ~10-line caller:
+#
+#   jobs:
+#     cd:
+#       uses: 12-apps/ci/.github/workflows/cd.yml@v1
+#       with: { target: all, action: deploy }
+#       secrets: inherit
+#
+# The pipeline runs in the CALLER's checkout, so descriptor discovery
+# (apps/*/deploy/config.json) and the image namespace (from github.repository)
+# resolve to the consumer repo. The engine scripts ship from THIS repo via the
+# discover composite action, so consumers vendor nothing. See CONSUMING.md.
+#
+# Per-vendor deploys are flag-gated by the consumer's repo Variables
+# ENABLE_DEPLOY_DIGITALOCEAN / ENABLE_DEPLOY_CLOUDFLARE.
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: 'Which target(s) to act on: all | digitalocean | cloudflare'
+        type: string
+        required: false
+        default: all
+      action:
+        description: 'deploy | provision | destroy (DigitalOcean honors all three)'
+        type: string
+        required: false
+        default: deploy
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Discover deploy targets from the caller's descriptors → build/deploy matrices.
+  # Skipped only for `destroy` (nothing to build/discover).
+  # ---------------------------------------------------------------------------
+  discover:
+    name: Discover targets
+    if: github.event_name == 'push' || inputs.action != 'destroy'
+    runs-on: ubuntu-latest
+    outputs:
+      image_namespace: ${{ steps.d.outputs.image_namespace }}
+      images: ${{ steps.d.outputs.images }}
+      has_images: ${{ steps.d.outputs.has_images }}
+      statics: ${{ steps.d.outputs.statics }}
+      has_statics: ${{ steps.d.outputs.has_statics }}
+      workers: ${{ steps.d.outputs.workers }}
+      has_workers: ${{ steps.d.outputs.has_workers }}
+    steps:
+      - uses: actions/checkout@v4
+      # Fully-qualified ref (NOT ./) — a reusable workflow resolves ./ against the
+      # caller, so the engine action must be addressed in this repo explicitly.
+      - id: d
+        uses: 12-apps/ci/.github/actions/discover@v1
+        with:
+          target: ${{ inputs.target }}
+
+  # ---------------------------------------------------------------------------
+  # Artifact factory — build & push provider-agnostic container images once.
+  # ---------------------------------------------------------------------------
+  build-images:
+    name: Build image · ${{ matrix.image }}
+    needs: discover
+    if: needs.discover.outputs.has_images == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.images) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
+          push: true
+          tags: |
+            ${{ matrix.ref }}:${{ github.sha }}
+            ${{ matrix.ref }}:main
+          cache-from: type=gha,scope=${{ matrix.cache }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache }}
+
+  # ---------------------------------------------------------------------------
+  # Build static (edge) artifacts for vendors that consume them.
+  # ---------------------------------------------------------------------------
+  build-static:
+    name: Build static · ${{ matrix.app }}
+    needs: discover
+    if: needs.discover.outputs.has_statics == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.statics) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - name: Build static output
+        run: ${{ matrix.command }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.outputPath }}
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # Vendor adapters — thin, flag-gated. One static caller per vendor
+  # (uses: cannot be templated from a matrix value). vars.* reads the CALLER's
+  # repo/org Variables.
+  # ---------------------------------------------------------------------------
+  digitalocean:
+    name: DigitalOcean
+    needs: [discover, build-images]
+    if: >-
+      !cancelled() && needs.build-images.result != 'failure' &&
+      vars.ENABLE_DEPLOY_DIGITALOCEAN == 'true' &&
+      (needs.discover.outputs.has_images == 'true' || inputs.action == 'destroy') &&
+      (github.event_name == 'push' ||
+        inputs.target == 'all' || inputs.target == 'digitalocean')
+    uses: 12-apps/ci/.github/workflows/deploy-digitalocean.yml@v1
+    with:
+      action: ${{ inputs.action }}
+      image_tag: ${{ github.sha }}
+      image_namespace: ${{ needs.discover.outputs.image_namespace }}
+    secrets: inherit
+    concurrency:
+      group: deploy-digitalocean
+      cancel-in-progress: false
+
+  cloudflare:
+    name: Cloudflare
+    needs: [discover, build-static]
+    if: >-
+      !cancelled() && needs.build-static.result != 'failure' &&
+      vars.ENABLE_DEPLOY_CLOUDFLARE == 'true' &&
+      (needs.discover.outputs.has_statics == 'true' || needs.discover.outputs.has_workers == 'true') &&
+      (github.event_name == 'push' ||
+        ((inputs.target == 'all' || inputs.target == 'cloudflare') && inputs.action == 'deploy'))
+    uses: 12-apps/ci/.github/workflows/deploy-cloudflare.yml@v1
+    with:
+      statics: ${{ needs.discover.outputs.statics }}
+      workers: ${{ needs.discover.outputs.workers }}
+    secrets: inherit
+    concurrency:
+      group: deploy-cloudflare
+      cancel-in-progress: false

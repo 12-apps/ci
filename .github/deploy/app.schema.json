@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Deploy app descriptor (apps/*/deploy/config.json)",
+  "description": "Declares how one app deploys: a name + one or more vendor targets. Discovered by scripts/deploy/discover.sh.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "targets"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "name": { "type": "string", "minLength": 1, "description": "App identifier (image-name base / pages project base)." },
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["provider", "build"],
+        "properties": {
+          "provider": { "type": "string", "minLength": 1, "description": "Vendor name; must match a .github/deploy/targets.json entry." },
+          "build": {
+            "type": "object",
+            "description": "Type-discriminated build spec.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "required": ["type", "dockerfile"],
+                "properties": {
+                  "type": { "const": "container" },
+                  "image": { "type": "string", "description": "GHCR image suffix; defaults to the app name." },
+                  "dockerfile": { "type": "string" },
+                  "target": { "type": "string", "description": "Dockerfile build stage; defaults to runner." },
+                  "cache": { "type": "string", "description": "buildx cache scope; defaults to the image name." },
+                  "role": { "enum": ["runner", "migrate"], "description": "How the deploy uses the image." }
+                }
+              },
+              {
+                "additionalProperties": false,
+                "required": ["type", "command", "outputPath"],
+                "properties": {
+                  "type": { "const": "static" },
+                  "command": { "type": "string" },
+                  "outputPath": { "type": "string" }
+                }
+              },
+              {
+                "additionalProperties": false,
+                "required": ["type", "wranglerDir"],
+                "properties": {
+                  "type": { "const": "worker" },
+                  "wranglerDir": { "type": "string" }
+                }
+              }
+            ]
+          },
+          "deploy": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "projectName": { "type": "string", "description": "Static: Pages project name; defaults to the app name." },
+              "command": { "type": "string", "description": "Worker: wrangler subcommand; defaults to deploy." }
+            }
+          }
+        }
+      }
+    }
+  }
+}

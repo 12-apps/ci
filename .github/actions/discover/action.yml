@@ -1,0 +1,45 @@
+name: 'Deploy discovery'
+description: >-
+  Scan the caller repo for per-app deploy descriptors (apps/*/deploy/config.json,
+  plus bare wrangler.toml) and emit the build/deploy matrices cd.yml fans out over.
+  Ships scripts/deploy/discover.sh so consumer repos never vendor it.
+
+inputs:
+  target:
+    description: 'Vendor filter: all | digitalocean | cloudflare'
+    required: false
+    default: all
+
+outputs:
+  image_namespace:
+    description: 'GHCR namespace ghcr.io/<lower(owner/repo)>, derived from GITHUB_REPOSITORY'
+    value: ${{ steps.run.outputs.image_namespace }}
+  images:
+    description: 'JSON array of container build targets'
+    value: ${{ steps.run.outputs.images }}
+  has_images:
+    description: 'true when at least one container target was found'
+    value: ${{ steps.run.outputs.has_images }}
+  statics:
+    description: 'JSON array of static (edge) targets'
+    value: ${{ steps.run.outputs.statics }}
+  has_statics:
+    description: 'true when at least one static target was found'
+    value: ${{ steps.run.outputs.has_statics }}
+  workers:
+    description: 'JSON array of worker targets'
+    value: ${{ steps.run.outputs.workers }}
+  has_workers:
+    description: 'true when at least one worker target was found'
+    value: ${{ steps.run.outputs.has_workers }}
+
+runs:
+  using: composite
+  steps:
+    # discover.sh scans the working directory (the caller's checkout) and writes
+    # the matrices to this step's $GITHUB_OUTPUT, which the outputs above map up.
+    - id: run
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: bash "$GITHUB_ACTION_PATH/../../../scripts/deploy/discover.sh"
