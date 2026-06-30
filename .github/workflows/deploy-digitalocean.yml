@@ -116,12 +116,14 @@ jobs:
             git clone --depth 1 --branch main "$CLONE_URL" /app
           fi
           cd /app
+          # Scrub the token from /app/.git/config on ANY exit — including a git
+          # fetch/reset failure under `set -e`, which would otherwise leave the
+          # token-embedded URL persisted. `rc=$?; … exit $rc` preserves the real
+          # exit code so a failed deploy still fails the job.
+          trap 'rc=$?; git remote set-url origin "$REPO_HTTPS" 2>/dev/null || true; exit $rc' EXIT
           git remote set-url origin "$CLONE_URL"
           git fetch --depth 1 origin main
           git reset --hard origin/main
-          # Don't leave the token sitting in /app/.git/config at rest — point the
-          # remote back at the token-less URL now that the fetch is done.
-          git remote set-url origin "$REPO_HTTPS"
 
           # Create .env ONLY if missing — preserve generated DB password / AUTH_SECRET
           if [ ! -f /app/.env ]; then
