@@ -117,7 +117,10 @@ jobs:
             echo "::error::DOPPLER_TOKEN secret is required — this adapter injects all secrets from the Doppler config." >&2
             exit 1
           fi
-          CLONE_URL=$(printf '%s' "$REPO_HTTPS" | sed "s|https://|https://${GH_TOKEN}@|")
+          # x-access-token: prefix — GitHub Actions/App tokens (ghs_…) authenticate
+          # as the username "x-access-token"; using the token as a bare username
+          # makes git prompt for a password and fail non-interactively (exit 128).
+          CLONE_URL=$(printf '%s' "$REPO_HTTPS" | sed "s|https://|https://x-access-token:${GH_TOKEN}@|")
 
           # The box no longer builds anything — it only needs the compose file and
           # nginx config, so shallow-sync the repo for those.
