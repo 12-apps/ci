@@ -117,6 +117,14 @@ jobs:
             echo "::error::DOPPLER_TOKEN secret is required — this adapter injects all secrets from the Doppler config." >&2
             exit 1
           fi
+
+          # Reclaim disk FIRST — before git or docker write anything. The
+          # persistent box accumulates superseded image tags + build cache, and a
+          # full disk fails even git ("cannot write .git/config.lock"). Removes
+          # unused images/containers/networks + build cache only; named volumes
+          # (postgres_data) are preserved.
+          docker system prune -af || true
+
           # x-access-token: prefix — GitHub Actions/App tokens (ghs_…) authenticate
           # as the username "x-access-token"; using the token as a bare username
           # makes git prompt for a password and fail non-interactively (exit 128).
@@ -148,13 +156,6 @@ jobs:
             echo "IMAGE_TAG=${IMAGE_TAG}"
             [ -n "$IMAGE_NS" ] && echo "IMAGE_NAMESPACE=${IMAGE_NS}"
           } > /app/.env
-
-          # Reclaim disk before pulling — superseded image tags and build cache
-          # pile up on the persistent box and can exhaust the disk mid-extract
-          # ("no space left on device"). Prunes dangling/unused images + build
-          # cache only; named volumes (postgres_data) are NOT touched.
-          docker image prune -af || true
-          docker builder prune -af || true
 
           # Pull prebuilt images from GHCR (private) and run — no on-box build.
           # Secrets are injected into each invocation by `doppler run`.
