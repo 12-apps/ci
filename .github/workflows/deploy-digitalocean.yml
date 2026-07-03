@@ -162,7 +162,12 @@ jobs:
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
           doppler run -- docker compose --profile tools pull
           doppler run -- docker compose run --rm migrate
-          doppler run -- docker compose up -d --no-build
+          # --force-recreate: a plain `up` can leave the old container running when
+          # only the image tag changed (observed: new image pulled + resolved, but
+          # the container stayed on the prior SHA). Force it so the new image
+          # actually goes live. --remove-orphans drops services removed from the
+          # compose file (e.g. the retired redis).
+          doppler run -- docker compose up -d --no-build --force-recreate --remove-orphans
           docker compose ps
           REMOTE
       - name: Summary
