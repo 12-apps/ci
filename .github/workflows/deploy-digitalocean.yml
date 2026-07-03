@@ -2,11 +2,16 @@ name: Deploy · DigitalOcean
 
 # Reusable deploy adapter (called by cd.yml). Does NOT build — it pulls prebuilt
 # GHCR images onto a persistent single droplet and runs the docker-compose stack.
-# Redeploys SSH into the SAME box so postgres_data / redis_data volumes (and the
-# generated .env secrets) survive. Enabled by ENABLE_DEPLOY_DIGITALOCEAN (gated in cd.yml).
+# Redeploys SSH into the SAME box so postgres_data volumes survive.
+# Enabled by ENABLE_DEPLOY_DIGITALOCEAN (gated in cd.yml).
 #
 # Required secrets: DO_API_TOKEN, DO_SSH_PRIVATE_KEY_B64.
-# Optional secrets: GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET.
+#   DOPPLER_TOKEN — REQUIRED for redeploys: a read-scoped Doppler service token.
+#   ALL app secrets (AUTH_*, GOOGLE_*, POSTGRES_*, PAGBANK_*, DATA_ENCRYPTION_KEY,
+#   …) are injected at container start via `doppler run`; NO secret-bearing .env
+#   is written — only non-secret per-deploy image pins go to /app/.env.
+# Optional secrets: GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET — used ONLY by the
+#   one-time provision (cloud-init) path, not by redeploys.
 # Required variable (after first provision): DEPLOY_HOST (droplet public IPv4).
 
 on:
@@ -102,12 +107,16 @@ jobs:
             "${{ inputs.image_tag }}" \
             "${{ inputs.image_namespace }}" \
             "${{ github.server_url }}/${{ github.repository }}.git" \
-            "${{ secrets.GOOGLE_CLIENT_ID }}" \
-            "${{ secrets.GOOGLE_CLIENT_SECRET }}" <<'REMOTE'
+            "${{ secrets.DOPPLER_TOKEN }}" <<'REMOTE'
           set -euo pipefail
-          # Optional trailing args (Google creds) may be empty → ssh drops them,
-          # so default-expand to avoid `$6: unbound variable` under set -u.
-          GH_TOKEN="$1"; GH_ACTOR="$2"; IMAGE_TAG="$3"; IMAGE_NS="${4:-}"; REPO_HTTPS="$5"; GID="${6:-}"; GSECRET="${7:-}"
+          # DOPPLER_TOKEN is the only optional trailing arg (ssh drops it if unset
+          # → default-expand). Every secret comes from the Doppler config, so no
+          # other credential needs to be passed to the box.
+          GH_TOKEN="$1"; GH_ACTOR="$2"; IMAGE_TAG="$3"; IMAGE_NS="${4:-}"; REPO_HTTPS="$5"; DOPPLER_TOKEN="${6:-}"
+          if [ -z "$DOPPLER_TOKEN" ]; then
+            echo "::error::DOPPLER_TOKEN secret is required — this adapter injects all secrets from the Doppler config." >&2
+            exit 1
+          fi
           CLONE_URL=$(printf '%s' "$REPO_HTTPS" | sed "s|https://|https://${GH_TOKEN}@|")
 
           # The box no longer builds anything — it only needs the compose file and
@@ -125,35 +134,24 @@ jobs:
           git fetch --depth 1 origin main
           git reset --hard origin/main
 
-          # Create .env ONLY if missing — preserve generated DB password / AUTH_SECRET
-          if [ ! -f /app/.env ]; then
-            IP=$(curl -sk http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address)
-            cat > /app/.env <<ENVEOF
-          POSTGRES_USER=app
-          POSTGRES_PASSWORD=app_secret_$(openssl rand -hex 8)
-          POSTGRES_DB=app
-          AUTH_SECRET=$(openssl rand -hex 32)
-          AUTH_URL=http://$IP
-          AUTH_TRUST_HOST=true
-          ENVEOF
-          fi
-
-          # Pin the image tag + namespace this deploy should run (replace prior values)
-          sed -i '/^IMAGE_TAG=/d;/^IMAGE_NAMESPACE=/d' /app/.env
-          echo "IMAGE_TAG=${IMAGE_TAG}" >> /app/.env
-          if [ -n "$IMAGE_NS" ]; then echo "IMAGE_NAMESPACE=${IMAGE_NS}" >> /app/.env; fi
-
-          # Refresh optional Google OAuth creds without clobbering other vars
-          if [ -n "$GID" ] && [ -n "$GSECRET" ]; then
-            sed -i '/^GOOGLE_CLIENT_ID=/d;/^GOOGLE_CLIENT_SECRET=/d' /app/.env
-            printf 'GOOGLE_CLIENT_ID=%s\nGOOGLE_CLIENT_SECRET=%s\n' "$GID" "$GSECRET" >> /app/.env
-          fi
+          # Doppler is the single source of truth for secrets — they are injected
+          # at container start by `doppler run`; NO secret-bearing .env is written.
+          # /app/.env is (re)written with ONLY the non-secret per-deploy image pins
+          # that docker compose reads for ${VAR} interpolation. POSTGRES_*/AUTH_*/
+          # GOOGLE_*/PAGBANK_*/etc. all live in the Doppler config now.
+          command -v doppler >/dev/null 2>&1 || curl -Ls https://cli.doppler.com/install.sh | sh
+          export DOPPLER_TOKEN                 # doppler run reads it from the env
+          {
+            echo "IMAGE_TAG=${IMAGE_TAG}"
+            [ -n "$IMAGE_NS" ] && echo "IMAGE_NAMESPACE=${IMAGE_NS}"
+          } > /app/.env
 
           # Pull prebuilt images from GHCR (private) and run — no on-box build.
+          # Secrets are injected into each invocation by `doppler run`.
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
-          docker compose --profile tools pull
-          docker compose run --rm migrate
-          docker compose up -d --no-build
+          doppler run -- docker compose --profile tools pull
+          doppler run -- docker compose run --rm migrate
+          doppler run -- docker compose up -d --no-build
           docker compose ps
           REMOTE
       - name: Summary
