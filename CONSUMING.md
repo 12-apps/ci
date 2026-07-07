@@ -81,6 +81,63 @@ auto-discovered too). See `.github/deploy/README.md` for the full schema.
 Flags default OFF — until a vendor is enabled, the pipeline builds artifacts but
 deploys nothing.
 
+---
+
+# Consuming the Quality gate
+
+Separate from CD: a reusable static-quality + test-reliability gate
+(`quality.yml`). It runs in the CALLER's checkout, so it uses the consumer's own
+config and scripts — the workflow only orchestrates.
+
+## A. Caller job (add to your CI workflow)
+
+```yaml
+  quality:
+    needs: changes            # optional: gate on a paths-filter change-detector
+    if: needs.changes.outputs.code == 'true'
+    # Least-privilege: the quality gate only reads the repo. Grant exactly this
+    # so a combined CI file's broader grants (packages/actions write) don't leak
+    # in. (The reusable workflow also caps itself at contents:read, so this is
+    # belt-and-suspenders — but keep it explicit for reviewers.)
+    permissions:
+      contents: read
+    uses: 12-apps/ci/.github/workflows/quality.yml@v1
+    with:
+      # Command run before the e2e reliability gate (build shared pkgs, etc.).
+      pre-e2e-command: pnpm --filter @repo/shared-helpers build
+    secrets: inherit
+```
+
+Inputs (all optional): `node-version` (default `24`), `run-knip` (default true,
+report-only), `run-e2e-reliability` (default true), `run-affected-e2e` (default
+**false** — opt-in selective e2e), `pre-e2e-command`, `install-playwright`
+(default true), `e2e-repeat` (default `3`).
+
+## B. Required in the consumer repo
+
+`package.json` scripts:
+
+| Script | Purpose |
+|--------|---------|
+| `quality` | `eslint --config eslint.quality.config.mjs .` (complexity/size/nested-loop/cognitive + tiered flakiness) |
+| `quality:dup` | `jscpd …` copy-paste detection |
+| `quality:quarantine` | `node scripts/flaky-quarantine-check.mjs` |
+| `quality:knip` | `knip` (report-only) |
+| `test:e2e:reliability` | `node scripts/e2e-reliability.mjs` (re-run changed specs Nx) |
+| `test:e2e:affected` | `node scripts/e2e-affected.mjs` (run only diff-affected specs) — only if `run-affected-e2e: true` |
+
+Plus these files (copy from any consumer, e.g. `future-pay`): `eslint.quality.config.mjs`,
+`.quality-exceptions` (per-repo grandfather list), `knip.json`,
+`flaky-quarantine.json`, `scripts/e2e-reliability.mjs`,
+`scripts/flaky-quarantine-check.mjs`, `tests/e2e/reporters/flaky-test-reporter.ts`,
+and the devDeps `eslint-plugin-sonarjs`, `eslint-plugin-test-flakiness`, `jscpd`, `knip`.
+For selective e2e (`run-affected-e2e: true`) also copy `scripts/e2e-affected.mjs`
+and add your own `e2e-affected.json` (the per-repo source-path → spec map).
+
+Per-repo (NOT shared): `.quality-exceptions` (grandfathered offenders), the
+jscpd `--threshold` baseline, and `e2e-affected.json` (feature→spec map).
+Everything else is portable.
+
 ## 6. First DigitalOcean provision
 
 Run the caller via **workflow_dispatch** with `action=provision`,
