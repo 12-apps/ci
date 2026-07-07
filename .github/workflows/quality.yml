@@ -1,0 +1,193 @@
+name: Quality (reusable)
+
+# Reusable static-quality + test-reliability gate. Consuming repos add a small caller:
+#
+#   jobs:
+#     quality:
+#       needs: changes
+#       if: needs.changes.outputs.code == 'true'
+#       uses: 12-apps/ci/.github/workflows/quality.yml@v1
+#       with:
+#         pre-e2e-command: pnpm --filter @repo/shared-helpers build
+#       secrets: inherit
+#
+# Runs in the CALLER's checkout, so it uses the consumer repo's own
+# eslint.quality.config.mjs, scripts/, and `quality*` package.json scripts.
+# The consumer must define these scripts: quality, quality:dup,
+# quality:quarantine, quality:knip, test:e2e:reliability (see CONSUMING.md).
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node version for all jobs.'
+        type: string
+        required: false
+        default: '24'
+      run-knip:
+        description: 'Run knip (unused files/exports/deps). Report-only — never fails the gate.'
+        type: boolean
+        required: false
+        default: true
+      run-e2e-reliability:
+        description: 'Re-run changed e2e specs N times to flush flakes.'
+        type: boolean
+        required: false
+        default: true
+      pre-e2e-command:
+        description: 'Shell run before the e2e reliability gate (e.g. build shared packages). Empty to skip.'
+        type: string
+        required: false
+        default: ''
+      install-playwright:
+        description: 'Install Playwright browsers before the reliability gate.'
+        type: boolean
+        required: false
+        default: true
+      e2e-repeat:
+        description: 'Times to re-run each changed e2e spec (retries stay 0).'
+        type: string
+        required: false
+        default: '3'
+
+jobs:
+  quality:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Quality gate (complexity + flakiness lint)
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm quality 2>&1 | tee quality.log
+
+  duplication:
+    name: Duplication
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Copy-paste detection (jscpd)
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm quality:dup 2>&1 | tee jscpd.log
+
+  quarantine:
+    name: Flaky Quarantine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Validate flaky-quarantine.json
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm quality:quarantine 2>&1 | tee quarantine.log
+
+  knip:
+    name: Knip (report-only)
+    if: ${{ inputs.run-knip }}
+    runs-on: ubuntu-latest
+    # Report-only: knip surfaces unused code but does not block merges yet.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Unused files/exports/deps (knip)
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm quality:knip 2>&1 | tee knip.log
+
+  e2e-reliability:
+    name: E2E Reliability
+    if: ${{ inputs.run-e2e-reliability }}
+    runs-on: ubuntu-latest
+    env:
+      # In-process PGlite test DB (matches the consumer's e2e defaults). Override
+      # in the consumer if it runs e2e differently.
+      USE_FILE_DB: '1'
+      AUTH_SECRET: e2e-secret
+      SKIP_ENV_VALIDATION: '1'
+      E2E_RELIABILITY_REPEAT: ${{ inputs.e2e-repeat }}
+      E2E_RELIABILITY_BASE: origin/${{ github.base_ref || 'main' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the script can diff the branch against its base.
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Pre-e2e setup
+        if: ${{ inputs.pre-e2e-command != '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ${{ inputs.pre-e2e-command }} 2>&1 | tee pre-e2e.log
+      - name: Install Playwright
+        if: ${{ inputs.install-playwright }}
+        run: pnpm exec playwright install --with-deps chromium
+      # Self-skips (exit 0) when no e2e specs changed vs the base branch.
+      - name: Re-run changed e2e specs (retries=0)
+        shell: bash
+        run: |
+          set -o pipefail
+          git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF:-main}" || true
+          pnpm test:e2e:reliability 2>&1 | tee e2e-reliability.log
