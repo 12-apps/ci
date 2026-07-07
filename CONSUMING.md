@@ -109,7 +109,7 @@ config and scripts — the workflow only orchestrates.
 ```
 
 Inputs (all optional): `node-version` (default `24`), `run-knip` (default true,
-report-only), `run-e2e-reliability` (default true), `run-affected-e2e` (default
+blocking via the consumer's shrink-only ratchet), `run-e2e-reliability` (default true), `run-affected-e2e` (default
 **false** — opt-in selective e2e), `pre-e2e-command`, `install-playwright`
 (default true), `e2e-repeat` (default `3`).
 
@@ -122,7 +122,7 @@ report-only), `run-e2e-reliability` (default true), `run-affected-e2e` (default
 | `quality` | `eslint --config eslint.quality.config.mjs .` (complexity/size/nested-loop/cognitive + tiered flakiness) |
 | `quality:dup` | `jscpd …` copy-paste detection |
 | `quality:quarantine` | `node scripts/flaky-quarantine-check.mjs` |
-| `quality:knip` | `knip` (report-only) |
+| `quality:knip` | `node scripts/knip-gate.mjs` — knip behind a shrink-only ratchet (`.knip-exceptions.json`); fails only on NEW dead code |
 | `test:e2e:reliability` | `node scripts/e2e-reliability.mjs` (re-run changed specs Nx) |
 | `test:e2e:affected` | `node scripts/e2e-affected.mjs` (run only diff-affected specs) — only if `run-affected-e2e: true` |
 
