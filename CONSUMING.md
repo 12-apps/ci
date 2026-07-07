@@ -95,6 +95,12 @@ config and scripts — the workflow only orchestrates.
   quality:
     needs: changes            # optional: gate on a paths-filter change-detector
     if: needs.changes.outputs.code == 'true'
+    # Least-privilege: the quality gate only reads the repo. Grant exactly this
+    # so a combined CI file's broader grants (packages/actions write) don't leak
+    # in. (The reusable workflow also caps itself at contents:read, so this is
+    # belt-and-suspenders — but keep it explicit for reviewers.)
+    permissions:
+      contents: read
     uses: 12-apps/ci/.github/workflows/quality.yml@v1
     with:
       # Command run before the e2e reliability gate (build shared pkgs, etc.).

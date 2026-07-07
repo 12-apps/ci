@@ -55,6 +55,13 @@ on:
         required: false
         default: '3'
 
+# Least-privilege, enforced at the source: every job here only reads the repo.
+# Capping permissions at the workflow level means a consumer that grants more in
+# a combined CI file (e.g. packages: write, actions: write) cannot leak that
+# privilege into this reusable workflow — the effective grant is the intersection.
+permissions:
+  contents: read
+
 jobs:
   quality:
     name: Quality Gate
@@ -192,7 +199,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF:-main}" || true
+          git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF:-main}"
           pnpm test:e2e:affected 2>&1 | tee e2e-affected.log
 
   e2e-reliability:
@@ -238,5 +245,5 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF:-main}" || true
+          git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF:-main}"
           pnpm test:e2e:reliability 2>&1 | tee e2e-reliability.log
