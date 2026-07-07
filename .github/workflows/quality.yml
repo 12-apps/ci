@@ -34,6 +34,11 @@ on:
         type: boolean
         required: false
         default: true
+      run-affected-e2e:
+        description: 'Run ONLY the e2e specs affected by the diff (needs a test:e2e:affected script + selector/manifest in the consumer). Opt-in.'
+        type: boolean
+        required: false
+        default: false
       pre-e2e-command:
         description: 'Shell run before the e2e reliability gate (e.g. build shared packages). Empty to skip.'
         type: string
@@ -145,6 +150,50 @@ jobs:
         run: |
           set -o pipefail
           pnpm quality:knip 2>&1 | tee knip.log
+
+  e2e-affected:
+    name: E2E (affected only)
+    if: ${{ inputs.run-affected-e2e }}
+    runs-on: ubuntu-latest
+    env:
+      USE_FILE_DB: '1'
+      AUTH_SECRET: e2e-secret
+      SKIP_ENV_VALIDATION: '1'
+      E2E_AFFECTED_BASE: origin/${{ github.base_ref || 'main' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the selector can diff the branch against its base.
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Pre-e2e setup
+        if: ${{ inputs.pre-e2e-command != '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ${{ inputs.pre-e2e-command }} 2>&1 | tee pre-e2e.log
+      - name: Install Playwright
+        if: ${{ inputs.install-playwright }}
+        run: pnpm exec playwright install --with-deps chromium
+      # Runs only the specs the diff affects; full suite on shared/unmapped
+      # changes; nothing on docs-only. Self-skips (exit 0) when nothing is affected.
+      - name: Run affected e2e specs
+        shell: bash
+        run: |
+          set -o pipefail
+          git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF:-main}" || true
+          pnpm test:e2e:affected 2>&1 | tee e2e-affected.log
 
   e2e-reliability:
     name: E2E Reliability

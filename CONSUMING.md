@@ -103,8 +103,9 @@ config and scripts — the workflow only orchestrates.
 ```
 
 Inputs (all optional): `node-version` (default `24`), `run-knip` (default true,
-report-only), `run-e2e-reliability` (default true), `pre-e2e-command`,
-`install-playwright` (default true), `e2e-repeat` (default `3`).
+report-only), `run-e2e-reliability` (default true), `run-affected-e2e` (default
+**false** — opt-in selective e2e), `pre-e2e-command`, `install-playwright`
+(default true), `e2e-repeat` (default `3`).
 
 ## B. Required in the consumer repo
 
@@ -117,15 +118,19 @@ report-only), `run-e2e-reliability` (default true), `pre-e2e-command`,
 | `quality:quarantine` | `node scripts/flaky-quarantine-check.mjs` |
 | `quality:knip` | `knip` (report-only) |
 | `test:e2e:reliability` | `node scripts/e2e-reliability.mjs` (re-run changed specs Nx) |
+| `test:e2e:affected` | `node scripts/e2e-affected.mjs` (run only diff-affected specs) — only if `run-affected-e2e: true` |
 
 Plus these files (copy from any consumer, e.g. `future-pay`): `eslint.quality.config.mjs`,
 `.quality-exceptions` (per-repo grandfather list), `knip.json`,
 `flaky-quarantine.json`, `scripts/e2e-reliability.mjs`,
 `scripts/flaky-quarantine-check.mjs`, `tests/e2e/reporters/flaky-test-reporter.ts`,
 and the devDeps `eslint-plugin-sonarjs`, `eslint-plugin-test-flakiness`, `jscpd`, `knip`.
+For selective e2e (`run-affected-e2e: true`) also copy `scripts/e2e-affected.mjs`
+and add your own `e2e-affected.json` (the per-repo source-path → spec map).
 
-Per-repo (NOT shared): `.quality-exceptions` (grandfathered offenders) and the
-jscpd `--threshold` baseline. Everything else is portable.
+Per-repo (NOT shared): `.quality-exceptions` (grandfathered offenders), the
+jscpd `--threshold` baseline, and `e2e-affected.json` (feature→spec map).
+Everything else is portable.
 
 ## 6. First DigitalOcean provision
 
