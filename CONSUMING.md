@@ -119,14 +119,17 @@ report-only), `run-e2e-reliability` (default true), `run-affected-e2e` (default
 
 | Script | Purpose |
 |--------|---------|
-| `quality` | `eslint --config eslint.quality.config.mjs .` (complexity/size/nested-loop/cognitive + tiered flakiness) |
+| `quality:complexity` | `eslint --config eslint.complexity.config.mjs .` (size/complexity/nested-loop/cognitive on source — also good on pre-commit) |
+| `quality:flakiness` | `eslint --config eslint.flakiness.config.mjs .` (tiered anti-flake lint on tests/specs/stories) |
 | `quality:dup` | `jscpd …` copy-paste detection |
 | `quality:quarantine` | `node scripts/flaky-quarantine-check.mjs` |
 | `quality:knip` | `knip` (report-only) |
 | `test:e2e:reliability` | `node scripts/e2e-reliability.mjs` (re-run changed specs Nx) |
 | `test:e2e:affected` | `node scripts/e2e-affected.mjs` (run only diff-affected specs) — only if `run-affected-e2e: true` |
 
-Plus these files (copy from any consumer, e.g. `future-pay`): `eslint.quality.config.mjs`,
+Plus these files (copy from any consumer, e.g. `future-pay`):
+`eslint.complexity.config.mjs`, `eslint.flakiness.config.mjs`,
+`eslint.quality.shared.mjs` (shared thresholds/ignores/globs/rule sets),
 `.quality-exceptions` (per-repo grandfather list), `knip.json`,
 `flaky-quarantine.json`, `scripts/e2e-reliability.mjs`,
 `scripts/flaky-quarantine-check.mjs`, `tests/e2e/reporters/flaky-test-reporter.ts`,

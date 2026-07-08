@@ -12,9 +12,10 @@ name: Quality (reusable)
 #       secrets: inherit
 #
 # Runs in the CALLER's checkout, so it uses the consumer repo's own
-# eslint.quality.config.mjs, scripts/, and `quality*` package.json scripts.
-# The consumer must define these scripts: quality, quality:dup,
-# quality:quarantine, quality:knip, test:e2e:reliability (see CONSUMING.md).
+# eslint quality configs, scripts/, and `quality*` package.json scripts.
+# The consumer must define these scripts: quality:complexity, quality:flakiness,
+# quality:dup, quality:quarantine, quality:knip, test:e2e:reliability (see
+# CONSUMING.md). The static gate is two jobs — Complexity and Flakiness.
 
 on:
   workflow_call:
@@ -63,8 +64,13 @@ permissions:
   contents: read
 
 jobs:
-  quality:
-    name: Quality Gate
+  # The static-quality gate is split into two independent jobs so each surfaces
+  # as its own status check: COMPLEXITY (size/cyclomatic/cognitive/nested-loop on
+  # first-party source — also runs on the consumer's pre-commit) and FLAKINESS
+  # (tiered anti-flake lint on tests/specs/stories). The consumer must define the
+  # matching quality:complexity + quality:flakiness scripts (see CONSUMING.md).
+  complexity:
+    name: Complexity
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -80,11 +86,34 @@ jobs:
         run: |
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
-      - name: Quality gate (complexity + flakiness lint)
+      - name: Complexity gate (size/complexity on source)
         shell: bash
         run: |
           set -o pipefail
-          pnpm quality 2>&1 | tee quality.log
+          pnpm quality:complexity 2>&1 | tee complexity.log
+
+  flakiness:
+    name: Flakiness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Flakiness gate (anti-flake lint on tests)
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm quality:flakiness 2>&1 | tee flakiness.log
 
   duplication:
     name: Duplication
