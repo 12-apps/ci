@@ -1,0 +1,161 @@
+name: MCP Contract (reusable)
+
+# Reusable MCP-surface contract gate. Consuming repos add a small caller:
+#
+#   jobs:
+#     mcp-contract:
+#       needs: changes
+#       if: needs.changes.outputs.code == 'true'
+#       permissions:
+#         contents: read
+#       uses: 12-apps/ci/.github/workflows/mcp-contract.yml@v1
+#       with:
+#         pre-command: pnpm --filter @repo/mcp build
+#       secrets: inherit
+#
+# Runs in the CALLER's checkout, so it uses the consumer repo's own OpenAPI
+# spec, generated MCP tool manifest, and `mcp:*` package.json scripts. The
+# workflow only orchestrates — every app owns the generation/validation logic
+# behind three scripts (see CONSUMING.md):
+#
+#   mcp:check   — regenerate the MCP tool manifest from the app's OpenAPI and
+#                 FAIL (non-zero exit) if it drifts from the committed artifact.
+#                 This is the load-bearing gate: it guarantees the served MCP
+#                 surface always matches the endpoint surface.
+#   mcp:lint    — static lint of the exposed surface: no secret-bearing fields
+#                 leak into tool schemas, every tool has an input schema, write
+#                 tools are classified, etc. Fails on violation.
+#   mcp:parity  — (opt-in) boot the MCP server in-process against the rendered
+#                 OpenAPI and diff the SERVED tool schemas vs the generated
+#                 manifest. Heavier; off by default.
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node version for all jobs.'
+        type: string
+        required: false
+        default: '24'
+      run-drift:
+        description: 'Regenerate the MCP tool manifest from OpenAPI and fail on drift (mcp:check).'
+        type: boolean
+        required: false
+        default: true
+      run-lint:
+        description: 'Static lint of the exposed MCP surface (mcp:lint): secret-leak + schema-shape.'
+        type: boolean
+        required: false
+        default: true
+      run-parity:
+        description: 'Boot the MCP server in-process and diff served schemas vs the manifest (mcp:parity). Opt-in.'
+        type: boolean
+        required: false
+        default: false
+      pre-command:
+        description: 'Shell run before the gate (e.g. build the MCP package / render the OpenAPI). Empty to skip.'
+        type: string
+        required: false
+        default: ''
+
+# Least-privilege, enforced at the source: every job here only reads the repo.
+# Capping permissions at the workflow level means a consumer that grants more in
+# a combined CI file (e.g. packages: write, actions: write) cannot leak that
+# privilege into this reusable workflow — the effective grant is the intersection.
+permissions:
+  contents: read
+
+jobs:
+  # DRIFT is the primary gate: it proves the generated MCP tool surface still
+  # matches the app's OpenAPI. mcp:check must regenerate and exit non-zero when
+  # the committed manifest is stale (the consumer typically regenerates to a temp
+  # path and `git diff --exit-code`s the committed artifact).
+  drift:
+    name: MCP Drift
+    if: ${{ inputs.run-drift }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Pre-command
+        if: ${{ inputs.pre-command != '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ${{ inputs.pre-command }} 2>&1 | tee pre-command.log
+      - name: MCP manifest drift (regenerate + diff)
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm mcp:check 2>&1 | tee mcp-check.log
+
+  lint:
+    name: MCP Lint
+    if: ${{ inputs.run-lint }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Pre-command
+        if: ${{ inputs.pre-command != '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ${{ inputs.pre-command }} 2>&1 | tee pre-command.log
+      - name: MCP surface lint (secret-leak + schema-shape)
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm mcp:lint 2>&1 | tee mcp-lint.log
+
+  parity:
+    name: MCP Parity
+    if: ${{ inputs.run-parity }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Pre-command
+        if: ${{ inputs.pre-command != '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ${{ inputs.pre-command }} 2>&1 | tee pre-command.log
+      - name: MCP served-schema parity (in-process)
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm mcp:parity 2>&1 | tee mcp-parity.log
