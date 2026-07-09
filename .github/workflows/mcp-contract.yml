@@ -12,6 +12,7 @@ name: MCP Contract (reusable)
 #       uses: 12-apps/ci/.github/workflows/mcp-contract.yml@v1
 #       with:
 #         pre-command: pnpm --filter @repo/mcp build
+#         # github-packages-scope: '@my-org'   # only if you install private GitHub Packages
 #       # NOTE: deliberately NO `secrets: inherit` — see the security note below.
 #
 # SECRETS: this gate needs NONE, and MUST NOT be given any. Every job runs
@@ -67,6 +68,16 @@ on:
         type: string
         required: false
         default: ''
+      github-packages-scope:
+        description: >-
+          npm scope (e.g. @my-org) whose dependencies come from GitHub Packages.
+          When set, each job wires ~/.npmrc to install that scope from
+          npm.pkg.github.com using the job GITHUB_TOKEN (requires packages: read
+          on the caller). Empty (default) = no private-registry wiring; the token
+          is never used and public installs are unaffected.
+        type: string
+        required: false
+        default: ''
 
 # Least-privilege, enforced at the source. The effective grant is the
 # INTERSECTION of these and the caller's job permissions, so a consumer that
@@ -100,6 +111,21 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
           cache: 'pnpm'
+      # Wire ~/.npmrc for private GitHub Packages BEFORE install, using the job's
+      # own GITHUB_TOKEN (packages: read) — NOT an inherited user secret, so the
+      # no-secrets boundary holds. Skipped entirely unless a scope is given, so
+      # public-only consumers are unaffected and the token is never written.
+      - name: Configure GitHub Packages auth
+        if: ${{ inputs.github-packages-scope != '' }}
+        shell: bash
+        env:
+          GH_PKG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          {
+            echo "${{ inputs.github-packages-scope }}:registry=https://npm.pkg.github.com"
+            echo "//npm.pkg.github.com/:_authToken=${GH_PKG_TOKEN}"
+          } >> "$HOME/.npmrc"
       - name: Install dependencies
         shell: bash
         run: |
@@ -130,6 +156,21 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
           cache: 'pnpm'
+      # Wire ~/.npmrc for private GitHub Packages BEFORE install, using the job's
+      # own GITHUB_TOKEN (packages: read) — NOT an inherited user secret, so the
+      # no-secrets boundary holds. Skipped entirely unless a scope is given, so
+      # public-only consumers are unaffected and the token is never written.
+      - name: Configure GitHub Packages auth
+        if: ${{ inputs.github-packages-scope != '' }}
+        shell: bash
+        env:
+          GH_PKG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          {
+            echo "${{ inputs.github-packages-scope }}:registry=https://npm.pkg.github.com"
+            echo "//npm.pkg.github.com/:_authToken=${GH_PKG_TOKEN}"
+          } >> "$HOME/.npmrc"
       - name: Install dependencies
         shell: bash
         run: |
@@ -160,6 +201,21 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
           cache: 'pnpm'
+      # Wire ~/.npmrc for private GitHub Packages BEFORE install, using the job's
+      # own GITHUB_TOKEN (packages: read) — NOT an inherited user secret, so the
+      # no-secrets boundary holds. Skipped entirely unless a scope is given, so
+      # public-only consumers are unaffected and the token is never written.
+      - name: Configure GitHub Packages auth
+        if: ${{ inputs.github-packages-scope != '' }}
+        shell: bash
+        env:
+          GH_PKG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          {
+            echo "${{ inputs.github-packages-scope }}:registry=https://npm.pkg.github.com"
+            echo "//npm.pkg.github.com/:_authToken=${GH_PKG_TOKEN}"
+          } >> "$HOME/.npmrc"
       - name: Install dependencies
         shell: bash
         run: |

@@ -184,14 +184,36 @@ manifest, and lint with no live DB or real credentials. If `mcp:parity` needs
 configuration, pass non-secret test values as plain `env:` on the job.
 
 **Private packages.** If your `pnpm install` pulls **private GitHub Packages**,
-also grant `packages: read` in the caller (shown commented above). The reusable
-workflow allows it as a read-only ceiling; without it the permissions
-intersection strips package access and installs fail with a registry 401/403
-before any check runs. Public-only consumers leave it out.
+you need *both* the permission *and* the registry auth wiring — and both are
+covered:
+
+1. Grant `packages: read` in the caller (commented in the snippet above).
+   Otherwise the permissions intersection strips package access and installs
+   401/403 before any check runs.
+2. Set the `github-packages-scope` input to your scope. Each job then writes
+   `~/.npmrc` pointing that scope at `npm.pkg.github.com` and authenticates with
+   the job's own `GITHUB_TOKEN` **before** install — so no `.npmrc` or token
+   setup is required in your repo, and no user secret is involved.
+
+   ```yaml
+   with:
+     github-packages-scope: '@my-org'
+   ```
+
+Granting `packages: read` **without** setting the scope (or committing your own
+`.npmrc`) still 401/403s — the permission alone does not configure the registry.
+
+Prefer to wire it yourself? Commit an `.npmrc` in your repo mapping the scope to
+`npm.pkg.github.com` with `${NODE_AUTH_TOKEN}` interpolation; it is used as-is and
+you can leave `github-packages-scope` unset. **Cross-org** private packages are
+not readable by the job `GITHUB_TOKEN` — those require a PAT, which (being a user
+secret) must go through your own `.npmrc` wiring, not this input. Public-only
+consumers set neither and are unaffected.
 
 Inputs (all optional): `node-version` (default `24`), `run-drift` (default true),
 `run-lint` (default true), `run-parity` (default **false** — opt-in in-process
-served-schema parity), `pre-command`.
+served-schema parity), `pre-command`, `github-packages-scope` (default empty —
+see Private packages below).
 
 ## B. Required in the consumer repo
 
