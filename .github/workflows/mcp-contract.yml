@@ -1,0 +1,234 @@
+name: MCP Contract (reusable)
+
+# Reusable MCP-surface contract gate. Consuming repos add a small caller:
+#
+#   jobs:
+#     mcp-contract:
+#       needs: changes
+#       if: needs.changes.outputs.code == 'true'
+#       permissions:
+#         contents: read
+#         # packages: read   # add ONLY if pnpm install pulls private GitHub Packages
+#       uses: 12-apps/ci/.github/workflows/mcp-contract.yml@v1
+#       with:
+#         pre-command: pnpm --filter @repo/mcp build
+#         # github-packages-scope: '@my-org'   # only if you install private GitHub Packages
+#       # NOTE: deliberately NO `secrets: inherit` — see the security note below.
+#
+# SECRETS: this gate needs NONE, and MUST NOT be given any. Every job runs
+# consumer-controlled code (dependency install, pre-command, and the mcp:*
+# scripts), so any inherited secret could be exfiltrated by a compromised
+# dependency or script. `permissions: contents: read` scopes only the
+# GITHUB_TOKEN — it does NOT protect env secrets. Withholding `secrets: inherit`
+# is the separate, necessary control. Generate the OpenAPI, run the drift check,
+# and lint OFFLINE (no live DB / real credentials); pass any mcp:parity config as
+# non-secret plain `env:` on the caller job.
+#
+# Runs in the CALLER's checkout, so it uses the consumer repo's own OpenAPI
+# spec, generated MCP tool manifest, and `mcp:*` package.json scripts. The
+# workflow only orchestrates — every app owns the generation/validation logic
+# behind three scripts (see CONSUMING.md):
+#
+#   mcp:check   — regenerate the MCP tool manifest from the app's OpenAPI and
+#                 FAIL (non-zero exit) if it drifts from the committed artifact.
+#                 This is the load-bearing gate: it guarantees the served MCP
+#                 surface always matches the endpoint surface.
+#   mcp:lint    — static lint of the exposed surface: no secret-bearing fields
+#                 leak into tool schemas, every tool has an input schema, write
+#                 tools are classified, etc. Fails on violation.
+#   mcp:parity  — (opt-in) boot the MCP server in-process against the rendered
+#                 OpenAPI and diff the SERVED tool schemas vs the generated
+#                 manifest. Heavier; off by default.
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node version for all jobs.'
+        type: string
+        required: false
+        default: '24'
+      run-drift:
+        description: 'Regenerate the MCP tool manifest from OpenAPI and fail on drift (mcp:check).'
+        type: boolean
+        required: false
+        default: true
+      run-lint:
+        description: 'Static lint of the exposed MCP surface (mcp:lint): secret-leak + schema-shape.'
+        type: boolean
+        required: false
+        default: true
+      run-parity:
+        description: 'Boot the MCP server in-process and diff served schemas vs the manifest (mcp:parity). Opt-in.'
+        type: boolean
+        required: false
+        default: false
+      pre-command:
+        description: 'Shell run before the gate (e.g. build the MCP package / render the OpenAPI). Empty to skip.'
+        type: string
+        required: false
+        default: ''
+      github-packages-scope:
+        description: >-
+          npm scope (e.g. @my-org) whose dependencies come from GitHub Packages.
+          When set, each job wires ~/.npmrc to install that scope from
+          npm.pkg.github.com using the job GITHUB_TOKEN (requires packages: read
+          on the caller). Empty (default) = no private-registry wiring; the token
+          is never used and public installs are unaffected.
+        type: string
+        required: false
+        default: ''
+
+# Least-privilege, enforced at the source. The effective grant is the
+# INTERSECTION of these and the caller's job permissions, so a consumer that
+# grants more in a combined CI file (e.g. contents: write, actions: write) cannot
+# leak that privilege here. Both grants are READ-only.
+#
+# `packages: read` is the CEILING (not an auto-grant): consumers whose
+# `pnpm install` pulls PRIVATE GitHub Packages need it, so it must be allowed
+# here or the intersection would strip it and installs would 401/403. Public-only
+# consumers simply grant `contents: read` in their caller and packages access
+# never takes effect. It cannot enable writes.
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  # DRIFT is the primary gate: it proves the generated MCP tool surface still
+  # matches the app's OpenAPI. mcp:check must regenerate and exit non-zero when
+  # the committed manifest is stale (the consumer typically regenerates to a temp
+  # path and `git diff --exit-code`s the committed artifact).
+  drift:
+    name: MCP Drift
+    if: ${{ inputs.run-drift }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+      # Wire ~/.npmrc for private GitHub Packages BEFORE install, using the job's
+      # own GITHUB_TOKEN (packages: read) — NOT an inherited user secret, so the
+      # no-secrets boundary holds. Skipped entirely unless a scope is given, so
+      # public-only consumers are unaffected and the token is never written.
+      - name: Configure GitHub Packages auth
+        if: ${{ inputs.github-packages-scope != '' }}
+        shell: bash
+        env:
+          GH_PKG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          {
+            echo "${{ inputs.github-packages-scope }}:registry=https://npm.pkg.github.com"
+            echo "//npm.pkg.github.com/:_authToken=${GH_PKG_TOKEN}"
+          } >> "$HOME/.npmrc"
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Pre-command
+        if: ${{ inputs.pre-command != '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ${{ inputs.pre-command }} 2>&1 | tee pre-command.log
+      - name: MCP manifest drift (regenerate + diff)
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm mcp:check 2>&1 | tee mcp-check.log
+
+  lint:
+    name: MCP Lint
+    if: ${{ inputs.run-lint }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+      # Wire ~/.npmrc for private GitHub Packages BEFORE install, using the job's
+      # own GITHUB_TOKEN (packages: read) — NOT an inherited user secret, so the
+      # no-secrets boundary holds. Skipped entirely unless a scope is given, so
+      # public-only consumers are unaffected and the token is never written.
+      - name: Configure GitHub Packages auth
+        if: ${{ inputs.github-packages-scope != '' }}
+        shell: bash
+        env:
+          GH_PKG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          {
+            echo "${{ inputs.github-packages-scope }}:registry=https://npm.pkg.github.com"
+            echo "//npm.pkg.github.com/:_authToken=${GH_PKG_TOKEN}"
+          } >> "$HOME/.npmrc"
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Pre-command
+        if: ${{ inputs.pre-command != '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ${{ inputs.pre-command }} 2>&1 | tee pre-command.log
+      - name: MCP surface lint (secret-leak + schema-shape)
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm mcp:lint 2>&1 | tee mcp-lint.log
+
+  parity:
+    name: MCP Parity
+    if: ${{ inputs.run-parity }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+      # Wire ~/.npmrc for private GitHub Packages BEFORE install, using the job's
+      # own GITHUB_TOKEN (packages: read) — NOT an inherited user secret, so the
+      # no-secrets boundary holds. Skipped entirely unless a scope is given, so
+      # public-only consumers are unaffected and the token is never written.
+      - name: Configure GitHub Packages auth
+        if: ${{ inputs.github-packages-scope != '' }}
+        shell: bash
+        env:
+          GH_PKG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          {
+            echo "${{ inputs.github-packages-scope }}:registry=https://npm.pkg.github.com"
+            echo "//npm.pkg.github.com/:_authToken=${GH_PKG_TOKEN}"
+          } >> "$HOME/.npmrc"
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Pre-command
+        if: ${{ inputs.pre-command != '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ${{ inputs.pre-command }} 2>&1 | tee pre-command.log
+      - name: MCP served-schema parity (in-process)
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm mcp:parity 2>&1 | tee mcp-parity.log

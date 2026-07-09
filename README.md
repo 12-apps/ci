@@ -11,6 +11,8 @@ engine lives in one place and improvements ship to every consumer at once.
 | `.github/workflows/cd.yml` | Reusable CD orchestrator (`workflow_call`): discover → build → flag-gated per-vendor deploy. |
 | `.github/workflows/deploy-digitalocean.yml` | Reusable DigitalOcean adapter (provision / deploy / destroy). |
 | `.github/workflows/deploy-cloudflare.yml` | Reusable Cloudflare adapter (Workers + Pages, fanned out from discovery). |
+| `.github/workflows/quality.yml` | Reusable static-quality + test-reliability gate (`workflow_call`). |
+| `.github/workflows/mcp-contract.yml` | Reusable MCP-surface contract gate (`workflow_call`): drift + surface-lint + optional in-process parity. |
 | `.github/actions/discover` | Composite action wrapping the discovery engine (ships `discover.sh` to consumers). |
 | `.github/actions/do-provision` | Composite action wrapping the droplet cloud-init bootstrap. |
 | `scripts/deploy/` | Discovery engine (`discover.sh` + `lib/common.sh`). |
