@@ -8,10 +8,20 @@ name: MCP Contract (reusable)
 #       if: needs.changes.outputs.code == 'true'
 #       permissions:
 #         contents: read
+#         # packages: read   # add ONLY if pnpm install pulls private GitHub Packages
 #       uses: 12-apps/ci/.github/workflows/mcp-contract.yml@v1
 #       with:
 #         pre-command: pnpm --filter @repo/mcp build
-#       secrets: inherit
+#       # NOTE: deliberately NO `secrets: inherit` — see the security note below.
+#
+# SECRETS: this gate needs NONE, and MUST NOT be given any. Every job runs
+# consumer-controlled code (dependency install, pre-command, and the mcp:*
+# scripts), so any inherited secret could be exfiltrated by a compromised
+# dependency or script. `permissions: contents: read` scopes only the
+# GITHUB_TOKEN — it does NOT protect env secrets. Withholding `secrets: inherit`
+# is the separate, necessary control. Generate the OpenAPI, run the drift check,
+# and lint OFFLINE (no live DB / real credentials); pass any mcp:parity config as
+# non-secret plain `env:` on the caller job.
 #
 # Runs in the CALLER's checkout, so it uses the consumer repo's own OpenAPI
 # spec, generated MCP tool manifest, and `mcp:*` package.json scripts. The
@@ -58,12 +68,19 @@ on:
         required: false
         default: ''
 
-# Least-privilege, enforced at the source: every job here only reads the repo.
-# Capping permissions at the workflow level means a consumer that grants more in
-# a combined CI file (e.g. packages: write, actions: write) cannot leak that
-# privilege into this reusable workflow — the effective grant is the intersection.
+# Least-privilege, enforced at the source. The effective grant is the
+# INTERSECTION of these and the caller's job permissions, so a consumer that
+# grants more in a combined CI file (e.g. contents: write, actions: write) cannot
+# leak that privilege here. Both grants are READ-only.
+#
+# `packages: read` is the CEILING (not an auto-grant): consumers whose
+# `pnpm install` pulls PRIVATE GitHub Packages need it, so it must be allowed
+# here or the intersection would strip it and installs would 401/403. Public-only
+# consumers simply grant `contents: read` in their caller and packages access
+# never takes effect. It cannot enable writes.
 permissions:
   contents: read
+  packages: read
 
 jobs:
   # DRIFT is the primary gate: it proves the generated MCP tool surface still

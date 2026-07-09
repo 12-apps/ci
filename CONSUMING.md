@@ -162,16 +162,32 @@ generated surface never drifts from the endpoint surface.
   mcp-contract:
     needs: changes            # optional: gate on a paths-filter change-detector
     if: needs.changes.outputs.code == 'true'
-    # Least-privilege: the gate only reads the repo. (The reusable workflow also
-    # caps itself at contents:read — belt-and-suspenders, keep it explicit.)
+    # Least-privilege on two axes (see the notes below): a read-only token, and
+    # NO inherited secrets.
     permissions:
       contents: read
+      # packages: read   # add ONLY if pnpm install pulls private GitHub Packages
     uses: 12-apps/ci/.github/workflows/mcp-contract.yml@v1
     with:
       # Build the MCP package / render the OpenAPI before the gate runs.
       pre-command: pnpm --filter @repo/mcp build
-    secrets: inherit
+    # NOTE: intentionally no `secrets: inherit` — this gate needs no secrets.
 ```
+
+**Secrets — pass none.** Do **not** add `secrets: inherit` to this caller. Every
+job runs consumer-controlled code (dependency install, `pre-command`, and the
+`mcp:*` scripts), so any inherited secret could be read by a compromised
+dependency or script. `permissions` scopes only the `GITHUB_TOKEN`, **not** env
+secrets — withholding `secrets: inherit` is the distinct control that protects
+them. Design the scripts to run **offline**: generate the OpenAPI, diff the
+manifest, and lint with no live DB or real credentials. If `mcp:parity` needs
+configuration, pass non-secret test values as plain `env:` on the job.
+
+**Private packages.** If your `pnpm install` pulls **private GitHub Packages**,
+also grant `packages: read` in the caller (shown commented above). The reusable
+workflow allows it as a read-only ceiling; without it the permissions
+intersection strips package access and installs fail with a registry 401/403
+before any check runs. Public-only consumers leave it out.
 
 Inputs (all optional): `node-version` (default `24`), `run-drift` (default true),
 `run-lint` (default true), `run-parity` (default **false** — opt-in in-process
