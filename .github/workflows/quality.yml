@@ -26,7 +26,7 @@ on:
         required: false
         default: '24'
       run-knip:
-        description: 'Run knip (unused files/exports/deps). Report-only — never fails the gate.'
+        description: 'Run knip (unused files/exports/deps) as a blocking gate — the consumer supplies a shrink-only ratchet (quality:knip) so it only fails on NEW dead code.'
         type: boolean
         required: false
         default: true
@@ -162,11 +162,9 @@ jobs:
           pnpm quality:quarantine 2>&1 | tee quarantine.log
 
   knip:
-    name: Knip (report-only)
+    name: Knip
     if: ${{ inputs.run-knip }}
     runs-on: ubuntu-latest
-    # Report-only: knip surfaces unused code but does not block merges yet.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
