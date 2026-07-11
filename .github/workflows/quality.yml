@@ -237,22 +237,37 @@ jobs:
             fail=1
           fi
 
-          # (B) Touch-must-fix: a changed (added/modified/renamed) file that is
-          # still listed must be de-listed (removing its line makes the eslint
-          # gate enforce its fixes).
+          # (B) Touch-must-fix: a changed file that is still listed must be
+          # de-listed (removing its line makes the eslint gate enforce its fixes).
+          # Use --name-status -M (not --name-only) so a RENAMED or DELETED
+          # grandfathered file is caught too: .quality-exceptions holds the OLD
+          # path, but --name-only reports only a rename's NEW path — so the old
+          # listed path would never match and the gate would silently pass,
+          # leaving the file grandfathered. Here we check BOTH sides of a rename
+          # (old + new) and the path of a delete.
           listed_now="$(grep -vE '^\s*(#|$)' .quality-exceptions | sed -E 's/[[:space:]]+$//')"
           offenders=""
-          while IFS= read -r f; do
-            [ -z "$f" ] && continue
-            if printf '%s\n' "$listed_now" | grep -qxF "$f"; then
-              offenders="$offenders  - $f"$'\n'
-            fi
-          done < <(git diff --name-only --diff-filter=ACMR "$merge_base" HEAD)
+          while IFS=$'\t' read -r status p1 p2; do
+            [ -z "$status" ] && continue
+            case "$status" in
+              C*) involved="$p2" ;;            # copy: only the new file is new work
+              R*) involved="$p1"$'\n'"$p2" ;;  # rename: BOTH old (source) and new
+              *)  involved="$p1" ;;            # A / M / D: the single path
+            esac
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              if printf '%s\n' "$listed_now" | grep -qxF "$f"; then
+                offenders="$offenders$f"$'\n'
+              fi
+            done <<< "$involved"
+          done < <(git diff --name-status -M --diff-filter=ACMRD "$merge_base" HEAD)
+          offenders="$(printf '%s' "$offenders" | grep -vE '^[[:space:]]*$' | sort -u || true)"
           if [ -n "$offenders" ]; then
-            echo "::error::You modified files still grandfathered in .quality-exceptions:"
-            printf '%s' "$offenders"
+            echo "::error::You changed files still grandfathered in .quality-exceptions (a rename or delete counts as touching):"
+            printf '%s\n' "$offenders" | sed 's/^/  - /'
             echo "Policy: a touched file must be removed from .quality-exceptions AND have"
-            echo "all its complexity/flakiness issues fixed."
+            echo "all its complexity/flakiness issues fixed. For a rename, remove the OLD"
+            echo "path's line and clean up the new file; for a delete, remove the stale line."
             fail=1
           fi
 
