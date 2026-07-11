@@ -5,11 +5,14 @@ name: Release major tag
 # force-push. This is the counterpart to the README policy: "backwards-compatible
 # changes move v1; a breaking change cuts v2".
 #
-# Breaking changes are SKIPPED automatically: a conventional-commit breaking
-# marker on the merged commit's subject (`type!:` / `type(scope)!:`) or a
-# `BREAKING CHANGE:` footer means v1 is NOT moved — cut the next major (v2) by
-# hand for those. Squash-merge (the repo's default) puts the PR's conventional
-# title on the merge commit, so the marker is visible here.
+# Breaking changes FREEZE v1: the job scans EVERY commit that moving v1 would
+# newly ship — the range (current v1, HEAD] — for a conventional-commit breaking
+# marker (`type!:` / `type(scope)!:` subject, or a `BREAKING CHANGE:` footer). If
+# any is found, v1 is NOT moved (advancing it would leapfrog the break to `@v1`
+# consumers) — cut the next major (v2) by hand. Scanning the whole range (not
+# just HEAD) keeps this correct regardless of how pushes interleave or which run
+# wins, so a compatible commit is never stranded and a breaking one never slips
+# through.
 
 on:
   push:
@@ -19,10 +22,13 @@ on:
 permissions:
   contents: write
 
-# Serialize tag moves so two quick pushes can't race; the latest push wins.
+# Serialize tag moves. cancel-in-progress MUST stay false: cancelling an
+# in-flight compatible run (e.g. when a later breaking push lands) would drop its
+# v1 move, and the later run would exit in the freeze branch — leaving v1 stale.
+# Letting each run finish, combined with the range scan below, is always correct.
 concurrency:
   group: release-major-tag
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   move-major-tag:
@@ -31,19 +37,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Full history so the tag can point at the exact pushed commit.
+          # Full history + tags so we can read v1 and diff the range it would ship.
           fetch-depth: 0
-      - name: Move v1 to this commit (skip breaking changes)
+          fetch-tags: true
+      - name: Move v1 (freeze on any breaking change in the range it would ship)
         shell: bash
         env:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          msg="$(git log -1 --format='%s%n%n%b' "$SHA")"
-          if printf '%s\n' "$msg" | grep -qE '^[a-z]+(\([^)]*\))?!:|^BREAKING CHANGE:'; then
-            echo "Breaking change detected on the merged commit — NOT moving v1."
-            echo "Cut a new major tag (v2) manually for this release."
-            printf '%s\n' "$msg" | head -1 | sed 's/^/  subject: /'
+          breaking_re='^[a-z]+(\([^)]*\))?!:|^BREAKING CHANGE:'
+          # Range moving v1 would newly ship: (current v1, HEAD]. If v1 does not
+          # exist yet, inspect only this commit.
+          if git rev-parse -q --verify refs/tags/v1 >/dev/null; then
+            breaking="$(git log --format='%s%n%b' "$(git rev-parse refs/tags/v1)..$SHA" | grep -E "$breaking_re" || true)"
+          else
+            breaking="$(git log -1 --format='%s%n%b' "$SHA" | grep -E "$breaking_re" || true)"
+          fi
+          if [ -n "$breaking" ]; then
+            echo "Breaking change in the range moving v1 would ship — v1 FROZEN."
+            echo "Cut a new major tag (v2) manually. Offending marker(s):"
+            printf '%s\n' "$breaking" | sed 's/^/  /'
             exit 0
           fi
           git tag -f v1 "$SHA"
