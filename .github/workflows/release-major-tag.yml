@@ -1,0 +1,51 @@
+name: Release major tag
+
+# Auto-advance the moving major tag (v1) whenever a backwards-compatible change
+# lands on main, so consumers pinned to `@v1` pick it up with no manual
+# force-push. This is the counterpart to the README policy: "backwards-compatible
+# changes move v1; a breaking change cuts v2".
+#
+# Breaking changes are SKIPPED automatically: a conventional-commit breaking
+# marker on the merged commit's subject (`type!:` / `type(scope)!:`) or a
+# `BREAKING CHANGE:` footer means v1 is NOT moved — cut the next major (v2) by
+# hand for those. Squash-merge (the repo's default) puts the PR's conventional
+# title on the merge commit, so the marker is visible here.
+
+on:
+  push:
+    branches: [main]
+
+# Least-privilege: this job's only side effect is writing the tag ref.
+permissions:
+  contents: write
+
+# Serialize tag moves so two quick pushes can't race; the latest push wins.
+concurrency:
+  group: release-major-tag
+  cancel-in-progress: true
+
+jobs:
+  move-major-tag:
+    name: Move v1
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the tag can point at the exact pushed commit.
+          fetch-depth: 0
+      - name: Move v1 to this commit (skip breaking changes)
+        shell: bash
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          msg="$(git log -1 --format='%s%n%n%b' "$SHA")"
+          if printf '%s\n' "$msg" | grep -qE '^[a-z]+(\([^)]*\))?!:|^BREAKING CHANGE:'; then
+            echo "Breaking change detected on the merged commit — NOT moving v1."
+            echo "Cut a new major tag (v2) manually for this release."
+            printf '%s\n' "$msg" | head -1 | sed 's/^/  subject: /'
+            exit 0
+          fi
+          git tag -f v1 "$SHA"
+          git push -f origin "refs/tags/v1"
+          echo "✓ Moved v1 -> $SHA"
