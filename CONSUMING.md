@@ -141,6 +141,21 @@ Per-repo (NOT shared): `.quality-exceptions` (grandfathered offenders), the
 jscpd `--threshold` baseline, and `e2e-affected.json` (feature→spec map).
 Everything else is portable.
 
+### `.quality-exceptions` ratchet (automatic)
+
+The **Quality Exceptions Ratchet** job enforces the burn-down with no consumer
+script — it runs whenever the repo has a `.quality-exceptions` file:
+
+- **Shrink-only:** a PR may only REMOVE lines from `.quality-exceptions`, never
+  add them. You cannot grandfather a new file — fix its issues instead.
+- **Touch-must-fix:** if a PR changes a file that is still listed, the line must
+  be removed in the same PR. Removing it makes the complexity/flakiness gate
+  turn that file's findings into hard errors, so touching a grandfathered file
+  forces it to be cleaned up.
+
+Make this check required in branch protection (`Quality (reusable) / Quality
+Exceptions Ratchet`) so the burn-down cannot be bypassed.
+
 ---
 
 # Consuming the MCP contract gate
