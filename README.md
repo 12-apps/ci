@@ -33,6 +33,12 @@ consumer's job token can run private-repo scripts without a dedicated PAT.
 Consumers pin the moving major tag `@v1`. Backwards-compatible changes move
 `v1`; a breaking change cuts `v2`.
 
+`v1` moves **automatically**: `.github/workflows/release-major-tag.yml` re-points
+it to every push on `main` — no manual force-push. Commits marked breaking
+(conventional `type!:` / `type(scope)!:` subject, or a `BREAKING CHANGE:` footer)
+are skipped, so a breaking change never auto-ships to `@v1`; cut `v2` by hand for
+those.
+
 ## Use it
 
 See **[CONSUMING.md](./CONSUMING.md)**.

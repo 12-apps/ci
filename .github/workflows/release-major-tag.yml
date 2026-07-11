@@ -1,0 +1,91 @@
+name: Release major tag
+
+# Auto-advance the moving major tag (v1) so consumers pinned to `@v1` pick up
+# backwards-compatible changes with no manual force-push. Counterpart to the
+# README policy: "backwards-compatible changes move v1; a breaking change cuts v2".
+#
+# Each run is IDEMPOTENT and independent of which push triggered it: it reads
+# main's LIVE tip and the current v1, then advances v1 to the newest commit with
+# NO breaking change between the current v1 and it — i.e. it ships every
+# compatible commit up to, but never across, a breaking change. A breaking commit
+# (conventional `type!:` / `type(scope)!:` subject, or a `BREAKING CHANGE:`
+# footer) freezes v1 at the last compatible commit before it; cut v2 by hand to
+# go further.
+#
+# Computing the target from the live tip (not the triggering commit) makes this
+# correct even when a burst of pushes causes GitHub's concurrency group to drop a
+# pending sibling run: whichever run survives still walks the full range and moves
+# v1 to the last compatible commit, so no compatible commit is ever stranded.
+
+on:
+  push:
+    branches: [main]
+
+# Least-privilege: this job's only side effect is writing the tag ref.
+permissions:
+  contents: write
+
+# Serialize tag moves. cancel-in-progress stays false so a running push always
+# finishes; correctness does not depend on it (each run recomputes the target).
+concurrency:
+  group: release-major-tag
+  cancel-in-progress: false
+
+jobs:
+  move-major-tag:
+    name: Move v1
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history + tags so we can read v1 and walk the range it would ship.
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Advance v1 to the newest commit with no breaking change since v1
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Recompute from main's LIVE tip (a sibling push may be newer than the
+          # commit that triggered this run). Read the freshly-fetched tip from
+          # FETCH_HEAD, NOT origin/main: a bare `git fetch origin main` updates
+          # FETCH_HEAD but can leave the local origin/main tracking ref stale, so
+          # reading origin/main could compute an old tip and strand a commit.
+          # Fail-fast on the fetch (not masked).
+          git fetch --no-tags --quiet origin main
+          tip="$(git rev-parse FETCH_HEAD)"
+          breaking_re='^[a-z]+(\([^)]*\))?!:|^BREAKING CHANGE:'
+          is_breaking() { git log -1 --format='%s%n%b' "$1" | grep -qE "$breaking_re"; }
+
+          if git rev-parse -q --verify refs/tags/v1 >/dev/null; then
+            cur="$(git rev-parse refs/tags/v1)"
+          else
+            cur=""
+          fi
+
+          if [ -z "$cur" ]; then
+            # Bootstrap: create v1 at the tip unless the tip itself is breaking.
+            if is_breaking "$tip"; then
+              echo "No v1 yet and the tip is a breaking change — not creating v1. Cut v2 manually."
+              exit 0
+            fi
+            target="$tip"
+          else
+            # Walk (v1, tip] oldest -> newest; target = the last commit before the
+            # first breaking one (or tip if none). Ships every compatible commit up
+            # to, but never across, a breaking change — so nothing is stranded.
+            target="$cur"
+            while read -r sha; do
+              [ -z "$sha" ] && continue
+              if is_breaking "$sha"; then break; fi
+              target="$sha"
+            done < <(git rev-list --reverse "$cur..$tip")
+          fi
+
+          if [ "$target" = "$cur" ]; then
+            echo "v1 already at the newest shippable commit, or frozen just before a"
+            echo "breaking change. No move — cut v2 manually to release past a break."
+            exit 0
+          fi
+          git tag -f v1 "$target"
+          git push -f origin "refs/tags/v1"
+          echo "✓ Moved v1 -> $target"
