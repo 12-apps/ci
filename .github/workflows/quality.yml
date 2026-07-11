@@ -15,7 +15,9 @@ name: Quality (reusable)
 # eslint quality configs, scripts/, and `quality*` package.json scripts.
 # The consumer must define these scripts: quality:complexity, quality:flakiness,
 # quality:dup, quality:quarantine, quality:knip, test:e2e:reliability (see
-# CONSUMING.md). The static gate is two jobs — Complexity and Flakiness.
+# CONSUMING.md). The static gate is two eslint jobs — Complexity and Flakiness —
+# plus a self-contained Quality Exceptions Ratchet job that enforces the
+# `.quality-exceptions` burn-down (shrink-only + touch-must-fix).
 
 on:
   workflow_call:
@@ -184,6 +186,93 @@ jobs:
         run: |
           set -o pipefail
           pnpm quality:knip 2>&1 | tee knip.log
+
+  # Enforce the `.quality-exceptions` burn-down policy on every PR:
+  #   (A) shrink-only — the file may LOSE lines, never gain them, so a new file
+  #       can never be grandfathered (fix it instead of listing it);
+  #   (B) touch-must-fix — a changed file that is STILL listed must be removed
+  #       from the list, at which point the complexity/flakiness gate makes its
+  #       findings hard errors. So you cannot touch a grandfathered file and
+  #       leave it grandfathered.
+  # Self-contained (pure git + bash); needs no consumer script. No-ops when the
+  # repo has no `.quality-exceptions` file.
+  exceptions-ratchet:
+    name: Quality Exceptions Ratchet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so we can diff the branch against its base.
+          fetch-depth: 0
+      - name: Enforce .quality-exceptions burn-down (shrink-only + touch-must-fix)
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: |
+          set -o pipefail
+          if [ ! -f .quality-exceptions ]; then
+            echo "No .quality-exceptions file — nothing to enforce."
+            exit 0
+          fi
+          # Fail-fast on the diff baseline (never masked): we must have the base.
+          git fetch --no-tags origin "$BASE_REF"
+          merge_base="$(git merge-base "origin/$BASE_REF" HEAD)" || {
+            echo "::error::Could not compute merge-base with origin/$BASE_REF"
+            exit 1
+          }
+
+          fail=0
+
+          # (A) Shrink-only: any ADDED non-comment line in .quality-exceptions is a
+          # new grandfather entry — forbidden.
+          added="$(
+            git diff "$merge_base" HEAD -- .quality-exceptions \
+              | grep -E '^\+' | grep -vE '^\+\+\+' | sed -E 's/^\+//' \
+              | sed -E 's/[[:space:]]+$//' | grep -vE '^\s*(#|$)' || true
+          )"
+          if [ -n "$added" ]; then
+            echo "::error::.quality-exceptions may only shrink, never grow. Lines ADDED:"
+            printf '%s\n' "$added" | sed 's/^/  + /'
+            echo "You cannot grandfather a file — fix its issues instead of listing it."
+            fail=1
+          fi
+
+          # (B) Touch-must-fix: a changed file that is still listed must be
+          # de-listed (removing its line makes the eslint gate enforce its fixes).
+          # Use --name-status -M (not --name-only) so a RENAMED or DELETED
+          # grandfathered file is caught too: .quality-exceptions holds the OLD
+          # path, but --name-only reports only a rename's NEW path — so the old
+          # listed path would never match and the gate would silently pass,
+          # leaving the file grandfathered. Here we check BOTH sides of a rename
+          # (old + new) and the path of a delete.
+          listed_now="$(grep -vE '^\s*(#|$)' .quality-exceptions | sed -E 's/[[:space:]]+$//')"
+          offenders=""
+          while IFS=$'\t' read -r status p1 p2; do
+            [ -z "$status" ] && continue
+            case "$status" in
+              C*) involved="$p2" ;;            # copy: only the new file is new work
+              R*) involved="$p1"$'\n'"$p2" ;;  # rename: BOTH old (source) and new
+              *)  involved="$p1" ;;            # A / M / D: the single path
+            esac
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              if printf '%s\n' "$listed_now" | grep -qxF "$f"; then
+                offenders="$offenders$f"$'\n'
+              fi
+            done <<< "$involved"
+          done < <(git diff --name-status -M --diff-filter=ACMRD "$merge_base" HEAD)
+          offenders="$(printf '%s' "$offenders" | grep -vE '^[[:space:]]*$' | sort -u || true)"
+          if [ -n "$offenders" ]; then
+            echo "::error::You changed files still grandfathered in .quality-exceptions (a rename or delete counts as touching):"
+            printf '%s\n' "$offenders" | sed 's/^/  - /'
+            echo "Policy: a touched file must be removed from .quality-exceptions AND have"
+            echo "all its complexity/flakiness issues fixed. For a rename, remove the OLD"
+            echo "path's line and clean up the new file; for a delete, remove the stale line."
+            fail=1
+          fi
+
+          if [ "$fail" -ne 0 ]; then exit 1; fi
+          echo "✓ .quality-exceptions ratchet OK (shrink-only; no touched file left grandfathered)."
 
   e2e-affected:
     name: E2E (affected only)
