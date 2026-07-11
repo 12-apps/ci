@@ -46,9 +46,13 @@ jobs:
         run: |
           set -euo pipefail
           # Recompute from main's LIVE tip (a sibling push may be newer than the
-          # commit that triggered this run). Fail-fast on the fetch (not masked).
+          # commit that triggered this run). Read the freshly-fetched tip from
+          # FETCH_HEAD, NOT origin/main: a bare `git fetch origin main` updates
+          # FETCH_HEAD but can leave the local origin/main tracking ref stale, so
+          # reading origin/main could compute an old tip and strand a commit.
+          # Fail-fast on the fetch (not masked).
           git fetch --no-tags --quiet origin main
-          tip="$(git rev-parse origin/main)"
+          tip="$(git rev-parse FETCH_HEAD)"
           breaking_re='^[a-z]+(\([^)]*\))?!:|^BREAKING CHANGE:'
           is_breaking() { git log -1 --format='%s%n%b' "$1" | grep -qE "$breaking_re"; }
 
