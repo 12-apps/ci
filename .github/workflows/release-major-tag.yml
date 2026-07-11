@@ -1,18 +1,21 @@
 name: Release major tag
 
-# Auto-advance the moving major tag (v1) whenever a backwards-compatible change
-# lands on main, so consumers pinned to `@v1` pick it up with no manual
-# force-push. This is the counterpart to the README policy: "backwards-compatible
-# changes move v1; a breaking change cuts v2".
+# Auto-advance the moving major tag (v1) so consumers pinned to `@v1` pick up
+# backwards-compatible changes with no manual force-push. Counterpart to the
+# README policy: "backwards-compatible changes move v1; a breaking change cuts v2".
 #
-# Breaking changes FREEZE v1: the job scans EVERY commit that moving v1 would
-# newly ship — the range (current v1, HEAD] — for a conventional-commit breaking
-# marker (`type!:` / `type(scope)!:` subject, or a `BREAKING CHANGE:` footer). If
-# any is found, v1 is NOT moved (advancing it would leapfrog the break to `@v1`
-# consumers) — cut the next major (v2) by hand. Scanning the whole range (not
-# just HEAD) keeps this correct regardless of how pushes interleave or which run
-# wins, so a compatible commit is never stranded and a breaking one never slips
-# through.
+# Each run is IDEMPOTENT and independent of which push triggered it: it reads
+# main's LIVE tip and the current v1, then advances v1 to the newest commit with
+# NO breaking change between the current v1 and it — i.e. it ships every
+# compatible commit up to, but never across, a breaking change. A breaking commit
+# (conventional `type!:` / `type(scope)!:` subject, or a `BREAKING CHANGE:`
+# footer) freezes v1 at the last compatible commit before it; cut v2 by hand to
+# go further.
+#
+# Computing the target from the live tip (not the triggering commit) makes this
+# correct even when a burst of pushes causes GitHub's concurrency group to drop a
+# pending sibling run: whichever run survives still walks the full range and moves
+# v1 to the last compatible commit, so no compatible commit is ever stranded.
 
 on:
   push:
@@ -22,10 +25,8 @@ on:
 permissions:
   contents: write
 
-# Serialize tag moves. cancel-in-progress MUST stay false: cancelling an
-# in-flight compatible run (e.g. when a later breaking push lands) would drop its
-# v1 move, and the later run would exit in the freeze branch — leaving v1 stale.
-# Letting each run finish, combined with the range scan below, is always correct.
+# Serialize tag moves. cancel-in-progress stays false so a running push always
+# finishes; correctness does not depend on it (each run recomputes the target).
 concurrency:
   group: release-major-tag
   cancel-in-progress: false
@@ -37,29 +38,50 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Full history + tags so we can read v1 and diff the range it would ship.
+          # Full history + tags so we can read v1 and walk the range it would ship.
           fetch-depth: 0
           fetch-tags: true
-      - name: Move v1 (freeze on any breaking change in the range it would ship)
+      - name: Advance v1 to the newest commit with no breaking change since v1
         shell: bash
-        env:
-          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          # Recompute from main's LIVE tip (a sibling push may be newer than the
+          # commit that triggered this run). Fail-fast on the fetch (not masked).
+          git fetch --no-tags --quiet origin main
+          tip="$(git rev-parse origin/main)"
           breaking_re='^[a-z]+(\([^)]*\))?!:|^BREAKING CHANGE:'
-          # Range moving v1 would newly ship: (current v1, HEAD]. If v1 does not
-          # exist yet, inspect only this commit.
+          is_breaking() { git log -1 --format='%s%n%b' "$1" | grep -qE "$breaking_re"; }
+
           if git rev-parse -q --verify refs/tags/v1 >/dev/null; then
-            breaking="$(git log --format='%s%n%b' "$(git rev-parse refs/tags/v1)..$SHA" | grep -E "$breaking_re" || true)"
+            cur="$(git rev-parse refs/tags/v1)"
           else
-            breaking="$(git log -1 --format='%s%n%b' "$SHA" | grep -E "$breaking_re" || true)"
+            cur=""
           fi
-          if [ -n "$breaking" ]; then
-            echo "Breaking change in the range moving v1 would ship — v1 FROZEN."
-            echo "Cut a new major tag (v2) manually. Offending marker(s):"
-            printf '%s\n' "$breaking" | sed 's/^/  /'
+
+          if [ -z "$cur" ]; then
+            # Bootstrap: create v1 at the tip unless the tip itself is breaking.
+            if is_breaking "$tip"; then
+              echo "No v1 yet and the tip is a breaking change — not creating v1. Cut v2 manually."
+              exit 0
+            fi
+            target="$tip"
+          else
+            # Walk (v1, tip] oldest -> newest; target = the last commit before the
+            # first breaking one (or tip if none). Ships every compatible commit up
+            # to, but never across, a breaking change — so nothing is stranded.
+            target="$cur"
+            while read -r sha; do
+              [ -z "$sha" ] && continue
+              if is_breaking "$sha"; then break; fi
+              target="$sha"
+            done < <(git rev-list --reverse "$cur..$tip")
+          fi
+
+          if [ "$target" = "$cur" ]; then
+            echo "v1 already at the newest shippable commit, or frozen just before a"
+            echo "breaking change. No move — cut v2 manually to release past a break."
             exit 0
           fi
-          git tag -f v1 "$SHA"
+          git tag -f v1 "$target"
           git push -f origin "refs/tags/v1"
-          echo "✓ Moved v1 -> $SHA"
+          echo "✓ Moved v1 -> $target"
