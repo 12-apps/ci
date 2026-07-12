@@ -36,6 +36,13 @@ name: MCP Contract (reusable)
 #   mcp:lint    — static lint of the exposed surface: no secret-bearing fields
 #                 leak into tool schemas, every tool has an input schema, write
 #                 tools are classified, etc. Fails on violation.
+#   mcp:coverage — route/action coverage: every HTTP route the app serves is
+#                 registered on the MCP surface (or on a documented infra
+#                 allowlist), and every server action maps to a registered
+#                 operation or a reviewed exclusion. Completeness, where
+#                 mcp:check is only non-drift. Runs when the consumer defines
+#                 the script; skips with a notice otherwise, so rolling this
+#                 job out via the floating major tag breaks no caller.
 #   mcp:parity  — (opt-in) boot the MCP server in-process against the rendered
 #                 OpenAPI and diff the SERVED tool schemas vs the generated
 #                 manifest. Heavier; off by default.
@@ -55,6 +62,15 @@ on:
         default: true
       run-lint:
         description: 'Static lint of the exposed MCP surface (mcp:lint): secret-leak + schema-shape.'
+        type: boolean
+        required: false
+        default: true
+      run-coverage:
+        description: >-
+          Route/action coverage of the MCP surface (mcp:coverage). On by default,
+          but the job self-skips (with a notice) when the consumer does not define
+          the script — so existing callers on the floating major tag are unaffected
+          until they adopt it.
         type: boolean
         required: false
         default: true
@@ -187,6 +203,60 @@ jobs:
         run: |
           set -o pipefail
           pnpm mcp:lint 2>&1 | tee mcp-lint.log
+
+  # COVERAGE makes the surface COMPLETE where drift only keeps it honest: every
+  # served route must be registered (or explicitly allowlisted as infra) and
+  # every server action mapped or excluded with a reason. The script-existence
+  # probe keeps the job non-breaking for consumers that have not adopted
+  # mcp:coverage yet — they see a skip notice, not a failure.
+  coverage:
+    name: MCP Coverage
+    if: ${{ inputs.run-coverage }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+      # Wire ~/.npmrc for private GitHub Packages BEFORE install, using the job's
+      # own GITHUB_TOKEN (packages: read) — NOT an inherited user secret, so the
+      # no-secrets boundary holds. Skipped entirely unless a scope is given, so
+      # public-only consumers are unaffected and the token is never written.
+      - name: Configure GitHub Packages auth
+        if: ${{ inputs.github-packages-scope != '' }}
+        shell: bash
+        env:
+          GH_PKG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          {
+            echo "${{ inputs.github-packages-scope }}:registry=https://npm.pkg.github.com"
+            echo "//npm.pkg.github.com/:_authToken=${GH_PKG_TOKEN}"
+          } >> "$HOME/.npmrc"
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Pre-command
+        if: ${{ inputs.pre-command != '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ${{ inputs.pre-command }} 2>&1 | tee pre-command.log
+      - name: MCP route/action coverage
+        shell: bash
+        run: |
+          set -o pipefail
+          if node -e "const s=require('./package.json').scripts||{};process.exit(s['mcp:coverage']?0:1)"; then
+            pnpm mcp:coverage 2>&1 | tee mcp-coverage.log
+          else
+            echo "::notice::mcp:coverage script not defined — skipping (see CONSUMING.md to adopt the coverage gate)"
+          fi
 
   parity:
     name: MCP Parity
