@@ -215,10 +215,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Probe FIRST, before any install/pre-command: a consumer that has not
+      # adopted mcp:coverage must get the promised skip notice without paying
+      # for — or failing on — the heavy setup steps. Uses only the checkout and
+      # the runner's preinstalled node.
+      - name: Probe for mcp:coverage script
+        id: probe
+        shell: bash
+        run: |
+          set -o pipefail
+          if node -e "const s=require('./package.json').scripts||{};process.exit(s['mcp:coverage']?0:1)"; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::mcp:coverage script not defined — skipping (see CONSUMING.md to adopt the coverage gate)"
+          fi
       - uses: pnpm/action-setup@v4
+        if: ${{ steps.probe.outputs.present == 'true' }}
         with:
           run_install: false
       - uses: actions/setup-node@v4
+        if: ${{ steps.probe.outputs.present == 'true' }}
         with:
           node-version: ${{ inputs.node-version }}
           cache: 'pnpm'
@@ -227,7 +244,7 @@ jobs:
       # no-secrets boundary holds. Skipped entirely unless a scope is given, so
       # public-only consumers are unaffected and the token is never written.
       - name: Configure GitHub Packages auth
-        if: ${{ inputs.github-packages-scope != '' }}
+        if: ${{ steps.probe.outputs.present == 'true' && inputs.github-packages-scope != '' }}
         shell: bash
         env:
           GH_PKG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -238,25 +255,23 @@ jobs:
             echo "//npm.pkg.github.com/:_authToken=${GH_PKG_TOKEN}"
           } >> "$HOME/.npmrc"
       - name: Install dependencies
+        if: ${{ steps.probe.outputs.present == 'true' }}
         shell: bash
         run: |
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
       - name: Pre-command
-        if: ${{ inputs.pre-command != '' }}
+        if: ${{ steps.probe.outputs.present == 'true' && inputs.pre-command != '' }}
         shell: bash
         run: |
           set -o pipefail
           ${{ inputs.pre-command }} 2>&1 | tee pre-command.log
       - name: MCP route/action coverage
+        if: ${{ steps.probe.outputs.present == 'true' }}
         shell: bash
         run: |
           set -o pipefail
-          if node -e "const s=require('./package.json').scripts||{};process.exit(s['mcp:coverage']?0:1)"; then
-            pnpm mcp:coverage 2>&1 | tee mcp-coverage.log
-          else
-            echo "::notice::mcp:coverage script not defined — skipping (see CONSUMING.md to adopt the coverage gate)"
-          fi
+          pnpm mcp:coverage 2>&1 | tee mcp-coverage.log
 
   parity:
     name: MCP Parity
