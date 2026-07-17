@@ -318,8 +318,9 @@ jobs:
           const { join } = require("node:path");
           const PAGE = /^page\.(js|jsx|ts|tsx)$/;
           const LOADING = /^loading\.(js|jsx|ts|tsx)$/;
-          // api/ has no UI; _private and dot folders are not route segments.
-          const SKIP = new Set(["api", "node_modules", "__tests__"]);
+          // api/ segments have no UI; node_modules is never a route. (_private
+          // and dot folders are excluded separately in the directory loop.)
+          const SKIP = new Set(["api", "node_modules"]);
           const roots = process.env.APP_DIRS.split(/[\s,]+/).filter(Boolean);
           const mustRender = process.env.MUST_RENDER || "";
           const failures = [];
