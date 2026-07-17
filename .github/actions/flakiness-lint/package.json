@@ -1,0 +1,14 @@
+{
+  "name": "@12-apps-ci/flakiness-lint",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned eslint + test-flakiness toolchain for the flakiness-lint composite action. This is the single source of truth for the anti-flake ruleset; consumers no longer carry these devDeps.",
+  "type": "module",
+  "dependencies": {
+    "@typescript-eslint/eslint-plugin": "^8.44.0",
+    "@typescript-eslint/parser": "^8.44.0",
+    "eslint": "^9.35.0",
+    "eslint-plugin-test-flakiness": "^1.4.0",
+    "globals": "^16.4.0"
+  }
+}

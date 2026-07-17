@@ -1,0 +1,47 @@
+name: 'Flakiness lint (central)'
+description: >-
+  Tiered anti-flake ESLint gate whose ruleset + runner + toolchain live ONLY in
+  12-apps/ci. Runs against the consumer's checkout using the consumer's
+  repo-specific eslint-suppressions.json baseline, so updating the rules here
+  updates every consuming repo on its next CI run — no per-repo copies.
+
+inputs:
+  node-version:
+    description: 'Node version used to run the pinned eslint toolchain.'
+    required: false
+    default: '24'
+  targets:
+    description: 'Space-separated lint targets in the consumer checkout (e.g. "apps packages" or ".").'
+    required: false
+    default: '.'
+  working-directory:
+    description: 'Consumer checkout root (holds the tests + eslint-suppressions.json).'
+    required: false
+    default: '.'
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+    # Install the pinned eslint + test-flakiness toolchain INSIDE the action dir.
+    # The config's plugin imports resolve from THIS node_modules — the consumer
+    # needs none of these devDeps.
+    - name: Install flakiness toolchain (provider-pinned)
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: |
+        set -o pipefail
+        npm install --no-audit --no-fund --no-package-lock 2>&1 | tee flakiness-toolchain-install.log
+    - name: Flakiness gate (anti-flake lint on tests)
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        FLAKINESS_ROOT: ${{ github.workspace }}/${{ inputs.working-directory }}
+        FLAKINESS_CONFIG: ${{ github.action_path }}/eslint.flakiness.config.mjs
+        FLAKINESS_ESLINT_BIN: ${{ github.action_path }}/node_modules/eslint/bin/eslint.js
+        FLAKINESS_TARGETS: ${{ inputs.targets }}
+      run: |
+        set -o pipefail
+        node "${{ github.action_path }}/lint-flakiness-baseline.mjs" 2>&1 | tee flakiness.log
