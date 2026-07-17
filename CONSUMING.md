@@ -111,7 +111,23 @@ config and scripts — the workflow only orchestrates.
 Inputs (all optional): `node-version` (default `24`), `run-knip` (default true,
 blocking via the consumer's shrink-only ratchet), `run-e2e-reliability` (default true), `run-affected-e2e` (default
 **false** — opt-in selective e2e), `pre-e2e-command`, `install-playwright`
-(default true), `e2e-repeat` (default `3`).
+(default true), `e2e-repeat` (default `3`), `nextjs-app-dirs` (default empty —
+opt-in loading-coverage gate), `loading-must-render` (default empty).
+
+### Next.js loading-coverage gate (opt-in)
+
+In the App Router, a route segment shipping a `page.*` without a `loading.*`
+renders NOTHING while the segment streams (prod) or compiles on demand (dev).
+Point `nextjs-app-dirs` at your App Router root(s) and every `page.*` must have
+a sibling `loading.*`; optionally set `loading-must-render` to a shared spinner
+component name so an empty placeholder can't satisfy the gate. Needs no scripts
+or install in the consumer — the gate only walks the checkout.
+
+```yaml
+    with:
+      nextjs-app-dirs: apps/web/app
+      loading-must-render: RouteLoading
+```
 
 ## B. Required in the consumer repo
 

@@ -57,6 +57,22 @@ on:
         type: string
         required: false
         default: '3'
+      nextjs-app-dirs:
+        description: >-
+          Comma-separated Next.js App Router roots (e.g. "apps/web/app") to
+          enforce navigation-feedback coverage on: every route segment shipping a
+          page.* must ship a sibling loading.*. Empty (default) skips the gate.
+        type: string
+        required: false
+        default: ''
+      loading-must-render:
+        description: >-
+          Optional component name every loading.* must reference (e.g. a shared
+          RouteLoading spinner) so coverage cannot be satisfied by an empty
+          placeholder file. Empty skips the content check.
+        type: string
+        required: false
+        default: ''
 
 # Least-privilege, enforced at the source: every job here only reads the repo.
 # Capping permissions at the workflow level means a consumer that grants more in
@@ -273,6 +289,93 @@ jobs:
 
           if [ "$fail" -ne 0 ]; then exit 1; fi
           echo "✓ .quality-exceptions ratchet OK (shrink-only; no touched file left grandfathered)."
+
+  # In the Next.js App Router, a route segment that ships a page.* without a
+  # loading.* renders NOTHING while the segment streams (prod) or compiles on
+  # demand (dev) — the user stares at a frozen screen. This gate enforces that
+  # every page has instant loading feedback. No install needed: it only walks
+  # the checkout. Opt in with nextjs-app-dirs; optionally require each
+  # loading.* to reference a shared spinner via loading-must-render (an
+  # existence-only check could be satisfied by an empty placeholder).
+  nextjs-loading:
+    name: Next.js Loading Coverage
+    if: ${{ inputs.nextjs-app-dirs != '' }}
+    runs-on: ubuntu-latest
+    env:
+      APP_DIRS: ${{ inputs.nextjs-app-dirs }}
+      MUST_RENDER: ${{ inputs.loading-must-render }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Enforce page.* ↔ loading.* coverage
+        shell: bash
+        run: |
+          set -o pipefail
+          node <<'EOF'
+          const { readdirSync, readFileSync } = require("node:fs");
+          const { join } = require("node:path");
+          const PAGE = /^page\.(js|jsx|ts|tsx)$/;
+          const LOADING = /^loading\.(js|jsx|ts|tsx)$/;
+          // api/ segments have no UI; node_modules is never a route. (_private
+          // and dot folders are excluded separately in the directory loop.)
+          const SKIP = new Set(["api", "node_modules"]);
+          // Comma-only: paths may contain spaces, so comma is the separator.
+          const roots = process.env.APP_DIRS.split(",").map((r) => r.trim()).filter(Boolean);
+          const mustRender = process.env.MUST_RENDER || "";
+          const failures = [];
+          let pages = 0;
+          function walk(dir) {
+            let entries;
+            try {
+              entries = readdirSync(dir, { withFileTypes: true });
+            } catch {
+              failures.push(`${dir}: unreadable — check the nextjs-app-dirs input`);
+              return;
+            }
+            const files = entries.filter((e) => e.isFile()).map((e) => e.name);
+            const page = files.find((f) => PAGE.test(f));
+            if (page) {
+              pages += 1;
+              const loading = files.find((f) => LOADING.test(f));
+              if (!loading) {
+                failures.push(
+                  `${join(dir, page)}: no sibling loading.* — this segment renders nothing while it streams/compiles`,
+                );
+              } else if (
+                mustRender &&
+                !readFileSync(join(dir, loading), "utf8").includes(mustRender)
+              ) {
+                failures.push(`${join(dir, loading)}: does not reference ${mustRender}`);
+              }
+            }
+            for (const e of entries) {
+              if (!e.isDirectory()) continue;
+              if (SKIP.has(e.name) || e.name.startsWith("_") || e.name.startsWith(".")) continue;
+              walk(join(dir, e.name));
+            }
+          }
+          roots.forEach(walk);
+          // Flush failures before the zero-pages exit so unreadable-directory
+          // diagnostics are not swallowed by the generic "no page.*" error.
+          for (const f of failures) console.error(`::error::${f}`);
+          if (pages === 0) {
+            // Zero pages means the input points at the wrong place — fail loud
+            // rather than green-lighting a gate that inspected nothing.
+            console.error(`::error::no page.* found under: ${roots.join(" ")} — check nextjs-app-dirs`);
+            process.exit(1);
+          }
+          if (failures.length > 0) {
+            console.error(
+              `${failures.length} of ${pages} route segment(s) lack loading feedback. ` +
+                "Add a loading.tsx beside each page" +
+                (mustRender ? ` rendering ${mustRender}.` : "."),
+            );
+            process.exit(1);
+          }
+          console.log(`OK: ${pages} route segment(s) covered by loading.* under: ${roots.join(" ")}`);
+          EOF
 
   e2e-affected:
     name: E2E (affected only)
