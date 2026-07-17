@@ -59,7 +59,7 @@ on:
         default: '3'
       nextjs-app-dirs:
         description: >-
-          Space/comma-separated Next.js App Router roots (e.g. "apps/web/app") to
+          Comma-separated Next.js App Router roots (e.g. "apps/web/app") to
           enforce navigation-feedback coverage on: every route segment shipping a
           page.* must ship a sibling loading.*. Empty (default) skips the gate.
         type: string
@@ -321,7 +321,8 @@ jobs:
           // api/ segments have no UI; node_modules is never a route. (_private
           // and dot folders are excluded separately in the directory loop.)
           const SKIP = new Set(["api", "node_modules"]);
-          const roots = process.env.APP_DIRS.split(/[\s,]+/).filter(Boolean);
+          // Comma-only: paths may contain spaces, so comma is the separator.
+          const roots = process.env.APP_DIRS.split(",").map((r) => r.trim()).filter(Boolean);
           const mustRender = process.env.MUST_RENDER || "";
           const failures = [];
           let pages = 0;
