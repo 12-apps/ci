@@ -180,7 +180,11 @@ jobs:
   # Required-checks aggregation: require ONLY this job in the branch ruleset.
   ci-success:
     if: always()
-    needs: [static, tests, my-repo-gate]
+    # `changes` MUST be listed even though every other job depends on it: if it
+    # FAILS (e.g. the paths-filter action errors), its dependents go `skipped`
+    # — not `failure` — and an aggregation that only watches the dependents
+    # would pass with zero tests run. Listing it surfaces the failure here.
+    needs: [changes, static, tests, my-repo-gate]
     runs-on: ubuntu-latest
     steps:
       - env:
