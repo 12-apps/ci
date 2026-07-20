@@ -83,6 +83,128 @@ deploys nothing.
 
 ---
 
+# Consuming the Monorepo CI pipeline
+
+The fail-fast CI core for pnpm + turborepo monorepos, split in two reusable
+workflows so consumers keep the fail-fast topology around their own jobs:
+
+- **`monorepo-static.yml`** — changes paths-filter, `turbo lint/check-types
+  --affected` with cross-run `.turbo` caches, actionlint. Exposes `code` /
+  `workflows` outputs.
+- **`monorepo-tests.yml`** — unit tests (turbo cache + vitest results-cache
+  persistence for failed-first/slowest-first ordering + fail-fast bail), build,
+  opt-in integration lane.
+
+On `push` events both run the FULL suite (all filters forced true, no
+`--affected`, no bail) — the post-merge safety net that makes PR-time
+incremental selection safe to trust. Trigger the caller on **both**
+`pull_request` and `push: [main]`.
+
+## A. Caller workflow (consumer `ci.yml`)
+
+```yaml
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Reusable workflows cannot define workflow-level concurrency — the CALLER must:
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # Consumer-side filters for repo-specific gating (e.g. run integration only
+  # when the integration-relevant surface changed). Force outputs 'true' on
+  # push so the safety net skips nothing. Omit this job entirely (and the
+  # `run-integration` line below) if you don't need repo-specific filters.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      integration: ${{ github.event_name == 'push' && 'true' || steps.filter.outputs.integration }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            integration:
+              - 'apps/web/**'
+              - 'packages/**'
+              - 'pnpm-lock.yaml'
+
+  static:
+    permissions:
+      contents: read
+      pull-requests: read   # dorny/paths-filter reads the PR's file list
+    uses: 12-apps/ci/.github/workflows/monorepo-static.yml@v1
+    with:
+      # e.g. Prisma: the generated client lives in node_modules, outside any
+      # turbo output — regenerate before type-checking.
+      pre-typecheck-command: pnpm --filter @repo/shared-helpers prisma:generate
+
+  tests:
+    # `changes` must be in needs for `needs.changes.outputs.integration` below
+    # to resolve — without it the expression is empty and run-integration is
+    # silently always false.
+    needs: [changes, static]
+    if: needs.static.outputs.code == 'true'
+    permissions:
+      contents: read
+    uses: 12-apps/ci/.github/workflows/monorepo-tests.yml@v1
+    with:
+      pre-test-command: pnpm --filter @repo/shared-helpers prisma:generate
+      pre-build-command: pnpm --filter @repo/shared-helpers prisma:generate
+      pre-integration-command: pnpm --filter @repo/shared-helpers prisma:generate
+      # File-level affected selection (optional — default is turbo-affected):
+      unit-test-command: CI_AFFECTED_BASE=FETCH_HEAD node scripts/ci-affected-tests.mjs
+      unit-full-command: CI_FULL_SUITE=1 node scripts/ci-affected-tests.mjs
+      vitest-cache-paths: |
+        apps/web/node_modules/.vite/vitest
+        packages/ui/node_modules/.vite/vitest
+      run-integration: ${{ needs.changes.outputs.integration == 'true' }}
+      integration-cache-path: node_modules/.vite/vitest
+
+  # Repo-specific jobs gate on the static tier the same way `tests` does:
+  my-repo-gate:
+    needs: static
+    if: needs.static.outputs.code == 'true'
+    ...
+
+  # Required-checks aggregation: require ONLY this job in the branch ruleset.
+  ci-success:
+    if: always()
+    needs: [static, tests, my-repo-gate]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          set -euo pipefail
+          echo "job results: $RESULTS"
+          if printf '%s' "$RESULTS" | grep -qwE 'failure|cancelled'; then exit 1; fi
+```
+
+## B. Required in the consumer repo
+
+- **Per-package turbo `outputs`** — the cross-run `.turbo` cache restores only
+  what each package's `turbo.json` declares. A wrong/absent `outputs` (e.g. a
+  library inheriting a Next-style `.next/**`) means a cache hit that restores
+  NOTHING and breaks downstream builds. Give every buildable library its own
+  `turbo.json` with `build.outputs: ["dist/**"]`.
+- **Generated-into-node_modules artifacts** (Prisma clients etc.) can never be
+  turbo outputs — regenerate them via the `pre-*-command` inputs.
+- Optional file-level unit selection: copy `scripts/ci-affected-tests.mjs`
+  from `future-pay` (supports `CI_AFFECTED_BASE`, `CI_FULL_SUITE`, `CI_BAIL`).
+- Keep repo-specific filters (e.g. an `integration` or `mcp` paths filter) in
+  a small consumer-side `changes` job and feed them in via `with:`.
+
 # Consuming the Quality gate
 
 Separate from CD: a reusable static-quality + test-reliability gate
@@ -109,7 +231,9 @@ config and scripts — the workflow only orchestrates.
 ```
 
 Inputs (all optional): `node-version` (default `24`), `run-knip` (default true,
-blocking via the consumer's shrink-only ratchet), `run-e2e-reliability` (default true), `run-affected-e2e` (default
+blocking via the consumer's shrink-only ratchet), `run-data-views` (default
+**false** — opt-in DataViews backend-only gate, needs a `quality:data-views`
+script + shrink-only exceptions file in the consumer), `run-e2e-reliability` (default true), `run-affected-e2e` (default
 **false** — opt-in selective e2e), `pre-e2e-command`, `install-playwright`
 (default true), `e2e-repeat` (default `3`), `nextjs-app-dirs` (default empty —
 opt-in loading-coverage gate), `loading-must-render` (default empty).
@@ -139,6 +263,7 @@ or install in the consumer — the gate only walks the checkout.
 | `quality:dup` | `jscpd …` copy-paste detection |
 | `quality:quarantine` | `node scripts/flaky-quarantine-check.mjs` |
 | `quality:knip` | `node scripts/knip-gate.mjs` — knip behind a shrink-only ratchet (`.knip-exceptions.json`); fails only on NEW dead code |
+| `quality:data-views` | `node scripts/data-views-gate.mjs` — DataViews backend-only ratchet (shrink-only exceptions file) — only if `run-data-views: true` |
 | `test:e2e:reliability` | `node scripts/e2e-reliability.mjs` (re-run changed specs Nx) |
 | `test:e2e:affected` | `node scripts/e2e-affected.mjs` (run only diff-affected specs) — only if `run-affected-e2e: true` |
 
