@@ -158,7 +158,10 @@ Failed-first ordering: the `e2e-affected` job persists Playwright's
 failure). A consumer's `test:e2e:affected` selector can use it to run a quick
 `playwright test --last-failed` phase before the affected set and bail early
 when a previous failure still fails — see `future-pay`'s `e2e-affected.mjs`.
-Selectors that ignore the file are unaffected.
+Selectors that ignore the file are unaffected. The cached path assumes
+Playwright's default `outputDir` (`test-results/`, resolved from the repo
+root); a consumer that overrides `outputDir` writes `.last-run.json` elsewhere
+and gets no cross-run cache — keep the default (or symlink) to opt in.
 
 Per-repo (NOT shared): `.quality-exceptions` (grandfathered offenders), the
 jscpd `--threshold` baseline, and `e2e-affected.json` (feature→spec map).
