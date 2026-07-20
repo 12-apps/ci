@@ -153,6 +153,13 @@ and the devDeps `eslint-plugin-sonarjs`, `eslint-plugin-test-flakiness`, `jscpd`
 For selective e2e (`run-affected-e2e: true`) also copy `scripts/e2e-affected.mjs`
 and add your own `e2e-affected.json` (the per-repo source-path → spec map).
 
+Failed-first ordering: the `e2e-affected` job persists Playwright's
+`test-results/.last-run.json` across runs (per-ref cache, saved even on
+failure). A consumer's `test:e2e:affected` selector can use it to run a quick
+`playwright test --last-failed` phase before the affected set and bail early
+when a previous failure still fails — see `future-pay`'s `e2e-affected.mjs`.
+Selectors that ignore the file are unaffected.
+
 Per-repo (NOT shared): `.quality-exceptions` (grandfathered offenders), the
 jscpd `--threshold` baseline, and `e2e-affected.json` (feature→spec map).
 Everything else is portable.
