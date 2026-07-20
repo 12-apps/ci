@@ -101,6 +101,13 @@ on:
         type: string
         required: false
         default: 'pnpm run test:integration'
+      pre-integration-command:
+        description: >-
+          Shell run before the integration command (e.g. generate the Prisma
+          client or build shared packages). Empty to skip.
+        type: string
+        required: false
+        default: ''
       integration-cache-path:
         description: >-
           Vitest results-cache path for the integration config (often the ROOT
@@ -136,12 +143,18 @@ jobs:
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
 
+      # Command inputs are routed through env (not interpolated into the
+      # script) so shell metacharacters in a computed value can never be
+      # template-expanded into the run block (Actions hardening guidance).
+      # Same pattern for every command input in this workflow.
       - name: Pre-test setup
         if: ${{ inputs.pre-test-command != '' }}
         shell: bash
+        env:
+          PRE_CMD: ${{ inputs.pre-test-command }}
         run: |
           set -o pipefail
-          ${{ inputs.pre-test-command }} 2>&1 | tee pre-test.log
+          bash -c "$PRE_CMD" 2>&1 | tee pre-test.log
 
       - name: Restore turbo cache
         uses: actions/cache@v4
@@ -172,13 +185,17 @@ jobs:
         # PR: incremental command against the fetched base tip (FETCH_HEAD).
         # Push: the full suite — a diff against the branch's own tip would be
         # empty and wrongly select nothing.
+        env:
+          UNIT_CMD: ${{ inputs.unit-test-command }}
+          UNIT_FULL_CMD: ${{ inputs.unit-full-command }}
+          DEFAULT_BRANCH: ${{ inputs.default-branch }}
         run: |
           set -o pipefail
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF:-${{ inputs.default-branch }}}"
-            ${{ inputs.unit-test-command }} 2>&1 | tee unit.log
+            git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF:-$DEFAULT_BRANCH}"
+            bash -c "$UNIT_CMD" 2>&1 | tee unit.log
           else
-            ${{ inputs.unit-full-command }} 2>&1 | tee unit.log
+            bash -c "$UNIT_FULL_CMD" 2>&1 | tee unit.log
           fi
 
       # Save even when tests FAIL — the failure entries are what makes the next
@@ -221,9 +238,11 @@ jobs:
       - name: Pre-build setup
         if: ${{ inputs.pre-build-command != '' }}
         shell: bash
+        env:
+          PRE_CMD: ${{ inputs.pre-build-command }}
         run: |
           set -o pipefail
-          ${{ inputs.pre-build-command }} 2>&1 | tee pre-build.log
+          bash -c "$PRE_CMD" 2>&1 | tee pre-build.log
 
       - name: Restore turbo cache
         uses: actions/cache@v4
@@ -269,6 +288,15 @@ jobs:
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
 
+      - name: Pre-integration setup
+        if: ${{ inputs.pre-integration-command != '' }}
+        shell: bash
+        env:
+          PRE_CMD: ${{ inputs.pre-integration-command }}
+        run: |
+          set -o pipefail
+          bash -c "$PRE_CMD" 2>&1 | tee pre-integration.log
+
       # Failed-first ordering for what is usually the longest lane (see
       # unit-tests). Distinct key space from the unit caches.
       - name: Restore vitest results cache (test prioritization)
@@ -286,12 +314,15 @@ jobs:
         shell: bash
         # PR: fail-fast bail (the restored cache makes the retry re-hit the
         # failure first). Push (safety net): full failure inventory.
+        env:
+          INT_CMD: ${{ inputs.integration-command }}
+          INT_FULL_CMD: ${{ inputs.integration-full-command }}
         run: |
           set -o pipefail
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            ${{ inputs.integration-command }} 2>&1 | tee integration.log
+            bash -c "$INT_CMD" 2>&1 | tee integration.log
           else
-            ${{ inputs.integration-full-command }} 2>&1 | tee integration.log
+            bash -c "$INT_FULL_CMD" 2>&1 | tee integration.log
           fi
 
       # Save even on failure — failures drive the next run's ordering (see

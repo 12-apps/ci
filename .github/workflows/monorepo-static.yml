@@ -206,12 +206,17 @@ jobs:
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
 
+      # Command inputs are routed through env (not interpolated into the
+      # script) so shell metacharacters in a computed value can never be
+      # template-expanded into the run block (Actions hardening guidance).
       - name: Pre-typecheck setup
         if: ${{ inputs.pre-typecheck-command != '' }}
         shell: bash
+        env:
+          PRE_CMD: ${{ inputs.pre-typecheck-command }}
         run: |
           set -o pipefail
-          ${{ inputs.pre-typecheck-command }} 2>&1 | tee pre-typecheck.log
+          bash -c "$PRE_CMD" 2>&1 | tee pre-typecheck.log
 
       - name: Restore turbo cache
         uses: actions/cache@v4

@@ -119,6 +119,26 @@ permissions:
   pull-requests: read
 
 jobs:
+  # Consumer-side filters for repo-specific gating (e.g. run integration only
+  # when the integration-relevant surface changed). Force outputs 'true' on
+  # push so the safety net skips nothing. Omit this job entirely (and the
+  # `run-integration` line below) if you don't need repo-specific filters.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      integration: ${{ github.event_name == 'push' && 'true' || steps.filter.outputs.integration }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            integration:
+              - 'apps/web/**'
+              - 'packages/**'
+              - 'pnpm-lock.yaml'
+
   static:
     permissions:
       contents: read
@@ -130,7 +150,10 @@ jobs:
       pre-typecheck-command: pnpm --filter @repo/shared-helpers prisma:generate
 
   tests:
-    needs: static
+    # `changes` must be in needs for `needs.changes.outputs.integration` below
+    # to resolve — without it the expression is empty and run-integration is
+    # silently always false.
+    needs: [changes, static]
     if: needs.static.outputs.code == 'true'
     permissions:
       contents: read
@@ -138,6 +161,7 @@ jobs:
     with:
       pre-test-command: pnpm --filter @repo/shared-helpers prisma:generate
       pre-build-command: pnpm --filter @repo/shared-helpers prisma:generate
+      pre-integration-command: pnpm --filter @repo/shared-helpers prisma:generate
       # File-level affected selection (optional — default is turbo-affected):
       unit-test-command: CI_AFFECTED_BASE=FETCH_HEAD node scripts/ci-affected-tests.mjs
       unit-full-command: CI_FULL_SUITE=1 node scripts/ci-affected-tests.mjs
