@@ -136,7 +136,6 @@ or install in the consumer — the gate only walks the checkout.
 | Script | Purpose |
 |--------|---------|
 | `quality:complexity` | `eslint --config eslint.complexity.config.mjs .` (size/complexity/nested-loop/cognitive on source — also good on pre-commit) |
-| `quality:flakiness` | `eslint --config eslint.flakiness.config.mjs .` (tiered anti-flake lint on tests/specs/stories) |
 | `quality:dup` | `jscpd …` copy-paste detection |
 | `quality:quarantine` | `node scripts/flaky-quarantine-check.mjs` |
 | `quality:knip` | `node scripts/knip-gate.mjs` — knip behind a shrink-only ratchet (`.knip-exceptions.json`); fails only on NEW dead code |
@@ -144,12 +143,16 @@ or install in the consumer — the gate only walks the checkout.
 | `test:e2e:affected` | `node scripts/e2e-affected.mjs` (run only diff-affected specs) — only if `run-affected-e2e: true` |
 
 Plus these files (copy from any consumer, e.g. `future-pay`):
-`eslint.complexity.config.mjs`, `eslint.flakiness.config.mjs`,
+`eslint.complexity.config.mjs`,
 `eslint.quality.shared.mjs` (shared thresholds/ignores/globs/rule sets),
 `.quality-exceptions` (per-repo grandfather list), `knip.json`,
 `flaky-quarantine.json`, `scripts/e2e-reliability.mjs`,
 `scripts/flaky-quarantine-check.mjs`, `tests/e2e/reporters/flaky-test-reporter.ts`,
-and the devDeps `eslint-plugin-sonarjs`, `eslint-plugin-test-flakiness`, `jscpd`, `knip`.
+and the devDeps `eslint-plugin-sonarjs`, `jscpd`, `knip`.
+
+The flakiness gate is **not** in this list on purpose — its ruleset, runner, and
+eslint toolchain are centralized (see below), so a consumer carries neither
+`eslint.flakiness.config.mjs` nor `eslint-plugin-test-flakiness`.
 For selective e2e (`run-affected-e2e: true`) also copy `scripts/e2e-affected.mjs`
 and add your own `e2e-affected.json` (the per-repo source-path → spec map).
 
@@ -166,6 +169,40 @@ and gets no cross-run cache — keep the default (or symlink) to opt in.
 Per-repo (NOT shared): `.quality-exceptions` (grandfathered offenders), the
 jscpd `--threshold` baseline, and `e2e-affected.json` (feature→spec map).
 Everything else is portable.
+
+### Flakiness gate (central — no per-repo config)
+
+The anti-flake ESLint gate is the one part of the quality suite that is fully
+centralized: the tiered ruleset (`eslint.flakiness.config.mjs`), the baseline
+runner, and the eslint + `eslint-plugin-test-flakiness` toolchain all live in
+`12-apps/ci/.github/actions/flakiness-lint`. The `Flakiness` job pulls them from
+there and lints **your** checkout, so updating the rules in `12-apps/ci` reaches
+every repo on its next CI run — you never copy or bump the config or the plugin.
+
+The consumer owns exactly one repo-specific artifact: `eslint-suppressions.json`,
+the per-violation baseline of pre-existing offenders (native ESLint bulk
+suppressions). It is stripped per-file on every run — any test file your PR
+touches loses its exemption and must be fully clean. Seed it once:
+
+```bash
+# from your repo root, using the central config (no local devDeps needed):
+npx --package eslint@9 --package eslint-plugin-test-flakiness@1 \
+  --package @typescript-eslint/eslint-plugin@8 --package @typescript-eslint/parser@8 \
+  --package globals@16 -- \
+  eslint --config <path-to>/eslint.flakiness.config.mjs apps packages \
+  --suppress-all --suppressions-location eslint-suppressions.json
+```
+
+Then commit `eslint-suppressions.json` and burn it down over time. Do **not**
+copy the config into your repo — that would re-fork the ruleset you just
+centralized.
+
+**Targets & opt-out.** By default the gate lints `.` (works for single- and
+multi-package repos). Pass `flakiness-targets: 'apps packages'` to the reusable
+workflow to scope it. A repo not yet migrated can keep its own
+`quality:flakiness` script — while that script exists the job runs it (legacy
+path) instead of the central action, so migration is: delete the script + the
+config, keep `eslint-suppressions.json`.
 
 ### `.quality-exceptions` ratchet (automatic)
 

@@ -42,6 +42,11 @@ on:
         type: boolean
         required: false
         default: false
+      flakiness-targets:
+        description: 'Lint targets for the central flakiness gate (space-separated, relative to the repo root). Ignored when the consumer defines its own quality:flakiness script.'
+        type: string
+        required: false
+        default: '.'
       pre-e2e-command:
         description: 'Shell run before the e2e reliability gate (e.g. build shared packages). Empty to skip.'
         type: string
@@ -110,11 +115,23 @@ jobs:
           set -o pipefail
           pnpm quality:complexity 2>&1 | tee complexity.log
 
+  # The anti-flake ruleset + baseline runner + eslint toolchain live ONLY in
+  # 12-apps/ci (the `flakiness-lint` composite action). This job uses that
+  # central action by default, so updating the rules here reaches every consumer
+  # on its next CI run — the consumer keeps only its repo-specific
+  # eslint-suppressions.json baseline, not the config/runner/devDeps.
+  #
+  # Back-compat: a consumer that still defines its own `quality:flakiness` script
+  # keeps running that (legacy path) until it migrates by deleting the script.
   flakiness:
     name: Flakiness
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: the central runner diffs the branch against its base to
+          # revoke a touched file's baseline exemption (touched files must be clean).
+          fetch-depth: 0
       - uses: pnpm/action-setup@v4
         with:
           run_install: false
@@ -122,16 +139,38 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
           cache: 'pnpm'
-      - name: Install dependencies
+      - name: Detect flakiness gate source
+        id: src
+        shell: bash
+        run: |
+          set -o pipefail
+          if node -e "const s=(require('./package.json').scripts||{});process.exit(s['quality:flakiness']?0:1)" 2>/dev/null; then
+            echo "mode=legacy" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=central" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install dependencies (legacy consumer gate)
+        if: steps.src.outputs.mode == 'legacy'
         shell: bash
         run: |
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
-      - name: Flakiness gate (anti-flake lint on tests)
+      - name: Flakiness gate (legacy consumer script)
+        if: steps.src.outputs.mode == 'legacy'
         shell: bash
         run: |
           set -o pipefail
           pnpm quality:flakiness 2>&1 | tee flakiness.log
+      - name: Fetch base ref (central gate diffs against it)
+        if: steps.src.outputs.mode == 'central'
+        shell: bash
+        run: git fetch --no-tags origin "${GITHUB_BASE_REF:-main}"
+      - name: Flakiness gate (central 12-apps/ci ruleset)
+        if: steps.src.outputs.mode == 'central'
+        uses: 12-apps/ci/.github/actions/flakiness-lint@v1
+        with:
+          node-version: ${{ inputs.node-version }}
+          targets: ${{ inputs.flakiness-targets }}
 
   duplication:
     name: Duplication
