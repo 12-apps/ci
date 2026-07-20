@@ -412,6 +412,36 @@ jobs:
       - name: Install Playwright
         if: ${{ inputs.install-playwright }}
         run: pnpm exec playwright install --with-deps chromium
+      # ── Failed-first ordering (test prioritization) ───────────────────────
+      # Playwright records each run's outcome in test-results/.last-run.json
+      # (including the IDs of failed tests). Persisting it across runs lets the
+      # consumer's selector run a fast `--last-failed` phase FIRST and bail
+      # before the full affected set when a previous failure still fails — the
+      # e2e analogue of vitest's failed-first sequencing. Restore is per-ref
+      # only: another branch's failures are noise here, and this job never runs
+      # on the default branch, so there is no base-branch cache to fall back to.
+      # Harmless for consumers whose selector ignores the file (restore misses
+      # or the phase never triggers).
+      - name: Restore last-run results (failed-first ordering)
+        uses: actions/cache/restore@v4
+        with:
+          path: test-results/.last-run.json
+          key: e2e-last-run-${{ github.ref }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            e2e-last-run-${{ github.ref }}-
+      # Record the restored file's hash so the save below can skip when the run
+      # didn't change it. On a stable green ref .last-run.json is a
+      # deterministic {"status":"passed","failedTests":[]}, so without this
+      # every run would add one immutable cache entry that says nothing new —
+      # entries accumulate only while failures are actually changing, which is
+      # when the cache is earning its keep. (hashFiles('' ) of a missing file
+      # is the empty string, which also makes the first-ever save fire.)
+      - name: Note restored last-run hash
+        id: lastrun-pre
+        shell: bash
+        env:
+          PRE_HASH: ${{ hashFiles('test-results/.last-run.json') }}
+        run: echo "hash=$PRE_HASH" >> "$GITHUB_OUTPUT"
       # Runs only the specs the diff affects; full suite on shared/unmapped
       # changes; nothing on docs-only. Self-skips (exit 0) when nothing is affected.
       - name: Run affected e2e specs
@@ -420,6 +450,20 @@ jobs:
           set -o pipefail
           git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF:-main}"
           pnpm test:e2e:affected 2>&1 | tee e2e-affected.log
+      # Save even when the run FAILS — the failures are what the next run's
+      # failed-first phase re-hits (actions/cache's built-in post step skips
+      # saving on job failure, hence the explicit restore/save split). Guards:
+      # the file must exist (a run that skipped e2e, or a consumer that never
+      # produces it, has nothing to save — and cache/save errors on a missing
+      # path) AND must differ from what was restored (unchanged results would
+      # add a redundant immutable entry per run; see lastrun-pre). The
+      # run_id/run_attempt suffix keeps every save key unique.
+      - name: Save last-run results
+        if: ${{ always() && hashFiles('test-results/.last-run.json') != '' && hashFiles('test-results/.last-run.json') != steps.lastrun-pre.outputs.hash }}
+        uses: actions/cache/save@v4
+        with:
+          path: test-results/.last-run.json
+          key: e2e-last-run-${{ github.ref }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   e2e-reliability:
     name: E2E Reliability
