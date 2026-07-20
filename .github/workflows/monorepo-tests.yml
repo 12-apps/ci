@@ -1,0 +1,304 @@
+name: Monorepo Tests
+
+# Reusable HEAVY tier of the org's fail-fast monorepo CI (pnpm + turborepo).
+# Pairs with monorepo-static.yml: the consumer gates this call on the static
+# tier's success and `code` output, so a lint/type failure skips every job
+# here (fail-fast), and a push event runs the FULL suite (no --affected, no
+# bail) as the post-merge safety net.
+#
+# What it standardizes (originally proven in future-pay, FUT-213):
+#   - unit tests with cross-run turbo cache, vitest results-cache persistence
+#     (failed-first / slowest-first ordering across runs — vitest's sequencer
+#     reads <pkg>/node_modules/.vite/vitest, which CI otherwise starts cold),
+#     and affected-vs-full command selection by event
+#   - build with turbo --affected + cross-run cache
+#   - opt-in integration lane with its own results cache
+#
+# Caller responsibilities: same as monorepo-static.yml (concurrency, both
+# triggers, per-package turbo outputs). Gate the call like:
+#   tests:
+#     needs: [static]
+#     if: needs.static.outputs.code == 'true'
+#     uses: 12-apps/ci/.github/workflows/monorepo-tests.yml@v1
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node version for all jobs.'
+        type: string
+        required: false
+        default: '24'
+      pre-test-command:
+        description: >-
+          Shell run before the unit-test command (e.g. generate the Prisma
+          client). Empty to skip.
+        type: string
+        required: false
+        default: ''
+      unit-test-command:
+        description: >-
+          Command for the PR (incremental) unit run. The workflow fetches the
+          base branch tip first (available as FETCH_HEAD) so file-level
+          selectors can diff against it. The default is package-level turbo
+          selection with fail-fast bail; consumers with a file-level selector
+          override it (e.g. future-pay's
+          `CI_AFFECTED_BASE=FETCH_HEAD node scripts/ci-affected-tests.mjs`).
+        type: string
+        required: false
+        default: 'pnpm turbo run test --affected -- --bail=1'
+      unit-full-command:
+        description: >-
+          Command for the push (full-suite safety net) unit run — no selection,
+          no bail: a complete failure inventory of what actually landed.
+        type: string
+        required: false
+        default: 'pnpm turbo run test'
+      vitest-cache-paths:
+        description: >-
+          Newline-separated paths of the packages' vitest results caches
+          (<pkg>/node_modules/.vite/vitest). When set, they are persisted
+          across runs — restored before the tests (this ref first, then the
+          default branch) and saved after EVEN ON FAILURE, which is what makes
+          vitest's failed-first ordering work in CI. Empty (default) skips the
+          cache steps.
+        type: string
+        required: false
+        default: ''
+      default-branch:
+        description: >-
+          Default branch name, used only for the vitest cache restore fallback
+          (the push safety net on this branch runs the full suite, so its
+          cache carries data for every test file and PRs may restore it).
+        type: string
+        required: false
+        default: 'main'
+      run-build:
+        description: 'Run the turbo build lane.'
+        type: boolean
+        required: false
+        default: true
+      pre-build-command:
+        description: 'Shell run before the build (e.g. Prisma generate). Empty to skip.'
+        type: string
+        required: false
+        default: ''
+      run-integration:
+        description: >-
+          Run the integration lane. Consumers typically compute this from
+          their own paths filter (only when the integration-relevant surface
+          changed) and force it on push.
+        type: boolean
+        required: false
+        default: false
+      integration-command:
+        description: 'Command for the PR integration run (fail-fast bail by default).'
+        type: string
+        required: false
+        default: 'pnpm run test:integration -- --bail=1'
+      integration-full-command:
+        description: 'Command for the push (safety net) integration run — no bail.'
+        type: string
+        required: false
+        default: 'pnpm run test:integration'
+      integration-cache-path:
+        description: >-
+          Vitest results-cache path for the integration config (often the ROOT
+          node_modules/.vite/vitest when the integration config's project root
+          is the repo root). Empty skips the cache steps.
+        type: string
+        required: false
+        default: ''
+
+jobs:
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # Full history for turbo --affected merge-base detection.
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+
+      - name: Pre-test setup
+        if: ${{ inputs.pre-test-command != '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ${{ inputs.pre-test-command }} 2>&1 | tee pre-test.log
+
+      - name: Restore turbo cache
+        uses: actions/cache@v4
+        with:
+          path: .turbo
+          key: turbo-unit-${{ github.sha }}
+          restore-keys: |
+            turbo-unit-
+
+      # ── Test prioritization (failed-first / slowest-first) ────────────────
+      # Restored AFTER pnpm install so install can't clobber the .vite dirs.
+      # Restore preference: this ref's latest save (the fix-verify loop within
+      # a PR), else the default branch's (its push safety-net runs cover every
+      # test file, and base-branch caches are restorable from PRs).
+      - name: Restore vitest results cache (test prioritization)
+        if: ${{ inputs.vitest-cache-paths != '' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ inputs.vitest-cache-paths }}
+          key: vitest-results-${{ github.ref }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            vitest-results-${{ github.ref }}-
+            vitest-results-refs/heads/${{ inputs.default-branch }}-
+
+      - name: Run unit tests
+        id: unit
+        shell: bash
+        # PR: incremental command against the fetched base tip (FETCH_HEAD).
+        # Push: the full suite — a diff against the branch's own tip would be
+        # empty and wrongly select nothing.
+        run: |
+          set -o pipefail
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF:-${{ inputs.default-branch }}}"
+            ${{ inputs.unit-test-command }} 2>&1 | tee unit.log
+          else
+            ${{ inputs.unit-full-command }} 2>&1 | tee unit.log
+          fi
+
+      # Save even when tests FAIL — the failure entries are what makes the next
+      # run's ordering useful (actions/cache's built-in post step skips saving
+      # on job failure, hence the explicit restore/save split). run_id and
+      # run_attempt keep every save key unique (cache entries are immutable).
+      - name: Save vitest results cache
+        if: ${{ always() && inputs.vitest-cache-paths != '' && steps.unit.outcome != 'skipped' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ inputs.vitest-cache-paths }}
+          key: vitest-results-${{ github.ref }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    if: ${{ inputs.run-build }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # Full history for turbo --affected merge-base detection.
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+
+      - name: Pre-build setup
+        if: ${{ inputs.pre-build-command != '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ${{ inputs.pre-build-command }} 2>&1 | tee pre-build.log
+
+      - name: Restore turbo cache
+        uses: actions/cache@v4
+        with:
+          path: .turbo
+          key: turbo-build-${{ github.sha }}
+          restore-keys: |
+            turbo-build-
+
+      - name: Build
+        shell: bash
+        # PR: --affected builds only the touched packages (plus dependents via
+        # turbo's graph; upstream deps still build as prerequisites). Push:
+        # everything.
+        run: |
+          set -o pipefail
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            pnpm turbo run build --affected 2>&1 | tee build.log
+          else
+            pnpm turbo run build 2>&1 | tee build.log
+          fi
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    if: ${{ inputs.run-integration }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+
+      # Failed-first ordering for what is usually the longest lane (see
+      # unit-tests). Distinct key space from the unit caches.
+      - name: Restore vitest results cache (test prioritization)
+        if: ${{ inputs.integration-cache-path != '' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ inputs.integration-cache-path }}
+          key: vitest-int-results-${{ github.ref }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            vitest-int-results-${{ github.ref }}-
+            vitest-int-results-refs/heads/${{ inputs.default-branch }}-
+
+      - name: Run integration tests
+        id: integration
+        shell: bash
+        # PR: fail-fast bail (the restored cache makes the retry re-hit the
+        # failure first). Push (safety net): full failure inventory.
+        run: |
+          set -o pipefail
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            ${{ inputs.integration-command }} 2>&1 | tee integration.log
+          else
+            ${{ inputs.integration-full-command }} 2>&1 | tee integration.log
+          fi
+
+      # Save even on failure — failures drive the next run's ordering (see
+      # unit-tests).
+      - name: Save vitest results cache
+        if: ${{ always() && inputs.integration-cache-path != '' && steps.integration.outcome != 'skipped' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ inputs.integration-cache-path }}
+          key: vitest-int-results-${{ github.ref }}-${{ github.run_id }}-${{ github.run_attempt }}

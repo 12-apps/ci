@@ -32,6 +32,17 @@ on:
         type: boolean
         required: false
         default: true
+      run-data-views:
+        description: >-
+          Run the DataViews backend-only gate: every admin list rendered with
+          the shared DataViews panel must be server-driven (filter/sort/
+          paginate/search at the backend). Opt-in — the consumer supplies a
+          `quality:data-views` script plus a shrink-only exceptions file that
+          grandfathers existing client-mode lists, so it only fails on NEW
+          client-side lists or grandfathered ones that regressed.
+        type: boolean
+        required: false
+        default: false
       run-e2e-reliability:
         description: 'Re-run changed e2e specs N times to flush flakes.'
         type: boolean
@@ -202,6 +213,34 @@ jobs:
         run: |
           set -o pipefail
           pnpm quality:knip 2>&1 | tee knip.log
+
+  # DataViews backend-only ratchet (opt-in): lists rendered with the shared
+  # DataViews panel must be server-driven. Client-mode consumers are
+  # grandfathered in the repo's exceptions file and the list can only shrink —
+  # a new client-side list, or a grandfathered one that regressed, fails here.
+  data-views:
+    name: DataViews Gate
+    if: ${{ inputs.run-data-views }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: DataViews backend-only gate
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm quality:data-views 2>&1 | tee data-views-gate.log
 
   # Enforce the `.quality-exceptions` burn-down policy on every PR:
   #   (A) shrink-only — the file may LOSE lines, never gain them, so a new file
