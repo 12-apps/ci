@@ -546,12 +546,14 @@ jobs:
 
           const pageDirs = [];
           const specFiles = [];
+          let traversalFailed = false;
           function walk(dir) {
             let entries;
             try {
               entries = readdirSync(dir, { withFileTypes: true });
             } catch {
               console.error(`::error::${dir}: unreadable — check e2e-coverage-app-dirs`);
+              traversalFailed = true;
               return;
             }
             const files = entries.filter((e) => e.isFile()).map((e) => e.name);
@@ -564,6 +566,13 @@ jobs:
             }
           }
           roots.forEach(walk);
+
+          // A single unreadable root must fail the gate even when other roots
+          // contain pages — otherwise that tree ships with no coverage enforced.
+          if (traversalFailed) {
+            console.error("::error::one or more e2e-coverage-app-dirs roots were unreadable (see above) — refusing to pass with an un-scanned tree.");
+            process.exit(1);
+          }
 
           if (pageDirs.length === 0) {
             console.error(`::error::no page.* found under: ${roots.join(", ")} — check e2e-coverage-app-dirs`);
@@ -629,9 +638,17 @@ jobs:
             echo "::error::Could not compute merge-base with origin/$BASE_REF"
             exit 1
           }
-          # Base version of the exceptions file (empty array if it did not exist).
-          git show "$merge_base:$EXCEPTIONS_FILE" > /tmp/e2e-cov-base.json 2>/dev/null || echo "[]" > /tmp/e2e-cov-base.json
-          BASE_JSON=/tmp/e2e-cov-base.json HEAD_FILE="$EXCEPTIONS_FILE" MERGE_BASE="$merge_base" node <<'EOF'
+          # Base version of the exceptions file. Distinguish "absent at base"
+          # (BASE_EXISTED=0 → this PR is establishing the initial grandfather
+          # baseline, so shrink-only must NOT reject the seeded entries) from
+          # "present and empty at base" (BASE_EXISTED=1 → enforce shrink-only).
+          if git show "$merge_base:$EXCEPTIONS_FILE" > /tmp/e2e-cov-base.json 2>/dev/null; then
+            BASE_EXISTED=1
+          else
+            echo "[]" > /tmp/e2e-cov-base.json
+            BASE_EXISTED=0
+          fi
+          BASE_JSON=/tmp/e2e-cov-base.json BASE_EXISTED="$BASE_EXISTED" HEAD_FILE="$EXCEPTIONS_FILE" MERGE_BASE="$merge_base" node <<'EOF'
           const { readFileSync } = require("node:fs");
           const { execSync } = require("node:child_process");
           const norm = (p) => String(p).replace(/\/+$/, "");
@@ -643,13 +660,19 @@ jobs:
           const head = load(process.env.HEAD_FILE);
           let fail = false;
 
-          // (A) shrink-only: no entry may be ADDED vs base.
-          const added = head.filter((p) => !base.has(p));
-          if (added.length) {
-            console.error("::error::" + process.env.HEAD_FILE + " may only shrink, never grow. Added:");
-            added.forEach((p) => console.error(`  + ${p}`));
-            console.error("You cannot grandfather a page — add its e2e spec instead of listing it.");
-            fail = true;
+          // (A) shrink-only: no entry may be ADDED vs base — EXCEPT on the PR
+          // that first creates the file, which establishes the initial
+          // grandfather baseline (there is nothing to "grow" yet).
+          if (process.env.BASE_EXISTED === "1") {
+            const added = head.filter((p) => !base.has(p));
+            if (added.length) {
+              console.error("::error::" + process.env.HEAD_FILE + " may only shrink, never grow. Added:");
+              added.forEach((p) => console.error(`  + ${p}`));
+              console.error("You cannot grandfather a page — add its e2e spec instead of listing it.");
+              fail = true;
+            }
+          } else {
+            console.log(`(initial ${process.env.HEAD_FILE} — establishing the grandfather baseline; shrink-only enforced from the next PR.)`);
           }
 
           // (B) touch-must-fix: a changed file under a still-listed segment means
