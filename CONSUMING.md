@@ -240,7 +240,11 @@ blocking via the consumer's shrink-only ratchet), `run-data-views` (default
 script + shrink-only exceptions file in the consumer), `run-e2e-reliability` (default true), `run-affected-e2e` (default
 **false** — opt-in selective e2e), `pre-e2e-command`, `install-playwright`
 (default true), `e2e-repeat` (default `3`), `nextjs-app-dirs` (default empty —
-opt-in loading-coverage gate), `loading-must-render` (default empty).
+opt-in loading-coverage gate), `loading-must-render` (default empty),
+`e2e-coverage-app-dirs` (default empty — opt-in e2e page↔spec coverage gate),
+`e2e-coverage-spec-suffix` (default `.e2e.ts`), `e2e-coverage-exempt-globs`
+(default `.journey.,.global.`), `e2e-coverage-exceptions` (default
+`.e2e-coverage-exceptions.json`).
 
 ### Next.js loading-coverage gate (opt-in)
 
@@ -256,6 +260,42 @@ or install in the consumer — the gate only walks the checkout.
       nextjs-app-dirs: apps/web/app
       loading-must-render: RouteLoading
 ```
+
+### E2E page↔spec coverage gate (opt-in)
+
+Ties e2e specs to pages by **co-location**: every route segment shipping a
+`page.*` must have a co-located e2e spec (default suffix `*.e2e.ts`) somewhere in
+its subtree, and every such spec must sit under a route segment (so no spec
+floats free). Cross-cutting specs that don't belong to one page — journeys and
+globals — are exempt via `e2e-coverage-exempt-globs` (default `.journey.`,
+`.global.`).
+
+Pages with no spec yet are grandfathered in a **shrink-only** JSON array
+(`e2e-coverage-exceptions`, default `.e2e-coverage-exceptions.json`, a list of
+route-segment dirs). The ratchet enforces the same policy as `.quality-exceptions`:
+
+- **shrink-only** — the list may only lose entries; a *new* page can never be
+  grandfathered (add its spec instead);
+- **touch-must-fix** — if a PR changes any file under a still-listed segment
+  (a rename or delete counts), that segment must be de-listed, i.e. get a spec;
+- the gate also rejects a **stale** entry — one that is no longer a page, or that
+  already has a spec — so the list stays honest and keeps shrinking.
+
+Needs no scripts or install — the gate walks the checkout and diffs the
+exceptions file against the base branch (`fetch-depth: 0`).
+
+```yaml
+    with:
+      e2e-coverage-app-dirs: apps/web/app
+      e2e-coverage-exceptions: apps/web/.e2e-coverage-exceptions.json
+      # optional overrides:
+      # e2e-coverage-spec-suffix: '.e2e.ts'
+      # e2e-coverage-exempt-globs: '.journey.,.global.'
+```
+
+The affected-selection side (running only the specs a diff touches) is separate:
+enable `run-affected-e2e` and provide a `test:e2e:affected` selector in the
+consumer — with co-located specs the selector maps by directory, no manifest.
 
 ## B. Required in the consumer repo
 
