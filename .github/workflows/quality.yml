@@ -89,6 +89,39 @@ on:
         type: string
         required: false
         default: ''
+      e2e-coverage-app-dirs:
+        description: >-
+          Comma-separated Next.js App Router roots (e.g. "apps/web/app") to
+          enforce e2e page↔spec coverage on: every route segment shipping a
+          page.* must have a co-located e2e spec (default suffix .e2e.ts) in its
+          subtree, and every such spec must sit under a route segment. Pages
+          grandfathered in the exceptions file are skipped. Empty (default)
+          skips the gate.
+        type: string
+        required: false
+        default: ''
+      e2e-coverage-spec-suffix:
+        description: 'Filename suffix marking a co-located e2e spec for the coverage gate.'
+        type: string
+        required: false
+        default: '.e2e.ts'
+      e2e-coverage-exempt-globs:
+        description: >-
+          Comma-separated filename substrings that exempt a co-located spec from
+          the spec→page (no-orphan) check — cross-cutting specs that are not tied
+          to a single page. Default covers journey and global specs.
+        type: string
+        required: false
+        default: '.journey.,.global.'
+      e2e-coverage-exceptions:
+        description: >-
+          Repo-root-relative path to a shrink-only JSON array of route-segment
+          dirs grandfathered as having no e2e spec yet. The list may only shrink,
+          and touching any file under a listed segment forces it to be de-listed
+          (i.e. get a spec). A missing file means no grandfathering.
+        type: string
+        required: false
+        default: '.e2e-coverage-exceptions.json'
 
 # Least-privilege, enforced at the source: every job here only reads the repo.
 # Capping permissions at the workflow level means a consumer that grants more in
@@ -453,6 +486,219 @@ jobs:
             process.exit(1);
           }
           console.log(`OK: ${pages} route segment(s) covered by loading.* under: ${roots.join(" ")}`);
+          EOF
+
+  # E2E page↔spec coverage (opt-in): every route segment shipping a page.* must
+  # have a co-located e2e spec (default *.e2e.ts) in its subtree, and every such
+  # spec must sit under a route segment (cross-cutting journey/global specs are
+  # exempt). Pages with no spec yet are grandfathered in a shrink-only exceptions
+  # file: the list may only lose entries, and touching any file under a listed
+  # segment forces that segment to be de-listed (i.e. get a spec). No install
+  # needed — it walks the checkout + diffs against the base.
+  e2e-coverage:
+    name: E2E Coverage
+    if: ${{ inputs.e2e-coverage-app-dirs != '' }}
+    runs-on: ubuntu-latest
+    env:
+      APP_DIRS: ${{ inputs.e2e-coverage-app-dirs }}
+      SPEC_SUFFIX: ${{ inputs.e2e-coverage-spec-suffix }}
+      EXEMPT: ${{ inputs.e2e-coverage-exempt-globs }}
+      EXCEPTIONS_FILE: ${{ inputs.e2e-coverage-exceptions }}
+      BASE_REF: ${{ github.base_ref || 'main' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the ratchet can diff the exceptions file vs base.
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Enforce page.* ↔ e2e spec coverage
+        shell: bash
+        run: |
+          set -o pipefail
+          node <<'EOF'
+          const { readdirSync, readFileSync, existsSync } = require("node:fs");
+          const { join, dirname } = require("node:path");
+          const PAGE = /^page\.(js|jsx|ts|tsx)$/;
+          const SKIP = new Set(["api", "node_modules"]);
+          const norm = (p) => p.replace(/\/+$/, "");
+          const under = (p, base) => p === base || p.startsWith(norm(base) + "/");
+          const roots = process.env.APP_DIRS.split(",").map((r) => r.trim()).filter(Boolean);
+          const SUFFIX = process.env.SPEC_SUFFIX || ".e2e.ts";
+          const EXEMPT = (process.env.EXEMPT || "").split(",").map((s) => s.trim()).filter(Boolean);
+          const exFile = process.env.EXCEPTIONS_FILE || "";
+
+          let exceptions = [];
+          if (exFile && existsSync(exFile)) {
+            try {
+              exceptions = JSON.parse(readFileSync(exFile, "utf8"));
+            } catch (e) {
+              console.error(`::error::${exFile} is not valid JSON: ${e.message}`);
+              process.exit(1);
+            }
+            if (!Array.isArray(exceptions)) {
+              console.error(`::error::${exFile} must be a JSON array of route-segment dirs`);
+              process.exit(1);
+            }
+          }
+          const exSet = new Set(exceptions.map(norm));
+
+          const pageDirs = [];
+          const specFiles = [];
+          let traversalFailed = false;
+          function walk(dir) {
+            let entries;
+            try {
+              entries = readdirSync(dir, { withFileTypes: true });
+            } catch {
+              console.error(`::error::${dir}: unreadable — check e2e-coverage-app-dirs`);
+              traversalFailed = true;
+              return;
+            }
+            const files = entries.filter((e) => e.isFile()).map((e) => e.name);
+            if (files.some((f) => PAGE.test(f))) pageDirs.push(norm(dir));
+            for (const f of files) if (f.endsWith(SUFFIX)) specFiles.push(join(dir, f));
+            for (const e of entries) {
+              if (!e.isDirectory()) continue;
+              if (SKIP.has(e.name) || e.name.startsWith("_") || e.name.startsWith(".")) continue;
+              walk(join(dir, e.name));
+            }
+          }
+          roots.forEach(walk);
+
+          // A single unreadable root must fail the gate even when other roots
+          // contain pages — otherwise that tree ships with no coverage enforced.
+          if (traversalFailed) {
+            console.error("::error::one or more e2e-coverage-app-dirs roots were unreadable (see above) — refusing to pass with an un-scanned tree.");
+            process.exit(1);
+          }
+
+          if (pageDirs.length === 0) {
+            console.error(`::error::no page.* found under: ${roots.join(", ")} — check e2e-coverage-app-dirs`);
+            process.exit(1);
+          }
+
+          const pageDirSet = new Set(pageDirs);
+          const isCovered = (pd) => specFiles.some((sf) => under(sf, pd));
+          const failures = [];
+
+          // (1) page → spec: every page has a co-located spec, unless grandfathered.
+          for (const pd of pageDirs) {
+            if (isCovered(pd) || exSet.has(pd)) continue;
+            failures.push(`${pd}: page.* has no ${SUFFIX} spec in its subtree — add one, or grandfather it in ${exFile}`);
+          }
+
+          // (2) exceptions must stay honest: a listed dir that no longer exists as
+          // a page, or that now HAS a spec, must be removed (drives the shrink).
+          for (const ex of exSet) {
+            if (!pageDirSet.has(ex)) {
+              failures.push(`${exFile}: "${ex}" is not a route segment with a page.* — remove it`);
+            } else if (isCovered(ex)) {
+              failures.push(`${exFile}: "${ex}" now has a ${SUFFIX} spec — remove it (the list only shrinks)`);
+            }
+          }
+
+          // (3) spec → page: no orphan specs (journey/global specs are exempt).
+          const isExempt = (f) => EXEMPT.some((x) => f.includes(x));
+          const hasAncestorPage = (dir) => {
+            let d = norm(dir);
+            while (roots.some((r) => under(d, r))) {
+              if (pageDirSet.has(d)) return true;
+              const parent = norm(dirname(d));
+              if (parent === d) break;
+              d = parent;
+            }
+            return false;
+          };
+          for (const sf of specFiles) {
+            if (isExempt(sf)) continue;
+            if (!hasAncestorPage(dirname(sf))) {
+              failures.push(`${sf}: e2e spec is not under any route segment (no page.* at or above it) — tie it to a page, or mark it ${EXEMPT.join("/") || "exempt"}`);
+            }
+          }
+
+          for (const f of failures) console.error(`::error::${f}`);
+          if (failures.length > 0) {
+            console.error(`${failures.length} e2e page↔spec coverage problem(s).`);
+            process.exit(1);
+          }
+          console.log(`OK: ${pageDirs.length} route segment(s), ${specFiles.length} co-located ${SUFFIX} spec(s); ${exSet.size} grandfathered.`);
+          EOF
+      - name: Enforce exceptions ratchet (shrink-only + touch-must-fix)
+        shell: bash
+        run: |
+          set -o pipefail
+          if [ -z "$EXCEPTIONS_FILE" ] || [ ! -f "$EXCEPTIONS_FILE" ]; then
+            echo "No $EXCEPTIONS_FILE — nothing to ratchet."
+            exit 0
+          fi
+          git fetch --no-tags origin "$BASE_REF"
+          merge_base="$(git merge-base "origin/$BASE_REF" HEAD)" || {
+            echo "::error::Could not compute merge-base with origin/$BASE_REF"
+            exit 1
+          }
+          # Base version of the exceptions file. Distinguish "absent at base"
+          # (BASE_EXISTED=0 → this PR is establishing the initial grandfather
+          # baseline, so shrink-only must NOT reject the seeded entries) from
+          # "present and empty at base" (BASE_EXISTED=1 → enforce shrink-only).
+          if git show "$merge_base:$EXCEPTIONS_FILE" > /tmp/e2e-cov-base.json 2>/dev/null; then
+            BASE_EXISTED=1
+          else
+            echo "[]" > /tmp/e2e-cov-base.json
+            BASE_EXISTED=0
+          fi
+          BASE_JSON=/tmp/e2e-cov-base.json BASE_EXISTED="$BASE_EXISTED" HEAD_FILE="$EXCEPTIONS_FILE" MERGE_BASE="$merge_base" node <<'EOF'
+          const { readFileSync } = require("node:fs");
+          const { execSync } = require("node:child_process");
+          const norm = (p) => String(p).replace(/\/+$/, "");
+          const load = (f) => {
+            try { const v = JSON.parse(readFileSync(f, "utf8")); return Array.isArray(v) ? v.map(norm) : []; }
+            catch { return []; }
+          };
+          const base = new Set(load(process.env.BASE_JSON));
+          const head = load(process.env.HEAD_FILE);
+          let fail = false;
+
+          // (A) shrink-only: no entry may be ADDED vs base — EXCEPT on the PR
+          // that first creates the file, which establishes the initial
+          // grandfather baseline (there is nothing to "grow" yet).
+          if (process.env.BASE_EXISTED === "1") {
+            const added = head.filter((p) => !base.has(p));
+            if (added.length) {
+              console.error("::error::" + process.env.HEAD_FILE + " may only shrink, never grow. Added:");
+              added.forEach((p) => console.error(`  + ${p}`));
+              console.error("You cannot grandfather a page — add its e2e spec instead of listing it.");
+              fail = true;
+            }
+          } else {
+            console.log(`(initial ${process.env.HEAD_FILE} — establishing the grandfather baseline; shrink-only enforced from the next PR.)`);
+          }
+
+          // (B) touch-must-fix: a changed file under a still-listed segment means
+          // that segment must be de-listed (and thus get a spec). A rename/delete
+          // counts as touching (check both sides).
+          const listed = head; // still listed after this PR
+          const mb = process.env.MERGE_BASE;
+          const diff = execSync(`git diff --name-status -M --diff-filter=ACMRD ${mb} HEAD`, { encoding: "utf8" });
+          const touched = new Set();
+          for (const line of diff.split("\n")) {
+            if (!line.trim()) continue;
+            const parts = line.split("\t");
+            const status = parts[0];
+            const paths = status.startsWith("R") || status.startsWith("C") ? [parts[1], parts[2]] : [parts[1]];
+            for (const p of paths) if (p) touched.add(p);
+          }
+          const offenders = listed.filter((seg) => [...touched].some((f) => f === seg || f.startsWith(seg + "/")));
+          if (offenders.length) {
+            console.error("::error::You changed files under segments still grandfathered in " + process.env.HEAD_FILE + " (a rename or delete counts as touching):");
+            offenders.forEach((s) => console.error(`  - ${s}`));
+            console.error("Policy: a touched segment must be removed from the exceptions file AND get a co-located e2e spec.");
+            fail = true;
+          }
+
+          if (fail) process.exit(1);
+          console.log(`✓ ${process.env.HEAD_FILE} ratchet OK (shrink-only; no touched segment left grandfathered).`);
           EOF
 
   e2e-affected:
