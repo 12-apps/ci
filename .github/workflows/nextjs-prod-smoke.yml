@@ -1,0 +1,180 @@
+name: Next.js Prod Smoke (reusable)
+
+# Reusable production-build boot smoke for Next.js apps. Consuming repos add a
+# small caller:
+#
+#   jobs:
+#     prod-smoke:
+#       needs: static
+#       if: needs.static.outputs.code == 'true'
+#       permissions:
+#         contents: read
+#         # packages: read   # add ONLY if pnpm install pulls private GitHub Packages
+#       uses: 12-apps/ci/.github/workflows/nextjs-prod-smoke.yml@v1
+#       with:
+#         pre-command: pnpm --filter @repo/shared-helpers prisma:generate
+#         build-command: SKIP_ENV_VALIDATION=1 USE_FILE_DB=1 pnpm turbo run build --filter=web
+#         # smoke-script: prod:smoke        # package.json script to probe + run (default)
+#       # NOTE: deliberately NO `secrets: inherit` — see the security note below.
+#
+# WHY THIS EXISTS: Playwright/e2e runs against `next dev`, which does NOT enforce
+# the production runtime — the RSC server→client serialization boundary, env
+# validation, or a real production standalone boot. So a whole class of defects
+# passes e2e yet 500s in prod: a server component passing a function-valued prop
+# (e.g. an MUI `sx` theme callback) across the RSC boundary, a missing prod env
+# var, a Prisma client that only initializes under `next dev`. This lane builds
+# for PRODUCTION and boots the standalone server against a throwaway DB, asserting
+# the app actually comes up — catching that class in CI, not in prod.
+#
+# HONEST SCOPE: only the build+boot SCAFFOLD is centralized here (install →
+# pre-command → prod build → run a consumer smoke script). WHAT to probe — which
+# endpoints/pages must return 200, how to mint an auth cookie, how to seed the
+# throwaway DB — is inherently app-specific and stays a consumer script
+# (`smoke-script`, default `prod:smoke`). The workflow standardizes the lane's
+# shape, least-privilege posture, and non-breaking rollout, not the probes.
+#
+# SECRETS: this gate needs NONE, and MUST NOT be given any. Every job runs
+# consumer-controlled code (install, pre-command, build-command, and the smoke
+# script), so any inherited secret could be exfiltrated by a compromised
+# dependency or script. `permissions: contents: read` scopes only the
+# GITHUB_TOKEN — it does NOT protect env secrets; withholding `secrets: inherit`
+# is the separate, necessary control. The smoke must boot against a throwaway
+# local DB (e.g. PGlite) and a self-minted cookie — no live DB or real
+# credentials. Pass non-secret build/runtime flags inline in build-command
+# (e.g. SKIP_ENV_VALIDATION=1 USE_FILE_DB=1) or as plain env in the smoke script.
+#
+# Runs in the CALLER's checkout: the build-command and smoke-script are the
+# consumer's own. Rollout is non-breaking — the job probes for the smoke script
+# and self-skips (with a notice) when the consumer has not defined it, so
+# shipping via the floating major tag `@v1` breaks no caller.
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node version for the gate.'
+        type: string
+        required: false
+        default: '24'
+      run-smoke:
+        description: >-
+          Run the production-build boot smoke. On by default, but the job
+          self-skips (with a notice) when the consumer does not define the smoke
+          script — so existing callers on the floating major tag are unaffected
+          until they adopt it. Set false to opt out explicitly.
+        type: boolean
+        required: false
+        default: true
+      smoke-script:
+        description: >-
+          package.json script name that boots the production build and probes it
+          (the consumer owns the endpoint list / auth / seed). Probed for
+          existence; the job self-skips if it is absent.
+        type: string
+        required: false
+        default: 'prod:smoke'
+      build-command:
+        description: >-
+          Shell that produces the production build the smoke boots (e.g. a
+          standalone `next build`). Bake non-secret build flags inline
+          (SKIP_ENV_VALIDATION=1, USE_FILE_DB=1, …). Empty skips the build step
+          (only sensible if pre-command already builds).
+        type: string
+        required: false
+        default: ''
+      pre-command:
+        description: 'Shell run before the build (e.g. generate the Prisma client). Empty to skip.'
+        type: string
+        required: false
+        default: ''
+      github-packages-scope:
+        description: >-
+          npm scope (e.g. @my-org) whose dependencies come from GitHub Packages.
+          When set, the job wires ~/.npmrc to install that scope from
+          npm.pkg.github.com using the job GITHUB_TOKEN (requires packages: read
+          on the caller). Empty (default) = no private-registry wiring; the token
+          is never used and public installs are unaffected.
+        type: string
+        required: false
+        default: ''
+
+# Least-privilege, enforced at the source. The effective grant is the
+# INTERSECTION of these and the caller's job permissions, so a consumer that
+# grants more in a combined CI file cannot leak that privilege here. Both grants
+# are READ-only. `packages: read` is the CEILING (not an auto-grant) for
+# consumers whose install pulls PRIVATE GitHub Packages; public-only consumers
+# grant only `contents: read` and package access never takes effect.
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  smoke:
+    name: Next.js Prod Smoke
+    if: ${{ inputs.run-smoke }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Probe FIRST, before any install/build: a consumer that has not adopted
+      # the smoke script must get the skip notice without paying for — or failing
+      # on — the heavy prod build. Uses only the checkout and preinstalled node.
+      - name: Probe for smoke script
+        id: probe
+        shell: bash
+        env:
+          SMOKE_SCRIPT: ${{ inputs.smoke-script }}
+        run: |
+          set -o pipefail
+          if node -e "const s=require('./package.json').scripts||{};process.exit(s[process.env.SMOKE_SCRIPT]?0:1)"; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${SMOKE_SCRIPT} script not defined — skipping (see CONSUMING.md to adopt the prod-smoke gate)"
+          fi
+      - uses: pnpm/action-setup@v4
+        if: ${{ steps.probe.outputs.present == 'true' }}
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        if: ${{ steps.probe.outputs.present == 'true' }}
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+      # Wire ~/.npmrc for private GitHub Packages BEFORE install, using the job's
+      # own GITHUB_TOKEN (packages: read) — NOT an inherited user secret, so the
+      # no-secrets boundary holds. Skipped entirely unless a scope is given.
+      - name: Configure GitHub Packages auth
+        if: ${{ steps.probe.outputs.present == 'true' && inputs.github-packages-scope != '' }}
+        shell: bash
+        env:
+          GH_PKG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          {
+            echo "${{ inputs.github-packages-scope }}:registry=https://npm.pkg.github.com"
+            echo "//npm.pkg.github.com/:_authToken=${GH_PKG_TOKEN}"
+          } >> "$HOME/.npmrc"
+      - name: Install dependencies
+        if: ${{ steps.probe.outputs.present == 'true' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Pre-command
+        if: ${{ steps.probe.outputs.present == 'true' && inputs.pre-command != '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ${{ inputs.pre-command }} 2>&1 | tee pre-command.log
+      - name: Build (production)
+        if: ${{ steps.probe.outputs.present == 'true' && inputs.build-command != '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ${{ inputs.build-command }} 2>&1 | tee build.log
+      - name: Production boot smoke
+        if: ${{ steps.probe.outputs.present == 'true' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm run ${{ inputs.smoke-script }} 2>&1 | tee prod-smoke.log
