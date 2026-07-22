@@ -132,7 +132,11 @@ jobs:
           #   0 = script present            → run the gate
           #   1 = valid manifest, no script → skip with a notice (unadopted)
           #   2 = manifest missing/malformed → hard error (surface the misconfig)
-          node -e '
+          # GitHub runs steps with errexit (-e); the probe's own non-zero exit
+          # (1 = unadopted skip, 2 = manifest error) would abort the step BEFORE
+          # rc is read — turning the documented skip into a failure. Drop -e just
+          # around the probe, then restore it before branching on rc.
+          set +e
             const fs = require("node:fs");
             const path = require("node:path");
             const manifest = path.join(process.env.PKG_DIR || ".", "package.json");
@@ -148,6 +152,7 @@ jobs:
             process.exit(s["rbac:coverage"] ? 0 : 1);
           '
           rc=$?
+          set -e
           if [ "$rc" -eq 0 ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           elif [ "$rc" -eq 1 ]; then
