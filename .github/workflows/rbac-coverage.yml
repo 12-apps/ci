@@ -1,0 +1,167 @@
+name: RBAC Coverage (reusable)
+
+# Reusable RBAC-surface coverage gate — the access-control sibling of the MCP
+# contract gate (mcp-contract.yml). Consuming repos add a small caller:
+#
+#   jobs:
+#     rbac-coverage:
+#       needs: changes
+#       if: needs.changes.outputs.code == 'true'
+#       permissions:
+#         contents: read
+#         # packages: read   # add ONLY if pnpm install pulls private GitHub Packages
+#       uses: 12-apps/ci/.github/workflows/rbac-coverage.yml@v1
+#       with:
+#         pre-command: pnpm --filter @repo/rbac build   # if the RBAC pkg needs a build
+#         # github-packages-scope: '@my-org'            # only for private GitHub Packages
+#       # NOTE: deliberately NO `secrets: inherit` — see the security note below.
+#
+# WHAT IT PROVES: every access-controlled surface the app ships — each guarded
+# route/handler and each permission-bearing server action — either maps to a
+# declared permission in the RBAC model, or is listed in a reviewed exclusions
+# file (e.g. rbac-exclusions.json) with a reason. This is COMPLETENESS: a new
+# endpoint can't silently ship OUTSIDE the permission model (unguarded, or
+# guarded by an unregistered permission). It is the RBAC analogue of
+# mcp:coverage — where mcp:coverage keeps the agent surface complete, this keeps
+# the authorization surface complete.
+#
+# SECRETS: this gate needs NONE, and MUST NOT be given any. Every job runs
+# consumer-controlled code (dependency install, pre-command, and the
+# rbac:coverage script), so any inherited secret could be exfiltrated by a
+# compromised dependency or script. `permissions: contents: read` scopes only
+# the GITHUB_TOKEN — it does NOT protect env secrets; withholding
+# `secrets: inherit` is the separate, necessary control. Coverage is a STATIC
+# analysis of the route/action surface vs the permission registry — no live DB
+# or real credentials required.
+#
+# Runs in the CALLER's checkout, so it uses the consumer repo's own routes,
+# actions, permission registry, exclusions file, and `rbac:coverage`
+# package.json script. The workflow only orchestrates — the app owns the
+# coverage logic behind ONE script:
+#
+#   rbac:coverage — enumerate the guarded routes/handlers + permission-bearing
+#                   server actions, and FAIL (non-zero exit) if any is neither
+#                   mapped to a declared permission nor carried on the reviewed
+#                   exclusions allowlist. The consumer owns the exclusions file
+#                   and its shrink policy.
+#
+# Rollout is non-breaking: the job probes for the script first and self-skips
+# (with a notice) when the consumer has not defined it yet, so shipping this via
+# the floating major tag `@v1` breaks no existing caller.
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node version for the gate.'
+        type: string
+        required: false
+        default: '24'
+      run-coverage:
+        description: >-
+          Run the RBAC route/action coverage gate (rbac:coverage). On by default,
+          but the job self-skips (with a notice) when the consumer does not define
+          the script — so existing callers on the floating major tag are unaffected
+          until they adopt it. Set false to opt out explicitly.
+        type: boolean
+        required: false
+        default: true
+      pre-command:
+        description: 'Shell run before the gate (e.g. build the RBAC package). Empty to skip.'
+        type: string
+        required: false
+        default: ''
+      github-packages-scope:
+        description: >-
+          npm scope (e.g. @my-org) whose dependencies come from GitHub Packages.
+          When set, the job wires ~/.npmrc to install that scope from
+          npm.pkg.github.com using the job GITHUB_TOKEN (requires packages: read
+          on the caller). Empty (default) = no private-registry wiring; the token
+          is never used and public installs are unaffected.
+        type: string
+        required: false
+        default: ''
+
+# Least-privilege, enforced at the source. The effective grant is the
+# INTERSECTION of these and the caller's job permissions, so a consumer that
+# grants more in a combined CI file (e.g. contents: write, actions: write) cannot
+# leak that privilege here. Both grants are READ-only.
+#
+# `packages: read` is the CEILING (not an auto-grant): consumers whose
+# `pnpm install` pulls PRIVATE GitHub Packages need it, so it must be allowed
+# here or the intersection would strip it and installs would 401/403. Public-only
+# consumers simply grant `contents: read` in their caller and packages access
+# never takes effect. It cannot enable writes.
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  # COVERAGE proves the authorization surface is COMPLETE: every guarded route
+  # and permission-bearing action is mapped to a declared permission or carried
+  # on a reviewed exclusions allowlist. The script-existence probe keeps the job
+  # non-breaking for consumers that have not adopted rbac:coverage yet — they see
+  # a skip notice, not a failure.
+  coverage:
+    name: RBAC Coverage
+    if: ${{ inputs.run-coverage }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Probe FIRST, before any install/pre-command: a consumer that has not
+      # adopted rbac:coverage must get the promised skip notice without paying
+      # for — or failing on — the heavy setup steps. Uses only the checkout and
+      # the runner's preinstalled node.
+      - name: Probe for rbac:coverage script
+        id: probe
+        shell: bash
+        run: |
+          set -o pipefail
+          if node -e "const s=require('./package.json').scripts||{};process.exit(s['rbac:coverage']?0:1)"; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::rbac:coverage script not defined — skipping (see CONSUMING.md to adopt the RBAC coverage gate)"
+          fi
+      - uses: pnpm/action-setup@v4
+        if: ${{ steps.probe.outputs.present == 'true' }}
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        if: ${{ steps.probe.outputs.present == 'true' }}
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+      # Wire ~/.npmrc for private GitHub Packages BEFORE install, using the job's
+      # own GITHUB_TOKEN (packages: read) — NOT an inherited user secret, so the
+      # no-secrets boundary holds. Skipped entirely unless a scope is given, so
+      # public-only consumers are unaffected and the token is never written.
+      - name: Configure GitHub Packages auth
+        if: ${{ steps.probe.outputs.present == 'true' && inputs.github-packages-scope != '' }}
+        shell: bash
+        env:
+          GH_PKG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          {
+            echo "${{ inputs.github-packages-scope }}:registry=https://npm.pkg.github.com"
+            echo "//npm.pkg.github.com/:_authToken=${GH_PKG_TOKEN}"
+          } >> "$HOME/.npmrc"
+      - name: Install dependencies
+        if: ${{ steps.probe.outputs.present == 'true' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Pre-command
+        if: ${{ steps.probe.outputs.present == 'true' && inputs.pre-command != '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ${{ inputs.pre-command }} 2>&1 | tee pre-command.log
+      - name: RBAC route/action coverage
+        if: ${{ steps.probe.outputs.present == 'true' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm rbac:coverage 2>&1 | tee rbac-coverage.log

@@ -526,6 +526,66 @@ Plus a committed source-of-truth pair the scripts operate on: the rendered
 `@repo/mcp` from the app's Zod-schema'd routes). Drift between endpoint schemas and
 the manifest is exactly what `mcp:check` catches.
 
+# Consuming the RBAC coverage gate
+
+The access-control sibling of the MCP contract gate: a reusable gate
+(`rbac-coverage.yml`) that keeps a repo's **authorization** surface complete. It
+runs in the CALLER's checkout and only orchestrates — the app owns the coverage
+logic behind one script.
+
+The pattern it enforces: every access-controlled surface the app ships — each
+guarded route/handler and each permission-bearing server action — either maps to
+a **declared permission** in the RBAC model, or sits on a **reviewed exclusions
+allowlist** (e.g. `rbac-exclusions.json`) with a reason. It's the RBAC analogue of
+`mcp:coverage`: where that keeps the agent surface complete, this stops a new
+endpoint silently shipping OUTSIDE the permission model (unguarded, or guarded by
+an unregistered permission).
+
+## A. Caller job (add to your CI workflow)
+
+```yaml
+  rbac-coverage:
+    needs: changes            # optional: gate on a paths-filter change-detector
+    if: needs.changes.outputs.code == 'true'
+    # Least-privilege on two axes (see the MCP notes above): a read-only token,
+    # and NO inherited secrets.
+    permissions:
+      contents: read
+      # packages: read   # add ONLY if pnpm install pulls private GitHub Packages
+    uses: 12-apps/ci/.github/workflows/rbac-coverage.yml@v1
+    with:
+      # Build the RBAC package before the gate runs, if it needs one.
+      pre-command: pnpm --filter @repo/rbac build
+    # NOTE: intentionally no `secrets: inherit` — this gate needs no secrets.
+```
+
+**Secrets — pass none.** Same rule and rationale as the MCP gate: every job runs
+consumer-controlled code, so withhold `secrets: inherit`; `permissions` scopes
+only the `GITHUB_TOKEN`, not env secrets. `rbac:coverage` is a **static** analysis
+of the route/action surface vs the permission registry — design it to run offline
+(no live DB or real credentials).
+
+**Private packages.** Identical wiring to the MCP gate — grant `packages: read`
+and set `github-packages-scope: '@my-org'` (see that section above). Public-only
+consumers set neither.
+
+Inputs (all optional): `node-version` (default `24`), `run-coverage` (default
+true — self-skips with a notice until the consumer defines the script; set
+`false` to opt out explicitly), `pre-command`, `github-packages-scope` (default
+empty — see the MCP Private-packages section).
+
+## B. Required in the consumer repo
+
+`package.json` script:
+
+| Script | Purpose |
+|--------|---------|
+| `rbac:coverage` | Enumerate the guarded routes/handlers + permission-bearing server actions and **exit non-zero** if any is neither mapped to a declared permission nor carried on the reviewed exclusions allowlist. On by default but only runs when the script exists (skips with a notice otherwise), so adoption is per-repo: define the script and the gate arms itself. |
+
+Plus the committed source-of-truth the script operates on: the **permission
+registry** (the app's declared permissions) and a **reviewed exclusions file**
+(e.g. `rbac-exclusions.json`) — the consumer owns this file and its shrink policy.
+
 ## 6. First DigitalOcean provision
 
 Run the caller via **workflow_dispatch** with `action=provision`,
