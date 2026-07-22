@@ -131,6 +131,55 @@ on:
         type: string
         required: false
         default: '.e2e-coverage-exceptions.json'
+      e2e-content-app-dirs:
+        description: >-
+          Comma-separated roots (e.g. "apps/web/app" or "apps/admin/src/pages")
+          to enforce e2e content-quality on. This is the companion to the
+          page↔spec coverage gate: coverage proves a spec FILE exists, this gate
+          proves the spec actually EXERCISES the page rather than being a
+          navigate-and-toBeVisible render smoke test. Pure static heuristics — no
+          browser/e2e infra. Every co-located spec (default suffix .e2e.ts) must
+          (1) perform ≥1 interaction, (2) carry ≥1 behavioral assertion (not just
+          toBeVisible-style render checks), (3) have ≥1 assertion AFTER an
+          interaction (verify a state change), and (4) have ≥ min assertions.
+          Weak specs are grandfathered in a shrink-only exceptions file. Empty
+          (default) skips the gate. HEURISTIC, NOT PROOF: it stops lazy specs,
+          not adversarial ones — real teeth come from runtime coverage.
+        type: string
+        required: false
+        default: ''
+      e2e-content-spec-suffix:
+        description: 'Filename suffix marking a co-located e2e spec for the content gate.'
+        type: string
+        required: false
+        default: '.e2e.ts'
+      e2e-content-exempt-globs:
+        description: >-
+          Comma-separated filename substrings that exempt a spec from the content
+          gate — cross-cutting specs (journeys/globals) whose shape the heuristics
+          are not tuned for. Default matches the coverage gate.
+        type: string
+        required: false
+        default: '.journey.,.global.'
+      e2e-content-min-assertions:
+        description: >-
+          Minimum number of assertions (expect matchers) a non-exempt spec must
+          carry. A weak floor on top of the interaction / behavioral-assertion /
+          assert-after-action rules (which do the real work). Kept at 2 so a
+          legitimate two-assertion flow (e.g. delete → assert gone + assert count)
+          is not a false positive; raise it for a stricter bar.
+        type: number
+        required: false
+        default: 2
+      e2e-content-exceptions:
+        description: >-
+          Repo-root-relative path to a shrink-only JSON array of spec file paths
+          grandfathered as content-weak. The list may only shrink, and touching a
+          listed spec forces it to be de-listed (i.e. strengthened). A missing
+          file means no grandfathering.
+        type: string
+        required: false
+        default: '.e2e-content-exceptions.json'
 
 # Least-privilege, enforced at the source: every job here only reads the repo.
 # Capping permissions at the workflow level means a consumer that grants more in
@@ -717,6 +766,263 @@ jobs:
 
           if (fail) process.exit(1);
           console.log(`✓ ${process.env.HEAD_FILE} ratchet OK (shrink-only; no touched segment left grandfathered).`);
+          EOF
+
+  # E2E content-quality (opt-in): the companion to e2e-coverage. Coverage proves
+  # a spec FILE exists per page; this proves the spec actually EXERCISES the page
+  # instead of being a navigate-and-toBeVisible render smoke test. Pure static
+  # heuristics on the spec source — no browser/e2e infra. A non-exempt spec must
+  # (1) perform ≥1 interaction (click/fill/press/selectOption/…), (2) carry ≥1
+  # behavioral assertion (a matcher other than toBeVisible/toBeHidden-style, or a
+  # negated visibility check), (3) have ≥1 assertion AFTER an interaction (verify
+  # a state change, not just an initial render), and (4) meet a min-assertion
+  # floor. HEURISTIC, NOT PROOF — it stops lazy specs, not adversarial ones; real
+  # teeth come from runtime coverage. Weak specs are grandfathered in a
+  # shrink-only exceptions file with the same ratchet as e2e-coverage.
+  e2e-content:
+    name: E2E Content
+    if: ${{ inputs.e2e-content-app-dirs != '' }}
+    runs-on: ubuntu-latest
+    env:
+      APP_DIRS: ${{ inputs.e2e-content-app-dirs }}
+      SPEC_SUFFIX: ${{ inputs.e2e-content-spec-suffix }}
+      EXEMPT: ${{ inputs.e2e-content-exempt-globs }}
+      MIN_ASSERT: ${{ inputs.e2e-content-min-assertions }}
+      EXCEPTIONS_FILE: ${{ inputs.e2e-content-exceptions }}
+      BASE_REF: ${{ github.base_ref || 'main' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the ratchet can diff the exceptions file vs base.
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Enforce e2e spec content-quality
+        shell: bash
+        run: |
+          set -o pipefail
+          node <<'EOF'
+          const { readdirSync, readFileSync, existsSync } = require("node:fs");
+          const { join } = require("node:path");
+          const norm = (p) => p.replace(/\/+$/, "");
+          const SKIP = new Set(["api", "node_modules"]);
+          const roots = process.env.APP_DIRS.split(",").map((r) => r.trim()).filter(Boolean);
+          const SUFFIX = process.env.SPEC_SUFFIX || ".e2e.ts";
+          const EXEMPT = (process.env.EXEMPT || "").split(",").map((s) => s.trim()).filter(Boolean);
+          const MIN_ASSERT = Number.parseInt(process.env.MIN_ASSERT || "3", 10);
+          const exFile = process.env.EXCEPTIONS_FILE || "";
+
+          let exceptions = [];
+          if (exFile && existsSync(exFile)) {
+            try {
+              exceptions = JSON.parse(readFileSync(exFile, "utf8"));
+            } catch (e) {
+              console.error(`::error::${exFile} is not valid JSON: ${e.message}`);
+              process.exit(1);
+            }
+            if (!Array.isArray(exceptions)) {
+              console.error(`::error::${exFile} must be a JSON array of spec file paths`);
+              process.exit(1);
+            }
+          }
+          const exSet = new Set(exceptions.map(norm));
+
+          // Collect every co-located spec under the roots.
+          const specFiles = [];
+          let traversalFailed = false;
+          function walk(dir) {
+            let entries;
+            try {
+              entries = readdirSync(dir, { withFileTypes: true });
+            } catch {
+              console.error(`::error::${dir}: unreadable — check e2e-content-app-dirs`);
+              traversalFailed = true;
+              return;
+            }
+            for (const e of entries) {
+              if (e.isFile()) {
+                if (e.name.endsWith(SUFFIX)) specFiles.push(norm(join(dir, e.name)));
+                continue;
+              }
+              if (!e.isDirectory()) continue;
+              if (SKIP.has(e.name) || e.name.startsWith("_") || e.name.startsWith(".")) continue;
+              walk(join(dir, e.name));
+            }
+          }
+          roots.forEach(walk);
+
+          // A single unreadable root must fail — never pass with an un-scanned tree.
+          if (traversalFailed) {
+            console.error("::error::one or more e2e-content-app-dirs roots were unreadable (see above) — refusing to pass with an un-scanned tree.");
+            process.exit(1);
+          }
+          if (specFiles.length === 0) {
+            console.error(`::error::no ${SUFFIX} spec found under: ${roots.join(", ")} — check e2e-content-app-dirs`);
+            process.exit(1);
+          }
+
+          // ── Heuristics ──────────────────────────────────────────────────────
+          // A known-matcher allowlist keeps plain JS methods (toString, toFixed,
+          // toISOString, toLowerCase…) from being miscounted as assertions.
+          const RENDER_ONLY = new Set(["toBeVisible", "toBeHidden", "toBeAttached", "toBeInViewport"]);
+          const KNOWN_MATCHERS = new Set([
+            ...RENDER_ONLY,
+            "toHaveText", "toContainText", "toHaveValue", "toHaveValues", "toHaveURL", "toHaveTitle",
+            "toHaveCount", "toHaveAttribute", "toHaveClass", "toHaveId", "toHaveJSProperty", "toHaveCSS",
+            "toBeChecked", "toBeEnabled", "toBeDisabled", "toBeEditable", "toBeEmpty", "toBeFocused",
+            "toHaveScreenshot", "toHaveAccessibleName", "toHaveAccessibleDescription", "toHaveRole", "toBeOK",
+            "toBe", "toEqual", "toStrictEqual", "toContain", "toContainEqual", "toMatch", "toMatchObject",
+            "toMatchSnapshot", "toMatchInlineSnapshot", "toBeTruthy", "toBeFalsy", "toBeNull", "toBeNaN",
+            "toBeDefined", "toBeUndefined", "toBeGreaterThan", "toBeGreaterThanOrEqual", "toBeLessThan",
+            "toBeLessThanOrEqual", "toBeCloseTo", "toHaveLength", "toHaveProperty", "toThrow", "toThrowError",
+            "toHaveBeenCalled", "toHaveBeenCalledTimes", "toHaveBeenCalledWith", "toHaveReturned",
+          ]);
+          const ACTION_RE = /\.\s*(click|dblclick|fill|type|press|pressSequentially|check|uncheck|setChecked|selectOption|selectText|setInputFiles|dragTo|tap|clear|hover|focus)\s*\(/g;
+          // Optional `not.` prefix so a negated visibility check (e.g. asserting a
+          // row disappeared after delete) counts as a behavioral assertion.
+          const MATCHER_RE = /\.\s*(not\s*\.\s*)?(to[A-Z][A-Za-z0-9]*)\s*\(/g;
+          const stripComments = (src) =>
+            src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
+
+          function analyze(src) {
+            const code = stripComments(src);
+            const matchers = [];
+            let m;
+            MATCHER_RE.lastIndex = 0;
+            while ((m = MATCHER_RE.exec(code))) {
+              const name = m[2];
+              if (!KNOWN_MATCHERS.has(name)) continue;
+              matchers.push({ name, negated: Boolean(m[1]), idx: m.index });
+            }
+            const actions = [];
+            let a;
+            ACTION_RE.lastIndex = 0;
+            while ((a = ACTION_RE.exec(code))) actions.push(a.index);
+
+            const firstActionIdx = actions.length ? Math.min(...actions) : Infinity;
+            return {
+              assertionCount: matchers.length,
+              hasAction: actions.length > 0,
+              hasBehavioral: matchers.some((x) => x.negated || !RENDER_ONLY.has(x.name)),
+              assertAfterAction: matchers.some((x) => x.idx > firstActionIdx),
+            };
+          }
+
+          const isExempt = (f) => EXEMPT.some((x) => f.includes(x));
+          const weak = new Map(); // spec -> reasons[]
+          for (const sf of specFiles) {
+            if (isExempt(sf)) continue;
+            let src;
+            try {
+              src = readFileSync(sf, "utf8");
+            } catch {
+              weak.set(sf, ["unreadable"]);
+              continue;
+            }
+            const r = analyze(src);
+            const reasons = [];
+            if (!r.hasAction) reasons.push("no interaction (click/fill/press/selectOption/…) — a nav-only render smoke test");
+            if (!r.hasBehavioral) reasons.push("no behavioral assertion — only toBeVisible/toBeHidden-style render checks");
+            if (!r.assertAfterAction) reasons.push("no assertion after an interaction — nothing verifies a state change");
+            if (r.assertionCount < MIN_ASSERT) reasons.push(`only ${r.assertionCount} assertion(s), need ≥ ${MIN_ASSERT}`);
+            if (reasons.length) weak.set(sf, reasons);
+          }
+
+          const failures = [];
+          // (1) every non-exempt spec must clear the bar, unless grandfathered.
+          for (const [sf, reasons] of weak) {
+            if (exSet.has(sf)) continue;
+            failures.push(`${sf}: weak e2e spec — ${reasons.join("; ")}. Strengthen it, or grandfather it in ${exFile}`);
+          }
+          // (2) exceptions stay honest: a listed spec that no longer exists, or
+          // now clears the bar, must be removed (drives the shrink).
+          const specSet = new Set(specFiles);
+          for (const ex of exSet) {
+            if (!specSet.has(ex)) {
+              failures.push(`${exFile}: "${ex}" is not a ${SUFFIX} spec — remove it`);
+            } else if (!weak.has(ex)) {
+              failures.push(`${exFile}: "${ex}" now meets the content bar — remove it (the list only shrinks)`);
+            }
+          }
+
+          for (const f of failures) console.error(`::error::${f}`);
+          if (failures.length > 0) {
+            console.error(`${failures.length} e2e content-quality problem(s).`);
+            process.exit(1);
+          }
+          console.log(`OK: ${specFiles.length} ${SUFFIX} spec(s) scanned; ${weak.size} weak (all grandfathered); ${exSet.size} listed.`);
+          EOF
+      - name: Enforce exceptions ratchet (shrink-only + touch-must-fix)
+        shell: bash
+        run: |
+          set -o pipefail
+          if [ -z "$EXCEPTIONS_FILE" ] || [ ! -f "$EXCEPTIONS_FILE" ]; then
+            echo "No $EXCEPTIONS_FILE — nothing to ratchet."
+            exit 0
+          fi
+          git fetch --no-tags origin "$BASE_REF"
+          merge_base="$(git merge-base "origin/$BASE_REF" HEAD)" || {
+            echo "::error::Could not compute merge-base with origin/$BASE_REF"
+            exit 1
+          }
+          # Distinguish "absent at base" (this PR seeds the baseline — don't
+          # reject the seeded entries) from "present at base" (enforce shrink-only).
+          if git show "$merge_base:$EXCEPTIONS_FILE" > /tmp/e2e-content-base.json 2>/dev/null; then
+            BASE_EXISTED=1
+          else
+            echo "[]" > /tmp/e2e-content-base.json
+            BASE_EXISTED=0
+          fi
+          BASE_JSON=/tmp/e2e-content-base.json BASE_EXISTED="$BASE_EXISTED" HEAD_FILE="$EXCEPTIONS_FILE" MERGE_BASE="$merge_base" node <<'EOF'
+          const { readFileSync } = require("node:fs");
+          const { execSync } = require("node:child_process");
+          const norm = (p) => String(p).replace(/\/+$/, "");
+          const load = (f) => {
+            try { const v = JSON.parse(readFileSync(f, "utf8")); return Array.isArray(v) ? v.map(norm) : []; }
+            catch { return []; }
+          };
+          const base = new Set(load(process.env.BASE_JSON));
+          const head = load(process.env.HEAD_FILE);
+          let fail = false;
+
+          // (A) shrink-only: no entry may be ADDED vs base — EXCEPT on the PR
+          // that first creates the file (which establishes the baseline).
+          if (process.env.BASE_EXISTED === "1") {
+            const added = head.filter((p) => !base.has(p));
+            if (added.length) {
+              console.error("::error::" + process.env.HEAD_FILE + " may only shrink, never grow. Added:");
+              added.forEach((p) => console.error(`  + ${p}`));
+              console.error("You cannot grandfather a weak spec — strengthen it instead of listing it.");
+              fail = true;
+            }
+          } else {
+            console.log(`(initial ${process.env.HEAD_FILE} — establishing the grandfather baseline; shrink-only enforced from the next PR.)`);
+          }
+
+          // (B) touch-must-fix: a changed listed spec must be de-listed (i.e.
+          // strengthened). A rename/delete counts as touching (check both sides).
+          const listed = head;
+          const mb = process.env.MERGE_BASE;
+          const diff = execSync(`git diff --name-status -M --diff-filter=ACMRD ${mb} HEAD`, { encoding: "utf8" });
+          const touched = new Set();
+          for (const line of diff.split("\n")) {
+            if (!line.trim()) continue;
+            const parts = line.split("\t");
+            const status = parts[0];
+            const paths = status.startsWith("R") || status.startsWith("C") ? [parts[1], parts[2]] : [parts[1]];
+            for (const p of paths) if (p) touched.add(p);
+          }
+          const offenders = listed.filter((sf) => touched.has(sf));
+          if (offenders.length) {
+            console.error("::error::You changed specs still grandfathered in " + process.env.HEAD_FILE + " (a rename or delete counts as touching):");
+            offenders.forEach((s) => console.error(`  - ${s}`));
+            console.error("Policy: a touched spec must be removed from the exceptions file AND strengthened to clear the content bar.");
+            fail = true;
+          }
+
+          if (fail) process.exit(1);
+          console.log(`✓ ${process.env.HEAD_FILE} ratchet OK (shrink-only; no touched spec left grandfathered).`);
           EOF
 
   e2e-affected:
