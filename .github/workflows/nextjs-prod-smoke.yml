@@ -97,6 +97,15 @@ on:
         type: string
         required: false
         default: ''
+      package-dir:
+        description: >-
+          Directory whose package.json defines the smoke-script (default repo
+          root). A monorepo that keeps the script in a workspace package (e.g.
+          apps/web/package.json) points this there; the probe and the script run
+          both resolve against it. Dependency install still runs at the repo root.
+        type: string
+        required: false
+        default: '.'
 
 # Least-privilege, enforced at the source. The effective grant is the
 # INTERSECTION of these and the caller's job permissions, so a consumer that
@@ -123,13 +132,36 @@ jobs:
         shell: bash
         env:
           SMOKE_SCRIPT: ${{ inputs.smoke-script }}
+          PKG_DIR: ${{ inputs.package-dir }}
         run: |
           set -o pipefail
-          if node -e "const s=require('./package.json').scripts||{};process.exit(s[process.env.SMOKE_SCRIPT]?0:1)"; then
+          # THREE outcomes, so a broken manifest is a FAILURE, not a silent skip:
+          #   0 = script present            → build + boot
+          #   1 = valid manifest, no script → skip with a notice (unadopted)
+          #   2 = manifest missing/malformed → hard error (surface the misconfig)
+          node -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const manifest = path.join(process.env.PKG_DIR || ".", "package.json");
+            let pkg;
+            try {
+              pkg = JSON.parse(fs.readFileSync(manifest, "utf8"));
+            } catch (e) {
+              const why = e.code === "ENOENT" ? "not found" : "unreadable or malformed";
+              console.error(`::error::${manifest} is ${why}: ${e.message} — cannot evaluate the prod-smoke gate`);
+              process.exit(2);
+            }
+            const s = pkg.scripts || {};
+            process.exit(s[process.env.SMOKE_SCRIPT] ? 0 : 1);
+          '
+          rc=$?
+          if [ "$rc" -eq 0 ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
-          else
+          elif [ "$rc" -eq 1 ]; then
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::${SMOKE_SCRIPT} script not defined — skipping (see CONSUMING.md to adopt the prod-smoke gate)"
+            echo "::notice::${SMOKE_SCRIPT} not defined in ${PKG_DIR%/}/package.json — skipping (see CONSUMING.md to adopt the prod-smoke gate)"
+          else
+            exit 1
           fi
       - uses: pnpm/action-setup@v4
         if: ${{ steps.probe.outputs.present == 'true' }}
@@ -175,6 +207,9 @@ jobs:
       - name: Production boot smoke
         if: ${{ steps.probe.outputs.present == 'true' }}
         shell: bash
+        env:
+          SMOKE_SCRIPT: ${{ inputs.smoke-script }}
+          PKG_DIR: ${{ inputs.package-dir }}
         run: |
           set -o pipefail
-          pnpm run ${{ inputs.smoke-script }} 2>&1 | tee prod-smoke.log
+          pnpm -C "$PKG_DIR" run "$SMOKE_SCRIPT" 2>&1 | tee prod-smoke.log

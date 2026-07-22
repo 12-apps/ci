@@ -573,7 +573,14 @@ and set `github-packages-scope: '@my-org'`. Public-only consumers set neither.
 Inputs (all optional): `node-version` (default `24`), `run-smoke` (default true —
 self-skips with a notice until the `smoke-script` exists; set `false` to opt out),
 `smoke-script` (default `prod:smoke`), `build-command` (the prod build; empty
-skips the build step), `pre-command`, `github-packages-scope`.
+skips the build step), `pre-command`, `github-packages-scope`, `package-dir`
+(default `.` — the directory whose `package.json` holds the `smoke-script`; point
+it at a workspace package, e.g. `apps/web`, if the script lives there).
+
+The self-skip is only for a **valid** manifest that hasn't adopted the script
+yet. A `package.json` that is **missing, unreadable, or malformed** at
+`package-dir` is a hard **failure** (not a silent skip), so a broken consumer
+config surfaces instead of quietly disabling the gate.
 
 ## B. Required in the consumer repo
 
