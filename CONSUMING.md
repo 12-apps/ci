@@ -246,7 +246,11 @@ opt-in loading-coverage gate), `loading-must-render` (default empty),
 (default `.journey.,.global.`), `e2e-coverage-exceptions` (default
 `.e2e-coverage-exceptions.json`), `e2e-coverage-page-file` (default
 `^page\.(js|jsx|ts|tsx)$` — the route-page marker regex; a Vite/React-Router SPA
-keyed on `src/pages/<route>/index.tsx` passes `^index\.tsx$`).
+keyed on `src/pages/<route>/index.tsx` passes `^index\.tsx$`),
+`e2e-content-app-dirs` (default empty — opt-in e2e content-quality gate),
+`e2e-content-spec-suffix` (default `.e2e.ts`), `e2e-content-exempt-globs`
+(default `.journey.,.global.`), `e2e-content-min-assertions` (default `2`),
+`e2e-content-exceptions` (default `.e2e-content-exceptions.json`).
 
 ### Next.js loading-coverage gate (opt-in)
 
@@ -298,6 +302,48 @@ exceptions file against the base branch (`fetch-depth: 0`).
 The affected-selection side (running only the specs a diff touches) is separate:
 enable `run-affected-e2e` and provide a `test:e2e:affected` selector in the
 consumer — with co-located specs the selector maps by directory, no manifest.
+
+### E2E content-quality gate (opt-in)
+
+The companion to the coverage gate. Coverage proves a spec **file** exists per
+page; this proves the spec actually **exercises** the page instead of being a
+`goto` + `toBeVisible` render smoke test. Point `e2e-content-app-dirs` at the
+same root(s) and every non-exempt spec (default suffix `*.e2e.ts`) must:
+
+1. perform **≥1 interaction** — `click` / `fill` / `press` / `selectOption` /
+   `check` / `type` / `setInputFiles` / … (a nav-only spec has none);
+2. carry **≥1 behavioral assertion** — a matcher other than the render-only
+   `toBeVisible` / `toBeAttached` / `toBeInViewport` family. A positive
+   `toBeHidden()` (asserting an element is absent — empty state, filtered out,
+   gated) or a negated visibility check like `.not.toBeVisible()` both prove a
+   state/transition and **count as behavioral**;
+3. have **≥1 assertion after an interaction, within the same test** — the
+   strongest cheap signal that the spec verifies a *state change*, not just the
+   initial render (the check is per-`test()` block, so an action in one test
+   can't borrow an assertion from another);
+4. meet the **`e2e-content-min-assertions`** floor (default `2`).
+
+Weak specs are grandfathered in a **shrink-only** JSON array
+(`e2e-content-exceptions`, default `.e2e-content-exceptions.json`, a list of spec
+file paths) with the same ratchet as the coverage gate — the list may only
+shrink, and touching a listed spec forces it to be de-listed (i.e. strengthened).
+Needs no scripts or install — pure static analysis of the spec source.
+
+**This is a heuristic, not proof.** It stops *lazy* specs, not *adversarial*
+ones: a spec author (or agent) told "you need an interaction and an assertion
+after it" can satisfy the letter without testing anything meaningful. The
+non-gameable measure is runtime coverage (instrument the e2e build, threshold
+per page); treat this gate as the cheap first layer that raises the floor.
+
+```yaml
+    with:
+      e2e-content-app-dirs: apps/web/app
+      e2e-content-exceptions: apps/web/.e2e-content-exceptions.json
+      # optional overrides:
+      # e2e-content-spec-suffix: '.e2e.ts'
+      # e2e-content-exempt-globs: '.journey.,.global.'
+      # e2e-content-min-assertions: 2
+```
 
 ## B. Required in the consumer repo
 
