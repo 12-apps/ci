@@ -865,9 +865,13 @@ jobs:
           // ── Heuristics ──────────────────────────────────────────────────────
           // A known-matcher allowlist keeps plain JS methods (toString, toFixed,
           // toISOString, toLowerCase…) from being miscounted as assertions.
-          const RENDER_ONLY = new Set(["toBeVisible", "toBeHidden", "toBeAttached", "toBeInViewport"]);
+          // Render-only = "it's there on load". toBeHidden is deliberately NOT
+          // here: asserting an element is hidden/absent (empty state, filtered
+          // out, gated feature) is a state assertion, the positive twin of the
+          // `.not.toBeVisible()` we already credit below.
+          const RENDER_ONLY = new Set(["toBeVisible", "toBeAttached", "toBeInViewport"]);
           const KNOWN_MATCHERS = new Set([
-            ...RENDER_ONLY,
+            ...RENDER_ONLY, "toBeHidden",
             "toHaveText", "toContainText", "toHaveValue", "toHaveValues", "toHaveURL", "toHaveTitle",
             "toHaveCount", "toHaveAttribute", "toHaveClass", "toHaveId", "toHaveJSProperty", "toHaveCSS",
             "toBeChecked", "toBeEnabled", "toBeDisabled", "toBeEditable", "toBeEmpty", "toBeFocused",
