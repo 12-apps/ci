@@ -593,6 +593,70 @@ Plus the committed source-of-truth the script operates on: the **permission
 registry** (the app's declared permissions) and a **reviewed exclusions file**
 (e.g. `rbac-exclusions.json`) — the consumer owns this file and its shrink policy.
 
+# Consuming the Next.js prod-smoke gate
+
+A reusable gate (`nextjs-prod-smoke.yml`) that builds a Next.js app for
+**production** and boots the standalone server to prove it actually comes up.
+
+Why it's separate from e2e: Playwright runs against `next dev`, which does not
+enforce the production runtime — the RSC server→client serialization boundary,
+env validation, or a real standalone boot. So a class of defects passes e2e yet
+500s in prod (a server component passing a **function-valued prop** across the RSC
+boundary, a missing prod env var, a Prisma client that only inits under dev). This
+lane catches that class in CI.
+
+**Honest scope:** only the build+boot **scaffold** is centralized (install →
+pre-command → prod build → run a consumer smoke script). WHAT to probe — which
+endpoints/pages must 200, how to mint an auth cookie, how to seed a throwaway DB —
+is app-specific and stays your `smoke-script` (default `prod:smoke`).
+
+## A. Caller job (add to your CI workflow)
+
+```yaml
+  prod-smoke:
+    needs: static             # optional: gate on the static tier / a change-detector
+    if: needs.static.outputs.code == 'true'
+    permissions:
+      contents: read
+      # packages: read   # add ONLY if pnpm install pulls private GitHub Packages
+    uses: 12-apps/ci/.github/workflows/nextjs-prod-smoke.yml@v1
+    with:
+      pre-command: pnpm --filter @repo/shared-helpers prisma:generate
+      build-command: SKIP_ENV_VALIDATION=1 USE_FILE_DB=1 pnpm turbo run build --filter=web
+      # smoke-script: prod:smoke     # package.json script to probe + run (default)
+    # NOTE: intentionally no `secrets: inherit` — this gate needs no secrets.
+```
+
+**Secrets — pass none.** Same rule and rationale as the MCP contract gate (see
+above): every job runs consumer-controlled code, so withhold `secrets: inherit`;
+`permissions` scopes only the `GITHUB_TOKEN`, not env secrets. The smoke must boot
+against a **throwaway** local DB (e.g. PGlite) and a self-minted cookie — no live
+DB or real credentials. Bake non-secret build/runtime flags inline in
+`build-command` (`SKIP_ENV_VALIDATION=1`, `USE_FILE_DB=1`).
+
+**Private packages.** Identical wiring to the MCP gate — grant `packages: read`
+and set `github-packages-scope: '@my-org'`. Public-only consumers set neither.
+
+Inputs (all optional): `node-version` (default `24`), `run-smoke` (default true —
+self-skips with a notice until the `smoke-script` exists; set `false` to opt out),
+`smoke-script` (default `prod:smoke`), `build-command` (the prod build; empty
+skips the build step), `pre-command`, `github-packages-scope`, `package-dir`
+(default `.` — the directory whose `package.json` holds the `smoke-script`; point
+it at a workspace package, e.g. `apps/web`, if the script lives there).
+
+The self-skip is only for a **valid** manifest that hasn't adopted the script
+yet. A `package.json` that is **missing, unreadable, or malformed** at
+`package-dir` is a hard **failure** (not a silent skip), so a broken consumer
+config surfaces instead of quietly disabling the gate.
+
+## B. Required in the consumer repo
+
+`package.json` script:
+
+| Script | Purpose |
+|--------|---------|
+| `prod:smoke` (or your `smoke-script` name) | Boot the production build (the `build-command` above produced it) against a throwaway DB, mint any auth cookie it needs, GET the key public + guarded endpoints/pages, and **exit non-zero** if any probe fails or the server logs a serialization/runtime error. Owns the endpoint list, seeding, and boot. Probed for existence; the job self-skips if absent. |
+
 ## 6. First DigitalOcean provision
 
 Run the caller via **workflow_dispatch** with `action=provision`,
