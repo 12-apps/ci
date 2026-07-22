@@ -313,10 +313,14 @@ same root(s) and every non-exempt spec (default suffix `*.e2e.ts`) must:
 1. perform **≥1 interaction** — `click` / `fill` / `press` / `selectOption` /
    `check` / `type` / `setInputFiles` / … (a nav-only spec has none);
 2. carry **≥1 behavioral assertion** — a matcher other than the render-only
-   `toBeVisible` / `toBeHidden` / `toBeAttached` / `toBeInViewport` family (or a
-   negated visibility check like `.not.toBeVisible()`, which proves a transition);
-3. have **≥1 assertion after an interaction** — the strongest cheap signal that
-   the spec verifies a *state change*, not just the initial render;
+   `toBeVisible` / `toBeAttached` / `toBeInViewport` family. A positive
+   `toBeHidden()` (asserting an element is absent — empty state, filtered out,
+   gated) or a negated visibility check like `.not.toBeVisible()` both prove a
+   state/transition and **count as behavioral**;
+3. have **≥1 assertion after an interaction, within the same test** — the
+   strongest cheap signal that the spec verifies a *state change*, not just the
+   initial render (the check is per-`test()` block, so an action in one test
+   can't borrow an assertion from another);
 4. meet the **`e2e-content-min-assertions`** floor (default `2`).
 
 Weak specs are grandfathered in a **shrink-only** JSON array

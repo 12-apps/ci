@@ -773,9 +773,11 @@ jobs:
   # instead of being a navigate-and-toBeVisible render smoke test. Pure static
   # heuristics on the spec source — no browser/e2e infra. A non-exempt spec must
   # (1) perform ≥1 interaction (click/fill/press/selectOption/…), (2) carry ≥1
-  # behavioral assertion (a matcher other than toBeVisible/toBeHidden-style, or a
-  # negated visibility check), (3) have ≥1 assertion AFTER an interaction (verify
-  # a state change, not just an initial render), and (4) meet a min-assertion
+  # behavioral assertion — a matcher other than the render-only toBeVisible/
+  # toBeAttached/toBeInViewport family (a positive toBeHidden or a negated
+  # visibility check both prove a state change and count), (3) have ≥1 assertion
+  # AFTER an interaction WITHIN THE SAME TEST (verify a state change, not just an
+  # initial render), and (4) meet a min-assertion
   # floor. HEURISTIC, NOT PROOF — it stops lazy specs, not adversarial ones; real
   # teeth come from runtime coverage. Weak specs are grandfathered in a
   # shrink-only exceptions file with the same ratchet as e2e-coverage.
@@ -886,30 +888,82 @@ jobs:
           // Optional `not.` prefix so a negated visibility check (e.g. asserting a
           // row disappeared after delete) counts as a behavioral assertion.
           const MATCHER_RE = /\.\s*(not\s*\.\s*)?(to[A-Z][A-Za-z0-9]*)\s*\(/g;
-          const stripComments = (src) =>
-            src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
+          // Test-block openers (test / test.only / it.skip / …) segment the file so
+          // the assert-after-action check cannot pair an action in one test with an
+          // assertion in a different one.
+          const TEST_OPENER_RE = /\b(?:test|it)\s*(?:\.\s*[A-Za-z]+)?\s*\(/g;
+
+          // Blank out comment AND string/template contents in a single left-to-right
+          // pass so the regexes above only ever see executable code — a `.click(` or
+          // `.toHaveText(` inside a test title, fixture value, or regex literal must
+          // NOT count as a real call. One pass (not sequential replaces) so a `//`
+          // inside a string (e.g. "http://…") isn't mistaken for a comment. Newlines
+          // are preserved so error line numbers stay meaningful.
+          function sanitize(src) {
+            let out = "";
+            let state = "code"; // code | line | block | sq | dq | tpl
+            for (let i = 0; i < src.length; i++) {
+              const c = src[i], d = src[i + 1];
+              if (state === "code") {
+                if (c === "/" && d === "/") { state = "line"; out += "  "; i++; continue; }
+                if (c === "/" && d === "*") { state = "block"; out += "  "; i++; continue; }
+                if (c === "'") { state = "sq"; out += " "; continue; }
+                if (c === '"') { state = "dq"; out += " "; continue; }
+                if (c === "`") { state = "tpl"; out += " "; continue; }
+                out += c; continue;
+              }
+              if (state === "line") {
+                if (c === "\n") { state = "code"; out += "\n"; } else { out += " "; }
+                continue;
+              }
+              if (state === "block") {
+                if (c === "*" && d === "/") { state = "code"; out += "  "; i++; }
+                else { out += c === "\n" ? "\n" : " "; }
+                continue;
+              }
+              // sq | dq | tpl — blank the content, honour escapes, keep newlines.
+              const q = state === "sq" ? "'" : state === "dq" ? '"' : "`";
+              if (c === "\\") { out += "  "; i++; continue; }
+              if (c === q) { state = "code"; out += " "; continue; }
+              out += c === "\n" ? "\n" : " ";
+            }
+            return out;
+          }
+
+          function scanAll(re, code) {
+            const hits = [];
+            re.lastIndex = 0;
+            let m;
+            while ((m = re.exec(code))) hits.push(m);
+            return hits;
+          }
 
           function analyze(src) {
-            const code = stripComments(src);
-            const matchers = [];
-            let m;
-            MATCHER_RE.lastIndex = 0;
-            while ((m = MATCHER_RE.exec(code))) {
-              const name = m[2];
-              if (!KNOWN_MATCHERS.has(name)) continue;
-              matchers.push({ name, negated: Boolean(m[1]), idx: m.index });
-            }
-            const actions = [];
-            let a;
-            ACTION_RE.lastIndex = 0;
-            while ((a = ACTION_RE.exec(code))) actions.push(a.index);
+            const code = sanitize(src);
+            const matchers = scanAll(MATCHER_RE, code)
+              .filter((m) => KNOWN_MATCHERS.has(m[2]))
+              .map((m) => ({ name: m[2], negated: Boolean(m[1]), idx: m.index }));
+            const actions = scanAll(ACTION_RE, code).map((m) => m.index);
 
-            const firstActionIdx = actions.length ? Math.min(...actions) : Infinity;
+            // Segment [start, end) per test block; matchers/actions before the first
+            // test (imports, describe, hooks) sit in a leading segment ignored by the
+            // ordering rule but still counted for the existence rules below.
+            const opens = scanAll(TEST_OPENER_RE, code).map((m) => m.index);
+            const segments = opens.length
+              ? opens.map((s, k) => [s, k + 1 < opens.length ? opens[k + 1] : code.length])
+              : [[0, code.length]];
+            const assertAfterAction = segments.some(([s, e]) => {
+              const acts = actions.filter((x) => x >= s && x < e);
+              if (!acts.length) return false;
+              const firstAct = Math.min(...acts);
+              return matchers.some((x) => x.idx > firstAct && x.idx < e);
+            });
+
             return {
               assertionCount: matchers.length,
               hasAction: actions.length > 0,
               hasBehavioral: matchers.some((x) => x.negated || !RENDER_ONLY.has(x.name)),
-              assertAfterAction: matchers.some((x) => x.idx > firstActionIdx),
+              assertAfterAction,
             };
           }
 
