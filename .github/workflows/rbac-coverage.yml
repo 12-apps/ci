@@ -137,6 +137,7 @@ jobs:
           # rc is read — turning the documented skip into a failure. Drop -e just
           # around the probe, then restore it before branching on rc.
           set +e
+          node -e '
             const fs = require("node:fs");
             const path = require("node:path");
             const manifest = path.join(process.env.PKG_DIR || ".", "package.json");
