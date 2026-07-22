@@ -244,7 +244,9 @@ opt-in loading-coverage gate), `loading-must-render` (default empty),
 `e2e-coverage-app-dirs` (default empty — opt-in e2e page↔spec coverage gate),
 `e2e-coverage-spec-suffix` (default `.e2e.ts`), `e2e-coverage-exempt-globs`
 (default `.journey.,.global.`), `e2e-coverage-exceptions` (default
-`.e2e-coverage-exceptions.json`).
+`.e2e-coverage-exceptions.json`), `e2e-coverage-page-file` (default
+`^page\.(js|jsx|ts|tsx)$` — the route-page marker regex; a Vite/React-Router SPA
+keyed on `src/pages/<route>/index.tsx` passes `^index\.tsx$`).
 
 ### Next.js loading-coverage gate (opt-in)
 

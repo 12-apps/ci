@@ -105,6 +105,15 @@ on:
         type: string
         required: false
         default: '.e2e.ts'
+      e2e-coverage-page-file:
+        description: >-
+          Regex (matched against a file basename) that marks a directory as a
+          route page. Default is the Next.js App Router convention (page.tsx). A
+          Vite/React-Router SPA that keys routes on src/pages/<route>/index.tsx
+          would pass "^index\.tsx$".
+        type: string
+        required: false
+        default: '^page\.(js|jsx|ts|tsx)$'
       e2e-coverage-exempt-globs:
         description: >-
           Comma-separated filename substrings that exempt a co-located spec from
@@ -504,6 +513,7 @@ jobs:
       SPEC_SUFFIX: ${{ inputs.e2e-coverage-spec-suffix }}
       EXEMPT: ${{ inputs.e2e-coverage-exempt-globs }}
       EXCEPTIONS_FILE: ${{ inputs.e2e-coverage-exceptions }}
+      PAGE_FILE: ${{ inputs.e2e-coverage-page-file }}
       BASE_REF: ${{ github.base_ref || 'main' }}
     steps:
       - uses: actions/checkout@v4
@@ -520,7 +530,15 @@ jobs:
           node <<'EOF'
           const { readdirSync, readFileSync, existsSync } = require("node:fs");
           const { join, dirname } = require("node:path");
-          const PAGE = /^page\.(js|jsx|ts|tsx)$/;
+          // The route-page marker is configurable (default: Next.js page.*);
+          // a Vite/React-Router SPA passes e.g. "^index\\.tsx$".
+          let PAGE;
+          try {
+            PAGE = new RegExp(process.env.PAGE_FILE || "^page\\.(js|jsx|ts|tsx)$");
+          } catch (e) {
+            console.error(`::error::e2e-coverage-page-file is not a valid regex: ${e.message}`);
+            process.exit(1);
+          }
           const SKIP = new Set(["api", "node_modules"]);
           const norm = (p) => p.replace(/\/+$/, "");
           const under = (p, base) => p === base || p.startsWith(norm(base) + "/");
