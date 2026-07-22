@@ -896,39 +896,73 @@ jobs:
           // NOT test.describe()/beforeEach()/use()/… (groups and hooks).
           const TEST_OPENER_RE = /\b(?:test|it)(?:\s*\.\s*(?:only|skip|fixme|fail))?\s*\(/g;
 
-          // Blank out comment AND string/template contents in a single left-to-right
-          // pass so the regexes above only ever see executable code — a `.click(` or
-          // `.toHaveText(` inside a test title, fixture value, or regex literal must
-          // NOT count as a real call. One pass (not sequential replaces) so a `//`
-          // inside a string (e.g. "http://…") isn't mistaken for a comment. Newlines
-          // are preserved so error line numbers stay meaningful.
+          // Blank out comment AND string/template/regex contents in a single
+          // left-to-right pass so the regexes above only ever see executable code —
+          // a `.click(` or `.toHaveText(` inside a test title, fixture value, or
+          // regex literal must NOT count as a real call. Conversely, code inside a
+          // template placeholder (`${ await btn.click() }`) IS executable and must
+          // be kept. This is a small JS lexer:
+          //   - one pass, so a `//` inside a string ("http://…") isn't a comment;
+          //   - `${…}` in a template re-enters code state (brace-depth tracked for
+          //     nested `{}`), so interactions/assertions inside it still count;
+          //   - regex literals are recognised (only where a `/` can legally begin
+          //     one — not division) and their bodies blanked, incl. `[…]` classes;
+          //   - newlines preserved so error line numbers stay meaningful.
+          // `prev` is the last non-space CODE char, used to tell a regex `/` from a
+          // division `/`: a regex cannot follow a value (identifier/digit/`)`/`]`).
           function sanitize(src) {
             let out = "";
-            let state = "code"; // code | line | block | sq | dq | tpl
+            const blank = (ch) => { out += ch === "\n" ? "\n" : ch === "\t" ? "\t" : " "; };
+            const stack = [{ t: "code", fromTpl: false, depth: 0 }];
+            let prev = "";
+            const regexOk = (p) => p === "" || !/[A-Za-z0-9_$)\]]/.test(p);
             for (let i = 0; i < src.length; i++) {
               const c = src[i], d = src[i + 1];
-              if (state === "code") {
-                if (c === "/" && d === "/") { state = "line"; out += "  "; i++; continue; }
-                if (c === "/" && d === "*") { state = "block"; out += "  "; i++; continue; }
-                if (c === "'") { state = "sq"; out += " "; continue; }
-                if (c === '"') { state = "dq"; out += " "; continue; }
-                if (c === "`") { state = "tpl"; out += " "; continue; }
-                out += c; continue;
-              }
-              if (state === "line") {
-                if (c === "\n") { state = "code"; out += "\n"; } else { out += " "; }
+              const top = stack[stack.length - 1];
+              if (top.t === "code") {
+                if (c === "/" && d === "/") { stack.push({ t: "line" }); blank(c); blank(d); i++; continue; }
+                if (c === "/" && d === "*") { stack.push({ t: "block" }); blank(c); blank(d); i++; continue; }
+                if (c === "'") { stack.push({ t: "sq" }); blank(c); continue; }
+                if (c === '"') { stack.push({ t: "dq" }); blank(c); continue; }
+                if (c === "`") { stack.push({ t: "tpl" }); blank(c); continue; }
+                if (c === "/" && regexOk(prev)) { stack.push({ t: "regex", cls: false }); blank(c); continue; }
+                if (c === "{") { top.depth++; out += c; prev = "{"; continue; }
+                if (c === "}") {
+                  if (top.fromTpl && top.depth === 0) { stack.pop(); blank(c); continue; }
+                  if (top.depth > 0) top.depth--;
+                  out += c; prev = "}"; continue;
+                }
+                out += c;
+                if (!/\s/.test(c)) prev = c;
                 continue;
               }
-              if (state === "block") {
-                if (c === "*" && d === "/") { state = "code"; out += "  "; i++; }
-                else { out += c === "\n" ? "\n" : " "; }
+              if (top.t === "line") {
+                if (c === "\n") { stack.pop(); out += "\n"; } else { blank(c); }
                 continue;
               }
-              // sq | dq | tpl — blank the content, honour escapes, keep newlines.
-              const q = state === "sq" ? "'" : state === "dq" ? '"' : "`";
-              if (c === "\\") { out += "  "; i++; continue; }
-              if (c === q) { state = "code"; out += " "; continue; }
-              out += c === "\n" ? "\n" : " ";
+              if (top.t === "block") {
+                if (c === "*" && d === "/") { stack.pop(); blank(c); blank(d); i++; } else { blank(c); }
+                continue;
+              }
+              if (top.t === "sq" || top.t === "dq") {
+                const q = top.t === "sq" ? "'" : '"';
+                if (c === "\\") { blank(c); blank(d); i++; continue; }
+                if (c === q) { stack.pop(); blank(c); prev = "x"; continue; }
+                blank(c); continue;
+              }
+              if (top.t === "tpl") {
+                if (c === "\\") { blank(c); blank(d); i++; continue; }
+                if (c === "`") { stack.pop(); blank(c); prev = "x"; continue; }
+                if (c === "$" && d === "{") { stack.push({ t: "code", fromTpl: true, depth: 0 }); blank(c); blank(d); i++; continue; }
+                blank(c); continue;
+              }
+              // regex literal
+              if (c === "\\") { blank(c); blank(d); i++; continue; }
+              if (top.cls) { if (c === "]") top.cls = false; blank(c); continue; }
+              if (c === "[") { top.cls = true; blank(c); continue; }
+              if (c === "\n") { stack.pop(); out += "\n"; continue; } // unterminated — bail
+              if (c === "/") { stack.pop(); blank(c); prev = "x"; continue; }
+              blank(c);
             }
             return out;
           }
