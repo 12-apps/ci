@@ -888,10 +888,13 @@ jobs:
           // Optional `not.` prefix so a negated visibility check (e.g. asserting a
           // row disappeared after delete) counts as a behavioral assertion.
           const MATCHER_RE = /\.\s*(not\s*\.\s*)?(to[A-Z][A-Za-z0-9]*)\s*\(/g;
-          // Test-block openers (test / test.only / it.skip / …) segment the file so
-          // the assert-after-action check cannot pair an action in one test with an
-          // assertion in a different one.
-          const TEST_OPENER_RE = /\b(?:test|it)\s*(?:\.\s*[A-Za-z]+)?\s*\(/g;
+          // Test-block openers segment the file so the assert-after-action check
+          // cannot pair an action in one test with an assertion in a different one.
+          // ONLY real per-test declarations are boundaries — `test`/`it` and the
+          // per-test modifiers only/skip/fixme/fail. NOT test.step() (a sub-step
+          // WITHIN a test — an action and its assertion may sit in separate steps),
+          // NOT test.describe()/beforeEach()/use()/… (groups and hooks).
+          const TEST_OPENER_RE = /\b(?:test|it)(?:\s*\.\s*(?:only|skip|fixme|fail))?\s*\(/g;
 
           // Blank out comment AND string/template contents in a single left-to-right
           // pass so the regexes above only ever see executable code — a `.click(` or
