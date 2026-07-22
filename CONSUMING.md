@@ -572,7 +572,14 @@ consumers set neither.
 Inputs (all optional): `node-version` (default `24`), `run-coverage` (default
 true — self-skips with a notice until the consumer defines the script; set
 `false` to opt out explicitly), `pre-command`, `github-packages-scope` (default
-empty — see the MCP Private-packages section).
+empty — see the MCP Private-packages section), `package-dir` (default `.` — the
+directory whose `package.json` holds the `rbac:coverage` script; point it at a
+workspace package, e.g. `apps/web`, if the script lives there).
+
+The self-skip is only for a **valid** manifest that hasn't adopted the script
+yet. A `package.json` that is **missing, unreadable, or malformed** at
+`package-dir` is a hard **failure** (not a silent skip), so a broken consumer
+config surfaces instead of quietly disabling the gate.
 
 ## B. Required in the consumer repo
 
