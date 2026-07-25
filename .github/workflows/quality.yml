@@ -1063,7 +1063,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+          key: playwright-chromium-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright-version.outputs.version }}
       - name: Install Playwright
         if: ${{ inputs.install-playwright && steps.playwright-cache.outputs.cache-hit != 'true' }}
         run: pnpm exec playwright install --with-deps chromium
@@ -1171,7 +1171,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+          key: playwright-chromium-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright-version.outputs.version }}
       - name: Install Playwright
         if: ${{ inputs.install-playwright && steps.playwright-cache.outputs.cache-hit != 'true' }}
         run: pnpm exec playwright install --with-deps chromium
