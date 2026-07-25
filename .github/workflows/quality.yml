@@ -212,12 +212,13 @@ jobs:
           node-version: ${{ inputs.node-version }}
           cache: 'pnpm'
       - name: Install dependencies
+        id: install
         shell: bash
         run: |
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
       - name: Complexity gate (size/complexity on source)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         shell: bash
         run: |
           set -o pipefail
@@ -235,7 +236,7 @@ jobs:
       # the script.
       - name: Detect flakiness gate source
         id: src
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         shell: bash
         run: |
           set -o pipefail
@@ -245,35 +246,35 @@ jobs:
             echo "mode=central" >> "$GITHUB_OUTPUT"
           fi
       - name: Flakiness gate (legacy consumer script)
-        if: ${{ !cancelled() && steps.src.outputs.mode == 'legacy' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.src.outputs.mode == 'legacy' }}
         shell: bash
         run: |
           set -o pipefail
           pnpm quality:flakiness 2>&1 | tee flakiness.log
       - name: Fetch base ref (central gate diffs against it)
-        if: ${{ !cancelled() && steps.src.outputs.mode == 'central' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.src.outputs.mode == 'central' }}
         shell: bash
         run: git fetch --no-tags origin "${GITHUB_BASE_REF:-main}"
       - name: Flakiness gate (central 12-apps/ci ruleset)
-        if: ${{ !cancelled() && steps.src.outputs.mode == 'central' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.src.outputs.mode == 'central' }}
         uses: 12-apps/ci/.github/actions/flakiness-lint@v1
         with:
           node-version: ${{ inputs.node-version }}
           targets: ${{ inputs.flakiness-targets }}
       - name: Copy-paste detection (jscpd)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         shell: bash
         run: |
           set -o pipefail
           pnpm quality:dup 2>&1 | tee jscpd.log
       - name: Validate flaky-quarantine.json
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         shell: bash
         run: |
           set -o pipefail
           pnpm quality:quarantine 2>&1 | tee quarantine.log
       - name: Unused files/exports/deps (knip)
-        if: ${{ !cancelled() && inputs.run-knip }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && inputs.run-knip }}
         shell: bash
         run: |
           set -o pipefail
@@ -284,7 +285,7 @@ jobs:
       # shrink — a new client-side list, or a grandfathered one that regressed,
       # fails here.
       - name: DataViews backend-only gate
-        if: ${{ !cancelled() && inputs.run-data-views }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && inputs.run-data-views }}
         shell: bash
         run: |
           set -o pipefail
@@ -300,7 +301,7 @@ jobs:
       # Self-contained (pure git + bash); needs no consumer script. No-ops when
       # the repo has no `.quality-exceptions` file.
       - name: Enforce .quality-exceptions burn-down (shrink-only + touch-must-fix)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         shell: bash
         env:
           BASE_REF: ${{ github.base_ref || 'main' }}
@@ -378,7 +379,7 @@ jobs:
       # each loading.* to reference a shared spinner via loading-must-render
       # (an existence-only check could be satisfied by an empty placeholder).
       - name: Enforce page.* ↔ loading.* coverage
-        if: ${{ !cancelled() && inputs.nextjs-app-dirs != '' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && inputs.nextjs-app-dirs != '' }}
         env:
           APP_DIRS: ${{ inputs.nextjs-app-dirs }}
           MUST_RENDER: ${{ inputs.loading-must-render }}
@@ -458,7 +459,7 @@ jobs:
       # segment to be de-listed (i.e. get a spec). Walks the checkout + diffs
       # against the base.
       - name: Enforce page.* ↔ e2e spec coverage
-        if: ${{ !cancelled() && inputs.e2e-coverage-app-dirs != '' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && inputs.e2e-coverage-app-dirs != '' }}
         env:
           APP_DIRS: ${{ inputs.e2e-coverage-app-dirs }}
           SPEC_SUFFIX: ${{ inputs.e2e-coverage-spec-suffix }}
@@ -586,7 +587,7 @@ jobs:
           console.log(`OK: ${pageDirs.length} route segment(s), ${specFiles.length} co-located ${SUFFIX} spec(s); ${exSet.size} grandfathered.`);
           EOF
       - name: Enforce exceptions ratchet (shrink-only + touch-must-fix)
-        if: ${{ !cancelled() && inputs.e2e-coverage-app-dirs != '' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && inputs.e2e-coverage-app-dirs != '' }}
         env:
           APP_DIRS: ${{ inputs.e2e-coverage-app-dirs }}
           SPEC_SUFFIX: ${{ inputs.e2e-coverage-spec-suffix }}
@@ -684,7 +685,7 @@ jobs:
       # runtime coverage. Weak specs are grandfathered in a shrink-only
       # exceptions file with the same ratchet as e2e-coverage.
       - name: Enforce e2e spec content-quality
-        if: ${{ !cancelled() && inputs.e2e-content-app-dirs != '' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && inputs.e2e-content-app-dirs != '' }}
         env:
           APP_DIRS: ${{ inputs.e2e-content-app-dirs }}
           SPEC_SUFFIX: ${{ inputs.e2e-content-spec-suffix }}
@@ -940,7 +941,7 @@ jobs:
           console.log(`OK: ${specFiles.length} ${SUFFIX} spec(s) scanned; ${weak.size} weak (all grandfathered); ${exSet.size} listed.`);
           EOF
       - name: Enforce exceptions ratchet (shrink-only + touch-must-fix)
-        if: ${{ !cancelled() && inputs.e2e-content-app-dirs != '' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && inputs.e2e-content-app-dirs != '' }}
         env:
           APP_DIRS: ${{ inputs.e2e-content-app-dirs }}
           SPEC_SUFFIX: ${{ inputs.e2e-content-spec-suffix }}
