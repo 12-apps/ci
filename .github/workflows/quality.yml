@@ -15,9 +15,10 @@ name: Quality (reusable)
 # eslint quality configs, scripts/, and `quality*` package.json scripts.
 # The consumer must define these scripts: quality:complexity, quality:flakiness,
 # quality:dup, quality:quarantine, quality:knip, test:e2e:reliability (see
-# CONSUMING.md). The static gate is two eslint jobs — Complexity and Flakiness —
-# plus a self-contained Quality Exceptions Ratchet job that enforces the
-# `.quality-exceptions` burn-down (shrink-only + touch-must-fix).
+# CONSUMING.md). All static gates run as sequential steps of one `static-gates`
+# job (one runner + checkout + install), each guarded by `!cancelled()` so every
+# gate still reports even after an earlier one fails; consumers' required-check
+# identity is the reusable workflow's overall result.
 
 on:
   workflow_call:
@@ -189,16 +190,20 @@ permissions:
   contents: read
 
 jobs:
-  # The static-quality gate is split into two independent jobs so each surfaces
-  # as its own status check: COMPLEXITY (size/cyclomatic/cognitive/nested-loop on
-  # first-party source — also runs on the consumer's pre-commit) and FLAKINESS
-  # (tiered anti-flake lint on tests/specs/stories). The consumer must define the
-  # matching quality:complexity + quality:flakiness scripts (see CONSUMING.md).
-  complexity:
-    name: Complexity
+  # All static-analysis gates run as sequential steps of this single job: one
+  # runner spin-up + checkout + pnpm install instead of ten. Every gate step is
+  # guarded by `!cancelled()` so a failing gate never hides the gates after it
+  # (full inventory, like the old parallel jobs) while the job still ends
+  # failed if any gate failed; consumers' required-check identity is the
+  # reusable workflow's overall result.
+  static-gates:
+    name: Static Gates
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: several gates diff the branch against its merge base.
+          fetch-depth: 0
       - uses: pnpm/action-setup@v4
         with:
           run_install: false
@@ -212,37 +217,25 @@ jobs:
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
       - name: Complexity gate (size/complexity on source)
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -o pipefail
           pnpm quality:complexity 2>&1 | tee complexity.log
 
-  # The anti-flake ruleset + baseline runner + eslint toolchain live ONLY in
-  # 12-apps/ci (the `flakiness-lint` composite action). This job uses that
-  # central action by default, so updating the rules here reaches every consumer
-  # on its next CI run — the consumer keeps only its repo-specific
-  # eslint-suppressions.json baseline, not the config/runner/devDeps.
-  #
-  # Back-compat: a consumer that still defines its own `quality:flakiness` script
-  # keeps running that (legacy path) until it migrates by deleting the script.
-  flakiness:
-    name: Flakiness
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # Full history: the central runner diffs the branch against its base to
-          # revoke a touched file's baseline exemption (touched files must be clean).
-          fetch-depth: 0
-      - uses: pnpm/action-setup@v4
-        with:
-          run_install: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node-version }}
-          cache: 'pnpm'
+      # Flakiness: the anti-flake ruleset + baseline runner + eslint toolchain
+      # live ONLY in 12-apps/ci (the `flakiness-lint` composite action). The
+      # central action is used by default, so updating the rules here reaches
+      # every consumer on its next CI run — the consumer keeps only its
+      # repo-specific eslint-suppressions.json baseline, not the
+      # config/runner/devDeps.
+      #
+      # Back-compat: a consumer that still defines its own `quality:flakiness`
+      # script keeps running that (legacy path) until it migrates by deleting
+      # the script.
       - name: Detect flakiness gate source
         id: src
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -o pipefail
@@ -251,145 +244,63 @@ jobs:
           else
             echo "mode=central" >> "$GITHUB_OUTPUT"
           fi
-      - name: Install dependencies (legacy consumer gate)
-        if: steps.src.outputs.mode == 'legacy'
-        shell: bash
-        run: |
-          set -o pipefail
-          pnpm install --frozen-lockfile 2>&1 | tee install.log
       - name: Flakiness gate (legacy consumer script)
-        if: steps.src.outputs.mode == 'legacy'
+        if: ${{ !cancelled() && steps.src.outputs.mode == 'legacy' }}
         shell: bash
         run: |
           set -o pipefail
           pnpm quality:flakiness 2>&1 | tee flakiness.log
       - name: Fetch base ref (central gate diffs against it)
-        if: steps.src.outputs.mode == 'central'
+        if: ${{ !cancelled() && steps.src.outputs.mode == 'central' }}
         shell: bash
         run: git fetch --no-tags origin "${GITHUB_BASE_REF:-main}"
       - name: Flakiness gate (central 12-apps/ci ruleset)
-        if: steps.src.outputs.mode == 'central'
+        if: ${{ !cancelled() && steps.src.outputs.mode == 'central' }}
         uses: 12-apps/ci/.github/actions/flakiness-lint@v1
         with:
           node-version: ${{ inputs.node-version }}
           targets: ${{ inputs.flakiness-targets }}
-
-  duplication:
-    name: Duplication
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          run_install: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node-version }}
-          cache: 'pnpm'
-      - name: Install dependencies
-        shell: bash
-        run: |
-          set -o pipefail
-          pnpm install --frozen-lockfile 2>&1 | tee install.log
       - name: Copy-paste detection (jscpd)
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -o pipefail
           pnpm quality:dup 2>&1 | tee jscpd.log
-
-  quarantine:
-    name: Flaky Quarantine
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          run_install: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node-version }}
-          cache: 'pnpm'
-      - name: Install dependencies
-        shell: bash
-        run: |
-          set -o pipefail
-          pnpm install --frozen-lockfile 2>&1 | tee install.log
       - name: Validate flaky-quarantine.json
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -o pipefail
           pnpm quality:quarantine 2>&1 | tee quarantine.log
-
-  knip:
-    name: Knip
-    if: ${{ inputs.run-knip }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          run_install: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node-version }}
-          cache: 'pnpm'
-      - name: Install dependencies
-        shell: bash
-        run: |
-          set -o pipefail
-          pnpm install --frozen-lockfile 2>&1 | tee install.log
       - name: Unused files/exports/deps (knip)
+        if: ${{ !cancelled() && inputs.run-knip }}
         shell: bash
         run: |
           set -o pipefail
           pnpm quality:knip 2>&1 | tee knip.log
-
-  # DataViews backend-only ratchet (opt-in): lists rendered with the shared
-  # DataViews panel must be server-driven. Client-mode consumers are
-  # grandfathered in the repo's exceptions file and the list can only shrink —
-  # a new client-side list, or a grandfathered one that regressed, fails here.
-  data-views:
-    name: DataViews Gate
-    if: ${{ inputs.run-data-views }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          run_install: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node-version }}
-          cache: 'pnpm'
-      - name: Install dependencies
-        shell: bash
-        run: |
-          set -o pipefail
-          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      # DataViews backend-only ratchet (opt-in): lists rendered with the shared
+      # DataViews panel must be server-driven. Client-mode consumers are
+      # grandfathered in the repo's exceptions file and the list can only
+      # shrink — a new client-side list, or a grandfathered one that regressed,
+      # fails here.
       - name: DataViews backend-only gate
+        if: ${{ !cancelled() && inputs.run-data-views }}
         shell: bash
         run: |
           set -o pipefail
           pnpm quality:data-views 2>&1 | tee data-views-gate.log
 
-  # Enforce the `.quality-exceptions` burn-down policy on every PR:
-  #   (A) shrink-only — the file may LOSE lines, never gain them, so a new file
-  #       can never be grandfathered (fix it instead of listing it);
-  #   (B) touch-must-fix — a changed file that is STILL listed must be removed
-  #       from the list, at which point the complexity/flakiness gate makes its
-  #       findings hard errors. So you cannot touch a grandfathered file and
-  #       leave it grandfathered.
-  # Self-contained (pure git + bash); needs no consumer script. No-ops when the
-  # repo has no `.quality-exceptions` file.
-  exceptions-ratchet:
-    name: Quality Exceptions Ratchet
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # Full history so we can diff the branch against its base.
-          fetch-depth: 0
+      # Enforce the `.quality-exceptions` burn-down policy on every PR:
+      #   (A) shrink-only — the file may LOSE lines, never gain them, so a new
+      #       file can never be grandfathered (fix it instead of listing it);
+      #   (B) touch-must-fix — a changed file that is STILL listed must be
+      #       removed from the list, at which point the complexity/flakiness
+      #       gate makes its findings hard errors. So you cannot touch a
+      #       grandfathered file and leave it grandfathered.
+      # Self-contained (pure git + bash); needs no consumer script. No-ops when
+      # the repo has no `.quality-exceptions` file.
       - name: Enforce .quality-exceptions burn-down (shrink-only + touch-must-fix)
+        if: ${{ !cancelled() }}
         shell: bash
         env:
           BASE_REF: ${{ github.base_ref || 'main' }}
@@ -459,26 +370,18 @@ jobs:
           if [ "$fail" -ne 0 ]; then exit 1; fi
           echo "✓ .quality-exceptions ratchet OK (shrink-only; no touched file left grandfathered)."
 
-  # In the Next.js App Router, a route segment that ships a page.* without a
-  # loading.* renders NOTHING while the segment streams (prod) or compiles on
-  # demand (dev) — the user stares at a frozen screen. This gate enforces that
-  # every page has instant loading feedback. No install needed: it only walks
-  # the checkout. Opt in with nextjs-app-dirs; optionally require each
-  # loading.* to reference a shared spinner via loading-must-render (an
-  # existence-only check could be satisfied by an empty placeholder).
-  nextjs-loading:
-    name: Next.js Loading Coverage
-    if: ${{ inputs.nextjs-app-dirs != '' }}
-    runs-on: ubuntu-latest
-    env:
-      APP_DIRS: ${{ inputs.nextjs-app-dirs }}
-      MUST_RENDER: ${{ inputs.loading-must-render }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node-version }}
+      # In the Next.js App Router, a route segment that ships a page.* without
+      # a loading.* renders NOTHING while the segment streams (prod) or
+      # compiles on demand (dev) — the user stares at a frozen screen. This
+      # gate enforces that every page has instant loading feedback. It only
+      # walks the checkout. Opt in with nextjs-app-dirs; optionally require
+      # each loading.* to reference a shared spinner via loading-must-render
+      # (an existence-only check could be satisfied by an empty placeholder).
       - name: Enforce page.* ↔ loading.* coverage
+        if: ${{ !cancelled() && inputs.nextjs-app-dirs != '' }}
+        env:
+          APP_DIRS: ${{ inputs.nextjs-app-dirs }}
+          MUST_RENDER: ${{ inputs.loading-must-render }}
         shell: bash
         run: |
           set -o pipefail
@@ -546,33 +449,23 @@ jobs:
           console.log(`OK: ${pages} route segment(s) covered by loading.* under: ${roots.join(" ")}`);
           EOF
 
-  # E2E page↔spec coverage (opt-in): every route segment shipping a page.* must
-  # have a co-located e2e spec (default *.e2e.ts) in its subtree, and every such
-  # spec must sit under a route segment (cross-cutting journey/global specs are
-  # exempt). Pages with no spec yet are grandfathered in a shrink-only exceptions
-  # file: the list may only lose entries, and touching any file under a listed
-  # segment forces that segment to be de-listed (i.e. get a spec). No install
-  # needed — it walks the checkout + diffs against the base.
-  e2e-coverage:
-    name: E2E Coverage
-    if: ${{ inputs.e2e-coverage-app-dirs != '' }}
-    runs-on: ubuntu-latest
-    env:
-      APP_DIRS: ${{ inputs.e2e-coverage-app-dirs }}
-      SPEC_SUFFIX: ${{ inputs.e2e-coverage-spec-suffix }}
-      EXEMPT: ${{ inputs.e2e-coverage-exempt-globs }}
-      EXCEPTIONS_FILE: ${{ inputs.e2e-coverage-exceptions }}
-      PAGE_FILE: ${{ inputs.e2e-coverage-page-file }}
-      BASE_REF: ${{ github.base_ref || 'main' }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # Full history so the ratchet can diff the exceptions file vs base.
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node-version }}
+      # E2E page↔spec coverage (opt-in): every route segment shipping a page.*
+      # must have a co-located e2e spec (default *.e2e.ts) in its subtree, and
+      # every such spec must sit under a route segment (cross-cutting
+      # journey/global specs are exempt). Pages with no spec yet are
+      # grandfathered in a shrink-only exceptions file: the list may only lose
+      # entries, and touching any file under a listed segment forces that
+      # segment to be de-listed (i.e. get a spec). Walks the checkout + diffs
+      # against the base.
       - name: Enforce page.* ↔ e2e spec coverage
+        if: ${{ !cancelled() && inputs.e2e-coverage-app-dirs != '' }}
+        env:
+          APP_DIRS: ${{ inputs.e2e-coverage-app-dirs }}
+          SPEC_SUFFIX: ${{ inputs.e2e-coverage-spec-suffix }}
+          EXEMPT: ${{ inputs.e2e-coverage-exempt-globs }}
+          EXCEPTIONS_FILE: ${{ inputs.e2e-coverage-exceptions }}
+          PAGE_FILE: ${{ inputs.e2e-coverage-page-file }}
+          BASE_REF: ${{ github.base_ref || 'main' }}
         shell: bash
         run: |
           set -o pipefail
@@ -693,6 +586,14 @@ jobs:
           console.log(`OK: ${pageDirs.length} route segment(s), ${specFiles.length} co-located ${SUFFIX} spec(s); ${exSet.size} grandfathered.`);
           EOF
       - name: Enforce exceptions ratchet (shrink-only + touch-must-fix)
+        if: ${{ !cancelled() && inputs.e2e-coverage-app-dirs != '' }}
+        env:
+          APP_DIRS: ${{ inputs.e2e-coverage-app-dirs }}
+          SPEC_SUFFIX: ${{ inputs.e2e-coverage-spec-suffix }}
+          EXEMPT: ${{ inputs.e2e-coverage-exempt-globs }}
+          EXCEPTIONS_FILE: ${{ inputs.e2e-coverage-exceptions }}
+          PAGE_FILE: ${{ inputs.e2e-coverage-page-file }}
+          BASE_REF: ${{ github.base_ref || 'main' }}
         shell: bash
         run: |
           set -o pipefail
@@ -768,39 +669,29 @@ jobs:
           console.log(`✓ ${process.env.HEAD_FILE} ratchet OK (shrink-only; no touched segment left grandfathered).`);
           EOF
 
-  # E2E content-quality (opt-in): the companion to e2e-coverage. Coverage proves
-  # a spec FILE exists per page; this proves the spec actually EXERCISES the page
-  # instead of being a navigate-and-toBeVisible render smoke test. Pure static
-  # heuristics on the spec source — no browser/e2e infra. A non-exempt spec must
-  # (1) perform ≥1 interaction (click/fill/press/selectOption/…), (2) carry ≥1
-  # behavioral assertion — a matcher other than the render-only toBeVisible/
-  # toBeAttached/toBeInViewport family (a positive toBeHidden or a negated
-  # visibility check both prove a state change and count), (3) have ≥1 assertion
-  # AFTER an interaction WITHIN THE SAME TEST (verify a state change, not just an
-  # initial render), and (4) meet a min-assertion
-  # floor. HEURISTIC, NOT PROOF — it stops lazy specs, not adversarial ones; real
-  # teeth come from runtime coverage. Weak specs are grandfathered in a
-  # shrink-only exceptions file with the same ratchet as e2e-coverage.
-  e2e-content:
-    name: E2E Content
-    if: ${{ inputs.e2e-content-app-dirs != '' }}
-    runs-on: ubuntu-latest
-    env:
-      APP_DIRS: ${{ inputs.e2e-content-app-dirs }}
-      SPEC_SUFFIX: ${{ inputs.e2e-content-spec-suffix }}
-      EXEMPT: ${{ inputs.e2e-content-exempt-globs }}
-      MIN_ASSERT: ${{ inputs.e2e-content-min-assertions }}
-      EXCEPTIONS_FILE: ${{ inputs.e2e-content-exceptions }}
-      BASE_REF: ${{ github.base_ref || 'main' }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # Full history so the ratchet can diff the exceptions file vs base.
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node-version }}
+      # E2E content-quality (opt-in): the companion to e2e-coverage. Coverage
+      # proves a spec FILE exists per page; this proves the spec actually
+      # EXERCISES the page instead of being a navigate-and-toBeVisible render
+      # smoke test. Pure static heuristics on the spec source — no browser/e2e
+      # infra. A non-exempt spec must (1) perform ≥1 interaction
+      # (click/fill/press/selectOption/…), (2) carry ≥1 behavioral assertion —
+      # a matcher other than the render-only toBeVisible/toBeAttached/
+      # toBeInViewport family (a positive toBeHidden or a negated visibility
+      # check both prove a state change and count), (3) have ≥1 assertion AFTER
+      # an interaction WITHIN THE SAME TEST (verify a state change, not just an
+      # initial render), and (4) meet a min-assertion floor. HEURISTIC, NOT
+      # PROOF — it stops lazy specs, not adversarial ones; real teeth come from
+      # runtime coverage. Weak specs are grandfathered in a shrink-only
+      # exceptions file with the same ratchet as e2e-coverage.
       - name: Enforce e2e spec content-quality
+        if: ${{ !cancelled() && inputs.e2e-content-app-dirs != '' }}
+        env:
+          APP_DIRS: ${{ inputs.e2e-content-app-dirs }}
+          SPEC_SUFFIX: ${{ inputs.e2e-content-spec-suffix }}
+          EXEMPT: ${{ inputs.e2e-content-exempt-globs }}
+          MIN_ASSERT: ${{ inputs.e2e-content-min-assertions }}
+          EXCEPTIONS_FILE: ${{ inputs.e2e-content-exceptions }}
+          BASE_REF: ${{ github.base_ref || 'main' }}
         shell: bash
         run: |
           set -o pipefail
@@ -1049,6 +940,14 @@ jobs:
           console.log(`OK: ${specFiles.length} ${SUFFIX} spec(s) scanned; ${weak.size} weak (all grandfathered); ${exSet.size} listed.`);
           EOF
       - name: Enforce exceptions ratchet (shrink-only + touch-must-fix)
+        if: ${{ !cancelled() && inputs.e2e-content-app-dirs != '' }}
+        env:
+          APP_DIRS: ${{ inputs.e2e-content-app-dirs }}
+          SPEC_SUFFIX: ${{ inputs.e2e-content-spec-suffix }}
+          EXEMPT: ${{ inputs.e2e-content-exempt-globs }}
+          MIN_ASSERT: ${{ inputs.e2e-content-min-assertions }}
+          EXCEPTIONS_FILE: ${{ inputs.e2e-content-exceptions }}
+          BASE_REF: ${{ github.base_ref || 'main' }}
         shell: bash
         run: |
           set -o pipefail
@@ -1152,9 +1051,26 @@ jobs:
         run: |
           set -o pipefail
           ${{ inputs.pre-e2e-command }} 2>&1 | tee pre-e2e.log
-      - name: Install Playwright
+      - name: Resolve Playwright version
+        id: playwright-version
         if: ${{ inputs.install-playwright }}
+        shell: bash
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        if: ${{ inputs.install-playwright }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+      - name: Install Playwright
+        if: ${{ inputs.install-playwright && steps.playwright-cache.outputs.cache-hit != 'true' }}
         run: pnpm exec playwright install --with-deps chromium
+      # A cache hit restores the browser binaries but NOT the apt system deps
+      # (they live outside ~/.cache/ms-playwright), so install those alone.
+      - name: Install Playwright system deps
+        if: ${{ inputs.install-playwright && steps.playwright-cache.outputs.cache-hit == 'true' }}
+        run: pnpm exec playwright install-deps chromium
       # ── Failed-first ordering (test prioritization) ───────────────────────
       # Playwright records each run's outcome in test-results/.last-run.json
       # (including the IDs of failed tests). Persisting it across runs lets the
@@ -1243,9 +1159,26 @@ jobs:
         run: |
           set -o pipefail
           ${{ inputs.pre-e2e-command }} 2>&1 | tee pre-e2e.log
-      - name: Install Playwright
+      - name: Resolve Playwright version
+        id: playwright-version
         if: ${{ inputs.install-playwright }}
+        shell: bash
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        if: ${{ inputs.install-playwright }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+      - name: Install Playwright
+        if: ${{ inputs.install-playwright && steps.playwright-cache.outputs.cache-hit != 'true' }}
         run: pnpm exec playwright install --with-deps chromium
+      # A cache hit restores the browser binaries but NOT the apt system deps
+      # (they live outside ~/.cache/ms-playwright), so install those alone.
+      - name: Install Playwright system deps
+        if: ${{ inputs.install-playwright && steps.playwright-cache.outputs.cache-hit == 'true' }}
+        run: pnpm exec playwright install-deps chromium
       # Self-skips (exit 0) when no e2e specs changed vs the base branch.
       - name: Re-run changed e2e specs (retries=0)
         shell: bash
