@@ -43,6 +43,12 @@ name: MCP Contract (reusable)
 #                 mcp:check is only non-drift. Runs when the consumer defines
 #                 the script; skips with a notice otherwise, so rolling this
 #                 job out via the floating major tag breaks no caller.
+# A fifth gate, store-compliance, needs NO consumer script: it reads the
+# generated manifest directly and holds it to the assistant-directory review
+# rules. Keeping it here rather than in each repo's mcp:lint is deliberate —
+# it is the one gate that must be identical across every org repo, and a repo
+# cannot weaken it by writing a laxer local lint.
+#
 #   mcp:parity  — (opt-in) boot the MCP server in-process against the rendered
 #                 OpenAPI and diff the SERVED tool schemas vs the generated
 #                 manifest. Heavier; off by default.
@@ -79,6 +85,29 @@ on:
         type: boolean
         required: false
         default: false
+      run-store-compliance:
+        description: >-
+          Validate the generated MCP manifest against the Anthropic Connectors
+          Directory + OpenAI Apps SDK review rules (annotations, tool naming,
+          prompt-injection patterns, and payment-card / government-identifier /
+          precise-location exposure). On by default; the job self-skips with a
+          notice when `manifest-path` does not exist, so callers already pinned
+          to the floating major tag are unaffected until they serve a manifest.
+        type: boolean
+        required: false
+        default: true
+      manifest-path:
+        description: 'Generated MCP tool manifest to hold to the store-review rules.'
+        type: string
+        required: false
+        default: 'apps/web/mcp/manifest.json'
+      store-exceptions-path:
+        description: >-
+          Per-repo declared store-compliance exceptions, each with a reason.
+          Stale entries fail the gate.
+        type: string
+        required: false
+        default: 'mcp-store-exceptions.json'
       pre-command:
         description: 'Shell run before the gate (e.g. build the MCP package / render the OpenAPI). Empty to skip.'
         type: string
@@ -317,3 +346,25 @@ jobs:
         run: |
           set -o pipefail
           pnpm mcp:parity 2>&1 | tee mcp-parity.log
+
+  # STORE COMPLIANCE is the org-wide floor. Unlike the jobs above it runs a
+  # ruleset owned by THIS repo against the consumer's committed manifest, so no
+  # repo can ship a tool that would fail an assistant-directory review by
+  # shipping a permissive local mcp:lint. A repo may still enforce MORE in its
+  # own lint; it cannot enforce less.
+  store-compliance:
+    name: MCP Store Compliance
+    if: ${{ inputs.run-store-compliance }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The gate reads the COMMITTED manifest, so it needs neither an install
+      # nor the pre-command — the drift job above is what proves that manifest
+      # is current. Keeping this job dependency-free makes it the cheapest gate
+      # in the set, which matters when it runs in every org repo.
+      - name: MCP store compliance
+        uses: 12-apps/ci/.github/actions/mcp-store-compliance@v1
+        with:
+          manifest-path: ${{ inputs.manifest-path }}
+          exceptions-path: ${{ inputs.store-exceptions-path }}
+          node-version: ${{ inputs.node-version }}
