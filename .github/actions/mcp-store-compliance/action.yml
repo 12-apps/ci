@@ -1,0 +1,48 @@
+name: 'MCP store compliance (central)'
+description: >-
+  Validate a consumer's generated MCP tool manifest against the rules the
+  Anthropic Connectors Directory and the OpenAI Apps SDK enforce at review time.
+  The ruleset lives ONLY in 12-apps/ci and runs against the consumer's checkout,
+  so tightening it here tightens every consuming repo on its next CI run — no
+  per-repo copies. Self-skips when the repo has no MCP manifest.
+
+inputs:
+  manifest-path:
+    description: >-
+      Path to the generated MCP tool manifest in the consumer checkout. The gate
+      skips with a notice when the file is absent, so this is safe to leave at
+      the default in repos that serve no MCP surface.
+    required: false
+    default: 'apps/web/mcp/manifest.json'
+  exceptions-path:
+    description: >-
+      Per-repo declared exceptions, keyed by tool name:
+      {"chargeCard": {"input": ["token"], "reason": "..."}}. Every entry needs a
+      reason, and an entry that matches no tool fails as stale.
+    required: false
+    default: 'mcp-store-exceptions.json'
+  node-version:
+    description: 'Node version used to run the gate.'
+    required: false
+    default: '24'
+  working-directory:
+    description: 'Consumer checkout root.'
+    required: false
+    default: '.'
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+    # No install step: the gate is dependency-free by design, so it adds seconds
+    # rather than a package resolution to every consuming repo's CI.
+    - name: MCP store-compliance gate
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -o pipefail
+        node "${{ github.action_path }}/check-store-compliance.mjs" \
+          "${{ inputs.manifest-path }}" \
+          "${{ inputs.exceptions-path }}" 2>&1 | tee mcp-store-compliance.log
