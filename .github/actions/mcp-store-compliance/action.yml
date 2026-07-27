@@ -41,8 +41,17 @@ runs:
     - name: MCP store-compliance gate
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      # Paths reach bash as ENVIRONMENT VARIABLES, never as `${{ }}` inlined into
+      # the script body. Actions substitutes `${{ }}` into the script TEXT before
+      # bash parses it, and double quotes do not disable command substitution — so
+      # an inlined path is executable code. A consumer that derives `manifest-path`
+      # from event data (a PR title, a branch name) would otherwise let
+      # `$(...)`/backticks run with this job's token and checkout. As `env`, the
+      # value is data and bash never re-parses it.
+      env:
+        CHECKER: ${{ github.action_path }}/check-store-compliance.mjs
+        MANIFEST_PATH: ${{ inputs.manifest-path }}
+        EXCEPTIONS_PATH: ${{ inputs.exceptions-path }}
       run: |
         set -o pipefail
-        node "${{ github.action_path }}/check-store-compliance.mjs" \
-          "${{ inputs.manifest-path }}" \
-          "${{ inputs.exceptions-path }}" 2>&1 | tee mcp-store-compliance.log
+        node "$CHECKER" "$MANIFEST_PATH" "$EXCEPTIONS_PATH" 2>&1 | tee mcp-store-compliance.log
