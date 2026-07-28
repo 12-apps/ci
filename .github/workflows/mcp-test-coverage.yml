@@ -257,6 +257,16 @@ jobs:
             echo "No $EXEMPTIONS_FILE — nothing to enforce (the gate is at full coverage)."
             exit 0
           fi
+          # A file holding only comments/blank lines is SEMANTICALLY empty: the
+          # consumer is at full coverage but kept the header. Treat it exactly
+          # like an absent file — otherwise the empty `--exempt-files` output
+          # below is read as a broken mapping and a fully-covered repo fails its
+          # own required check for having zero debt.
+          entry_count="$(grep -cvE '^\s*(#|$)' "$EXEMPTIONS_FILE" || true)"
+          if [ "${entry_count:-0}" -eq 0 ]; then
+            echo "$EXEMPTIONS_FILE has no entries (comments only) — nothing to enforce."
+            exit 0
+          fi
           # Fail-fast on the diff baseline (never masked): we must have the base.
           git fetch --no-tags origin "$BASE_REF"
           merge_base="$(git merge-base "origin/$BASE_REF" HEAD)" || {
@@ -268,16 +278,28 @@ jobs:
 
           # (A) Shrink-only: any ADDED non-comment line is a new grandfather
           # entry — forbidden.
-          added="$(
-            git diff "$merge_base" HEAD -- "$EXEMPTIONS_FILE" \
-              | grep -E '^\+' | grep -vE '^\+\+\+' | sed -E 's/^\+//' \
-              | sed -E 's/[[:space:]]+$//' | grep -vE '^\s*(#|$)' || true
-          )"
-          if [ -n "$added" ]; then
-            echo "::error::$EXEMPTIONS_FILE may only shrink, never grow. Entries ADDED:"
-            printf '%s\n' "$added" | sed 's/^/  + /'
-            echo "You cannot grandfather an MCP tool — write its test instead of listing it."
-            fail=1
+          #
+          # EXCEPT on the adoption commit. When the file does not exist at the
+          # merge base, every line of the initial baseline is an "added" line, so
+          # a blanket rule would reject the very PR that adopts the gate and
+          # demand the whole debt be paid before the ratchet can start — the
+          # opposite of an incremental rollout. Recognise that case explicitly
+          # and let the baseline through; from the next PR on, the file exists at
+          # the base and the rule applies with no exception.
+          if git cat-file -e "$merge_base:$EXEMPTIONS_FILE" 2>/dev/null; then
+            added="$(
+              git diff "$merge_base" HEAD -- "$EXEMPTIONS_FILE" \
+                | grep -E '^\+' | grep -vE '^\+\+\+' | sed -E 's/^\+//' \
+                | sed -E 's/[[:space:]]+$//' | grep -vE '^\s*(#|$)' || true
+            )"
+            if [ -n "$added" ]; then
+              echo "::error::$EXEMPTIONS_FILE may only shrink, never grow. Entries ADDED:"
+              printf '%s\n' "$added" | sed 's/^/  + /'
+              echo "You cannot grandfather an MCP tool — write its test instead of listing it."
+              fail=1
+            fi
+          else
+            echo "::notice::$EXEMPTIONS_FILE is new at this merge base — accepting the initial baseline of $entry_count entry/entries. From the next PR on it can only shrink."
           fi
 
           # (B) Touch-must-fix: if the PR changes the file backing a still-listed
@@ -288,9 +310,23 @@ jobs:
           # it exists NOW, but a rename's old path and a delete's path must count
           # as touching as well, or the tool could be moved out from under its
           # exemption and silently stay grandfathered.
-          listed_files="$(pnpm -s -C "$PKG_DIR" run mcp:test-coverage --exempt-files || true)"
+          #
+          # Check the EXIT STATUS, not just the output: a script that dies partway
+          # can print some paths and still fail, and treating that partial list as
+          # authoritative would silently narrow the check to whatever it managed
+          # to emit. `set +e` around the call only because errexit would abort
+          # before rc could be read.
+          set +e
+          listed_files="$(pnpm -s -C "$PKG_DIR" run mcp:test-coverage --exempt-files)"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::mcp:test-coverage --exempt-files exited $rc — its output cannot be trusted, so touch-must-fix cannot be evaluated"
+            printf '%s\n' "$listed_files" | sed 's/^/  | /'
+            exit 1
+          fi
           if [ -z "$listed_files" ]; then
-            echo "::error::mcp:test-coverage --exempt-files printed nothing while $EXEMPTIONS_FILE is non-empty — cannot evaluate touch-must-fix"
+            echo "::error::mcp:test-coverage --exempt-files printed nothing while $EXEMPTIONS_FILE lists $entry_count entry/entries — cannot evaluate touch-must-fix"
             exit 1
           fi
           offenders=""

@@ -660,6 +660,14 @@ the same two rules as the [`.quality-exceptions` ratchet](#quality-exceptions-ra
 - **Touch-must-fix:** if a PR changes the source behind a still-listed tool, the
   entry must be removed in the same PR — which means the test gets written.
 
+One exception, and only one: on the **adoption PR** — where the exemptions file
+does not exist at the merge base — the initial baseline is accepted with a
+notice, since otherwise the rule would demand the entire debt be paid before the
+ratchet could start. From the next PR onward the file exists at the base and
+shrink-only applies with no exception. A file left holding only comments counts
+as no file at all, so a repo that reaches full coverage can keep the header
+without failing its own gate.
+
 Make this check required in branch protection (`MCP Test Coverage (reusable) /
 MCP Test Coverage`) so the burn-down cannot be bypassed.
 
