@@ -74,6 +74,19 @@ on:
         type: string
         required: false
         default: '3'
+      e2e-spec-pattern:
+        description: >-
+          Extended regex (grep -E) matching e2e spec paths for the reliability
+          job's early exit: when NO changed file matches, the job skips its
+          toolchain setup entirely instead of discovering "nothing to re-run"
+          after ~60s of installs. Keep it a SUPERSET of the consumer selector's
+          own filter — a false positive only costs the setup (the consumer
+          script still decides precisely); a narrower pattern would silently
+          skip real re-runs. Default covers both spec conventions
+          (tests/e2e/*.spec.ts and co-located *.e2e.ts).
+        type: string
+        required: false
+        default: '(^|/)tests/e2e/.+\.spec\.[jt]sx?$|\.e2e\.[jt]sx?$'
       nextjs-app-dirs:
         description: >-
           Comma-separated Next.js App Router roots (e.g. "apps/web/app") to
