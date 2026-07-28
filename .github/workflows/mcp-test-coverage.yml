@@ -1,0 +1,322 @@
+name: MCP Test Coverage (reusable)
+
+# Reusable MCP test-coverage gate — the "does this tool have a test?" sibling of
+# the MCP contract gate (mcp-contract.yml) and the RBAC coverage gate
+# (rbac-coverage.yml). Consuming repos add a small caller:
+#
+#   jobs:
+#     mcp-test-coverage:
+#       needs: [changes, static]
+#       if: needs.static.outputs.code == 'true' && needs.changes.outputs.mcp == 'true'
+#       permissions:
+#         contents: read
+#         # packages: read   # add ONLY if pnpm install pulls private GitHub Packages
+#       uses: 12-apps/ci/.github/workflows/mcp-test-coverage.yml@v1
+#       with:
+#         package-dir: apps/web
+#         exemptions-file: apps/web/mcp/mcp-test-exemptions
+#       # NOTE: deliberately NO `secrets: inherit` — see the security note below.
+#
+# WHAT IT PROVES: every tool the repo SERVES on its MCP surface has a test, or is
+# carried on a shrink-only exemptions list that is burning down. The contract
+# gates prove the surface is complete and internally consistent; none of them
+# proves a tool WORKS. A live smoke run does, but it needs a real deployment and
+# a real token, so it can never be a CI gate. This is the part CI can answer
+# offline — and it is the part that stops the debt GROWING while the rest is
+# being fixed.
+#
+# THE RATCHET is the point of the gate, not a detail of it. The exemptions file
+# may only LOSE lines, never gain them, and touching the code behind a listed
+# entry forces that entry out in the same PR. Both halves mirror the
+# `.quality-exceptions` ratchet in quality.yml — same policy, same failure
+# messages, same reasoning — so a repo that already lives with that one needs no
+# new mental model here.
+#
+# SECRETS: this gate needs NONE, and MUST NOT be given any. Every job runs
+# consumer-controlled code (dependency install, pre-command, and the
+# mcp:test-coverage script), so any inherited secret could be exfiltrated by a
+# compromised dependency or script. `permissions: contents: read` scopes only the
+# GITHUB_TOKEN — it does NOT protect env secrets; withholding `secrets: inherit`
+# is the separate, necessary control. Coverage is a STATIC analysis of the tool
+# registry vs the test tree — no live DB, deployment, or real credentials.
+#
+# Runs in the CALLER's checkout, so it uses the consumer repo's own registry,
+# tests, exemptions file, and `mcp:test-coverage` package.json script. The
+# workflow only orchestrates — the app owns the coverage logic behind ONE script:
+#
+#   mcp:test-coverage — enumerate the SERVED tools and FAIL (non-zero exit) if
+#                       any is neither tested nor carried on the exemptions list,
+#                       and if any exemption has gone stale (its tool is now
+#                       tested, is now withheld, or no longer exists). Called a
+#                       second time with `--exempt-files` it must print the
+#                       source file behind each exempt tool, one repo-relative
+#                       path per line, which is what touch-must-fix diffs
+#                       against. Defining "tested" is the CONSUMER's call — this
+#                       workflow never looks at a test.
+#
+# Rollout is non-breaking: the job probes for the script first and self-skips
+# (with a notice) when the consumer has not defined it yet, so shipping this via
+# the floating major tag `@v1` breaks no existing caller.
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node version for the gate.'
+        type: string
+        required: false
+        default: '24'
+      run-coverage:
+        description: >-
+          Run the MCP test-coverage gate (mcp:test-coverage). On by default, but
+          the job self-skips (with a notice) when the consumer does not define the
+          script — so existing callers on the floating major tag are unaffected
+          until they adopt it. Set false to opt out explicitly.
+        type: boolean
+        required: false
+        default: true
+      pre-command:
+        description: 'Shell run before the gate (e.g. build a workspace package). Empty to skip.'
+        type: string
+        required: false
+        default: ''
+      github-packages-scope:
+        description: >-
+          npm scope (e.g. @my-org) whose dependencies come from GitHub Packages.
+          When set, the job wires ~/.npmrc to install that scope from
+          npm.pkg.github.com using the job GITHUB_TOKEN (requires packages: read
+          on the caller). Empty (default) = no private-registry wiring; the token
+          is never used and public installs are unaffected.
+        type: string
+        required: false
+        default: ''
+      package-dir:
+        description: >-
+          Directory whose package.json defines the mcp:test-coverage script
+          (default repo root). Monorepos that keep the script in a workspace
+          package (e.g. apps/web/package.json) point this there; the probe and the
+          script run both resolve against it. Dependency install still runs at the
+          repo root.
+        type: string
+        required: false
+        default: '.'
+      exemptions-file:
+        description: >-
+          REPO-ROOT-relative path to the shrink-only exemptions list (one entry
+          per line, `#` comments ignored). The ratchet no-ops when the file does
+          not exist, so a consumer at 100% coverage simply deletes it.
+        type: string
+        required: false
+        default: 'mcp-test-exemptions'
+
+# Least-privilege, enforced at the source. The effective grant is the
+# INTERSECTION of these and the caller's job permissions, so a consumer that
+# grants more in a combined CI file (e.g. contents: write, actions: write) cannot
+# leak that privilege here. Both grants are READ-only.
+#
+# `packages: read` is the CEILING (not an auto-grant): consumers whose
+# `pnpm install` pulls PRIVATE GitHub Packages need it, so it must be allowed
+# here or the intersection would strip it and installs would 401/403. Public-only
+# consumers simply grant `contents: read` in their caller and packages access
+# never takes effect. It cannot enable writes.
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  # COVERAGE proves the served tool surface is TESTED: every tool has a test or a
+  # shrink-only exemption, and no exemption has gone stale. The RATCHET steps then
+  # prove the exemption list is going DOWN. The script-existence probe keeps the
+  # job non-breaking for consumers that have not adopted mcp:test-coverage yet —
+  # they see a skip notice, not a failure.
+  coverage:
+    name: MCP Test Coverage
+    if: ${{ inputs.run-coverage }}
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: the ratchet diffs the branch against its merge base, which
+      # a depth-1 checkout cannot compute.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Probe FIRST, before any install/pre-command: a consumer that has not
+      # adopted mcp:test-coverage must get the promised skip notice without paying
+      # for — or failing on — the heavy setup steps. Uses only the checkout and
+      # the runner's preinstalled node.
+      - name: Probe for mcp:test-coverage script
+        id: probe
+        shell: bash
+        env:
+          PKG_DIR: ${{ inputs.package-dir }}
+        run: |
+          set -o pipefail
+          # THREE outcomes, so a broken manifest is a FAILURE, not a silent skip:
+          #   0 = script present            → run the gate
+          #   1 = valid manifest, no script → skip with a notice (unadopted)
+          #   2 = manifest missing/malformed → hard error (surface the misconfig)
+          # GitHub runs steps with errexit (-e); the probe's own non-zero exit
+          # (1 = unadopted skip, 2 = manifest error) would abort the step BEFORE
+          # rc is read — turning the documented skip into a failure. Drop -e just
+          # around the probe, then restore it before branching on rc.
+          set +e
+          node -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const manifest = path.join(process.env.PKG_DIR || ".", "package.json");
+            let pkg;
+            try {
+              pkg = JSON.parse(fs.readFileSync(manifest, "utf8"));
+            } catch (e) {
+              const why = e.code === "ENOENT" ? "not found" : "unreadable or malformed";
+              console.error(`::error::${manifest} is ${why}: ${e.message} — cannot evaluate the MCP test-coverage gate`);
+              process.exit(2);
+            }
+            const s = pkg.scripts || {};
+            process.exit(s["mcp:test-coverage"] ? 0 : 1);
+          '
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          elif [ "$rc" -eq 1 ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::mcp:test-coverage not defined in ${PKG_DIR%/}/package.json — skipping (see CONSUMING.md to adopt the MCP test-coverage gate)"
+          else
+            exit 1
+          fi
+      - uses: pnpm/action-setup@v4
+        if: ${{ steps.probe.outputs.present == 'true' }}
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        if: ${{ steps.probe.outputs.present == 'true' }}
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+      # Wire ~/.npmrc for private GitHub Packages BEFORE install, using the job's
+      # own GITHUB_TOKEN (packages: read) — NOT an inherited user secret, so the
+      # no-secrets boundary holds. Skipped entirely unless a scope is given, so
+      # public-only consumers are unaffected and the token is never written.
+      - name: Configure GitHub Packages auth
+        if: ${{ steps.probe.outputs.present == 'true' && inputs.github-packages-scope != '' }}
+        shell: bash
+        env:
+          GH_PKG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          {
+            echo "${{ inputs.github-packages-scope }}:registry=https://npm.pkg.github.com"
+            echo "//npm.pkg.github.com/:_authToken=${GH_PKG_TOKEN}"
+          } >> "$HOME/.npmrc"
+      - name: Install dependencies
+        if: ${{ steps.probe.outputs.present == 'true' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Pre-command
+        if: ${{ steps.probe.outputs.present == 'true' && inputs.pre-command != '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ${{ inputs.pre-command }} 2>&1 | tee pre-command.log
+      - name: MCP tool test coverage
+        id: coverage
+        if: ${{ steps.probe.outputs.present == 'true' }}
+        shell: bash
+        env:
+          PKG_DIR: ${{ inputs.package-dir }}
+        run: |
+          set -o pipefail
+          pnpm -C "$PKG_DIR" run mcp:test-coverage 2>&1 | tee mcp-test-coverage.log
+
+      # Enforce the exemptions burn-down on every PR:
+      #   (A) shrink-only — the file may LOSE lines, never gain them, so a new
+      #       tool can never be grandfathered (write its test instead);
+      #   (B) touch-must-fix — if the PR changes the source behind a STILL-listed
+      #       tool, the entry must go, which means the test gets written. So you
+      #       cannot edit a grandfathered tool and leave it grandfathered.
+      # Pure git + bash apart from one call back into the consumer's own script
+      # for (B)'s path list — deciding which file backs which tool is repo
+      # knowledge this workflow deliberately does not have.
+      #
+      # `!cancelled()` (not `success()`): the ratchet is most valuable exactly
+      # when the coverage step just failed, because "the list grew" is usually
+      # WHY it failed. Skipping it there would report the symptom and hide the
+      # policy breach.
+      - name: Enforce exemptions burn-down (shrink-only + touch-must-fix)
+        if: ${{ !cancelled() && steps.probe.outputs.present == 'true' && steps.coverage.conclusion != 'skipped' && github.event_name == 'pull_request' }}
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          EXEMPTIONS_FILE: ${{ inputs.exemptions-file }}
+          PKG_DIR: ${{ inputs.package-dir }}
+        run: |
+          set -o pipefail
+          if [ ! -f "$EXEMPTIONS_FILE" ]; then
+            echo "No $EXEMPTIONS_FILE — nothing to enforce (the gate is at full coverage)."
+            exit 0
+          fi
+          # Fail-fast on the diff baseline (never masked): we must have the base.
+          git fetch --no-tags origin "$BASE_REF"
+          merge_base="$(git merge-base "origin/$BASE_REF" HEAD)" || {
+            echo "::error::Could not compute merge-base with origin/$BASE_REF"
+            exit 1
+          }
+
+          fail=0
+
+          # (A) Shrink-only: any ADDED non-comment line is a new grandfather
+          # entry — forbidden.
+          added="$(
+            git diff "$merge_base" HEAD -- "$EXEMPTIONS_FILE" \
+              | grep -E '^\+' | grep -vE '^\+\+\+' | sed -E 's/^\+//' \
+              | sed -E 's/[[:space:]]+$//' | grep -vE '^\s*(#|$)' || true
+          )"
+          if [ -n "$added" ]; then
+            echo "::error::$EXEMPTIONS_FILE may only shrink, never grow. Entries ADDED:"
+            printf '%s\n' "$added" | sed 's/^/  + /'
+            echo "You cannot grandfather an MCP tool — write its test instead of listing it."
+            fail=1
+          fi
+
+          # (B) Touch-must-fix: if the PR changes the file backing a still-listed
+          # tool, the entry must be removed (which means its test was written).
+          # Ask the consumer's script which files those are — it owns the
+          # tool→file mapping. Use --name-status -M (not --name-only) so a
+          # RENAMED or DELETED file is caught too: the mapping yields the path as
+          # it exists NOW, but a rename's old path and a delete's path must count
+          # as touching as well, or the tool could be moved out from under its
+          # exemption and silently stay grandfathered.
+          listed_files="$(pnpm -s -C "$PKG_DIR" run mcp:test-coverage --exempt-files || true)"
+          if [ -z "$listed_files" ]; then
+            echo "::error::mcp:test-coverage --exempt-files printed nothing while $EXEMPTIONS_FILE is non-empty — cannot evaluate touch-must-fix"
+            exit 1
+          fi
+          offenders=""
+          while IFS=$'\t' read -r status p1 p2; do
+            [ -z "$status" ] && continue
+            case "$status" in
+              C*) involved="$p2" ;;            # copy: only the new file is new work
+              R*) involved="$p1"$'\n'"$p2" ;;  # rename: BOTH old (source) and new
+              *)  involved="$p1" ;;            # A / M / D: the single path
+            esac
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              if printf '%s\n' "$listed_files" | grep -qxF "$f"; then
+                offenders="$offenders$f"$'\n'
+              fi
+            done <<< "$involved"
+          done < <(git diff --name-status -M --diff-filter=ACMRD "$merge_base" HEAD)
+          offenders="$(printf '%s' "$offenders" | grep -vE '^[[:space:]]*$' | sort -u || true)"
+          if [ -n "$offenders" ]; then
+            echo "::error::You changed files backing MCP tools that are still exempt (a rename or delete counts as touching):"
+            printf '%s\n' "$offenders" | sed 's/^/  - /'
+            echo "Policy: touching the code behind an exempt tool means writing its test and"
+            echo "deleting its line from $EXEMPTIONS_FILE in the same PR. For a rename, the"
+            echo "OLD path counts too; for a delete, prune the stale entry."
+            fail=1
+          fi
+
+          if [ "$fail" -ne 0 ]; then exit 1; fi
+          echo "✓ exemptions ratchet OK (shrink-only; no touched tool left grandfathered)."
