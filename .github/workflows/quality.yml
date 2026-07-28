@@ -74,6 +74,19 @@ on:
         type: string
         required: false
         default: '3'
+      e2e-spec-pattern:
+        description: >-
+          Extended regex (grep -E) matching e2e spec paths for the reliability
+          job's early exit: when NO changed file matches, the job skips its
+          toolchain setup entirely instead of discovering "nothing to re-run"
+          after ~60s of installs. Keep it a SUPERSET of the consumer selector's
+          own filter — a false positive only costs the setup (the consumer
+          script still decides precisely); a narrower pattern would silently
+          skip real re-runs. Default covers both spec conventions
+          (tests/e2e/*.spec.ts and co-located *.e2e.ts).
+        type: string
+        required: false
+        default: '(^|/)tests/e2e/.+\.spec\.[jt]sx?$|\.e2e\.[jt]sx?$'
       nextjs-app-dirs:
         description: >-
           Comma-separated Next.js App Router roots (e.g. "apps/web/app") to
@@ -1142,46 +1155,76 @@ jobs:
         with:
           # Full history so the script can diff the branch against its base.
           fetch-depth: 0
+      # Early exit BEFORE the toolchain: the consumer's reliability script
+      # already self-skips when no e2e specs changed — but only after ~60s of
+      # pnpm/node/Playwright installs. Most pushes change no spec, so detect
+      # that case from the bare checkout and skip every later step: the job
+      # then costs a checkout instead of a full setup. The pattern is a
+      # SUPERSET of the consumer's own filter (see e2e-spec-pattern) — a false
+      # positive only pays the setup, the script still decides precisely.
+      - name: Detect changed e2e specs
+        id: changed-specs
+        shell: bash
+        env:
+          SPEC_PATTERN: ${{ inputs.e2e-spec-pattern }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF:-main}"
+          changed=$(git diff --name-only --diff-filter=d "FETCH_HEAD...HEAD" | grep -E "$SPEC_PATTERN" || true)
+          if [ -n "$changed" ]; then
+            echo "any=true" >> "$GITHUB_OUTPUT"
+            echo "changed e2e specs:"
+            echo "$changed"
+          else
+            echo "any=false" >> "$GITHUB_OUTPUT"
+            echo "no e2e specs changed vs base — skipping toolchain setup and reliability run."
+          fi
       - uses: pnpm/action-setup@v4
+        if: ${{ steps.changed-specs.outputs.any == 'true' }}
         with:
           run_install: false
       - uses: actions/setup-node@v4
+        if: ${{ steps.changed-specs.outputs.any == 'true' }}
         with:
           node-version: ${{ inputs.node-version }}
           cache: 'pnpm'
       - name: Install dependencies
+        if: ${{ steps.changed-specs.outputs.any == 'true' }}
         shell: bash
         run: |
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
       - name: Pre-e2e setup
-        if: ${{ inputs.pre-e2e-command != '' }}
+        if: ${{ steps.changed-specs.outputs.any == 'true' && inputs.pre-e2e-command != '' }}
         shell: bash
         run: |
           set -o pipefail
           ${{ inputs.pre-e2e-command }} 2>&1 | tee pre-e2e.log
       - name: Resolve Playwright version
         id: playwright-version
-        if: ${{ inputs.install-playwright }}
+        if: ${{ steps.changed-specs.outputs.any == 'true' && inputs.install-playwright }}
         shell: bash
         run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
       - name: Cache Playwright browsers
         id: playwright-cache
-        if: ${{ inputs.install-playwright }}
+        if: ${{ steps.changed-specs.outputs.any == 'true' && inputs.install-playwright }}
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright-version.outputs.version }}
       - name: Install Playwright
-        if: ${{ inputs.install-playwright && steps.playwright-cache.outputs.cache-hit != 'true' }}
+        if: ${{ steps.changed-specs.outputs.any == 'true' && inputs.install-playwright && steps.playwright-cache.outputs.cache-hit != 'true' }}
         run: pnpm exec playwright install --with-deps chromium
       # A cache hit restores the browser binaries but NOT the apt system deps
       # (they live outside ~/.cache/ms-playwright), so install those alone.
       - name: Install Playwright system deps
-        if: ${{ inputs.install-playwright && steps.playwright-cache.outputs.cache-hit == 'true' }}
+        if: ${{ steps.changed-specs.outputs.any == 'true' && inputs.install-playwright && steps.playwright-cache.outputs.cache-hit == 'true' }}
         run: pnpm exec playwright install-deps chromium
-      # Self-skips (exit 0) when no e2e specs changed vs the base branch.
+      # Self-skips (exit 0) when no e2e specs changed vs the base branch — the
+      # authoritative, consumer-side decision (the early exit above is only a
+      # coarse superset).
       - name: Re-run changed e2e specs (retries=0)
+        if: ${{ steps.changed-specs.outputs.any == 'true' }}
         shell: bash
         run: |
           set -o pipefail
