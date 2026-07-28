@@ -640,6 +640,92 @@ Plus the committed source-of-truth the script operates on: the **permission
 registry** (the app's declared permissions) and a **reviewed exclusions file**
 (e.g. `rbac-exclusions.json`) — the consumer owns this file and its shrink policy.
 
+# Consuming the MCP test-coverage gate
+
+The third MCP sibling: a reusable gate (`mcp-test-coverage.yml`) that keeps a
+repo's **served** MCP tool surface **tested**. It runs in the CALLER's checkout
+and only orchestrates — the app owns the coverage logic behind one script.
+
+The contract gate proves the surface is complete and internally consistent; it
+cannot prove a tool works. A live smoke run can, but it needs a real deployment
+and a real token, so it can never be a CI gate. This closes the part CI *can*
+answer offline — every served tool has a test — and, more importantly, stops the
+debt growing while the rest is being paid down.
+
+**The ratchet is the gate.** The exemptions list is shrink-only and enforced by
+the same two rules as the [`.quality-exceptions` ratchet](#quality-exceptions-ratchet-automatic):
+
+- **Shrink-only:** a PR may only REMOVE entries, never add them. You cannot
+  grandfather a new tool — write its test instead.
+- **Touch-must-fix:** if a PR changes the source behind a still-listed tool, the
+  entry must be removed in the same PR — which means the test gets written.
+
+One exception, and only one: on the **adoption PR** — where the exemptions file
+does not exist at the merge base — the initial baseline is accepted with a
+notice, since otherwise the rule would demand the entire debt be paid before the
+ratchet could start. From the next PR onward the file exists at the base and
+shrink-only applies with no exception. A file left holding only comments counts
+as no file at all, so a repo that reaches full coverage can keep the header
+without failing its own gate.
+
+Make this check required in branch protection (`MCP Test Coverage (reusable) /
+MCP Test Coverage`) so the burn-down cannot be bypassed.
+
+## A. Caller job (add to your CI workflow)
+
+```yaml
+  mcp-test-coverage:
+    needs: [changes, static]  # optional: gate on a paths-filter change-detector
+    if: needs.static.outputs.code == 'true' && needs.changes.outputs.mcp == 'true'
+    # Least-privilege on two axes (see the MCP notes above): a read-only token,
+    # and NO inherited secrets.
+    permissions:
+      contents: read
+      # packages: read   # add ONLY if pnpm install pulls private GitHub Packages
+    uses: 12-apps/ci/.github/workflows/mcp-test-coverage.yml@v1
+    with:
+      package-dir: apps/web
+      exemptions-file: apps/web/mcp/mcp-test-exemptions
+    # NOTE: intentionally no `secrets: inherit` — this gate needs no secrets.
+```
+
+**Secrets — pass none.** Same rule and rationale as the other two gates: every
+job runs consumer-controlled code, so withhold `secrets: inherit`; `permissions`
+scopes only the `GITHUB_TOKEN`, not env secrets. `mcp:test-coverage` is a
+**static** analysis of the tool registry vs the test tree — design it to run
+offline.
+
+**Private packages.** Identical wiring to the MCP contract gate — grant
+`packages: read` and set `github-packages-scope: '@my-org'`. Public-only
+consumers set neither.
+
+Inputs (all optional): `node-version` (default `24`), `run-coverage` (default
+true — self-skips with a notice until the consumer defines the script; set
+`false` to opt out explicitly), `pre-command`, `github-packages-scope`,
+`package-dir` (default `.`), and `exemptions-file` (default
+`mcp-test-exemptions`, resolved from the repo ROOT — not from `package-dir`).
+
+The ratchet runs on `pull_request` events only, since it needs a base ref to diff
+against, and no-ops when the exemptions file is absent — so a repo that reaches
+full coverage simply deletes the file. It runs even when the coverage step
+FAILED: "the list grew" is usually *why* it failed, and reporting the symptom
+while hiding the policy breach would be the wrong way round.
+
+## B. Required in the consumer repo
+
+`package.json` script:
+
+| Script | Purpose |
+|--------|---------|
+| `mcp:test-coverage` | Enumerate the **served** tools and **exit non-zero** if any is neither tested nor carried on the exemptions list, or if any exemption has gone stale (its tool is now tested, is now withheld, or no longer exists). Called again with `--exempt-files`, print the source file behind each exempt tool — one repo-relative path per line — which is what touch-must-fix diffs against. On by default but only runs when the script exists (skips with a notice otherwise). |
+
+Plus the committed **exemptions file** (one entry per line, `#` comments
+ignored). What counts as "tested" is deliberately the consumer's call — this
+workflow never looks at a test. Note that tightening that definition later only
+moves tools out of `tested`, and the ratchet forbids paying for that with new
+entries: a tightened definition must be paid for with tests, in the PR that
+tightens it.
+
 # Consuming the Next.js prod-smoke gate
 
 A reusable gate (`nextjs-prod-smoke.yml`) that builds a Next.js app for
