@@ -67,6 +67,31 @@ auto-discovered too). See `.github/deploy/README.md` for the full schema.
   `${IMAGE_NAMESPACE}-<svc>:${IMAGE_TAG}`, plus the Dockerfiles.
 - **static / worker:** the build command + `outputPath`, or a `wrangler.toml`.
 
+### Optional: fixture reset on every deploy (`demo-seed`)
+
+A repo that keeps disposable demo/e2e fixture data on the deployed environment
+can have it rebuilt on every deploy. Define a one-shot `demo-seed` service in
+the compose file — same shape as `migrate`, under `profiles: [tools]` so a plain
+`up` never fires it:
+
+```yaml
+  demo-seed:
+    image: ${IMAGE_NAMESPACE}-migrate:${IMAGE_TAG}
+    profiles: [tools]
+    environment:
+      - DATABASE_URL=...
+    command: ["pnpm", "demo:reset"]
+```
+
+The DigitalOcean adapter runs it **after** `docker compose up`, so a failing
+seed can never strand the deploy with the old containers still serving. It is
+**non-fatal but loud**: a failure emits a `::error::` annotation rather than
+failing a deployment that is already live and healthy.
+
+Purely opt-in — the adapter asks the compose file whether the service exists, so
+a repo without one skips it silently. Anything destructive the reset does is the
+consumer's concern; the engine only invokes it.
+
 ## 5. Variables & secrets (consumer repo)
 
 | Kind | Name | When |
