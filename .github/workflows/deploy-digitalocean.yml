@@ -192,12 +192,27 @@ jobs:
           # would report a good release as a bad one. The `::error::` annotation
           # surfaces it on the run, and post-cd's e2e goes red against the stale
           # data anyway, so nothing is actually swallowed.
+          # HARD TIMEOUT, and it is not decorative. The first production run of
+          # this step wrote thousands of rows against a 1-vCPU box, held this
+          # SSH session for 2h12m, and died on a broken pipe (exit 255) — which
+          # failed a deploy whose containers were already live and healthy. The
+          # deploy is not the fixture's babysitter: it gives the reset a bounded
+          # budget and moves on. A reset killed mid-way is repaired by the next
+          # run, since the consumer's reset rebuilds from scratch by design.
           if doppler run -- docker compose --profile tools config --services 2>/dev/null | grep -qx demo-seed; then
-            echo "Resetting demo stores..."
-            if doppler run -- docker compose run --rm -T demo-seed < /dev/null; then
+            budget="${DEMO_SEED_TIMEOUT:-900}"
+            echo "Resetting demo stores (budget: ${budget}s)..."
+            # `|| rc=$?` rather than testing $? in an elif: under `set -e` the
+            # status of an if-condition is easy to lose, and 124 (timeout's
+            # kill) must stay distinguishable from the seed's own failure.
+            rc=0
+            timeout "$budget" doppler run -- docker compose run --rm -T demo-seed < /dev/null || rc=$?
+            if [ "$rc" -eq 0 ]; then
               echo "Demo stores reset."
+            elif [ "$rc" -eq 124 ]; then
+              echo "::error::demo-seed exceeded its ${budget}s budget and was killed. The deployment is live; its demo/e2e fixture data may be partial."
             else
-              echo "::error::demo-seed failed — the deployment is live, but its demo/e2e fixture data is stale."
+              echo "::error::demo-seed failed (exit ${rc}) — the deployment is live, but its demo/e2e fixture data is stale."
             fi
           fi
           REMOTE
