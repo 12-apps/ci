@@ -7,7 +7,10 @@ name: Monorepo Static
 # expensive lane) while sharing the machinery across repos.
 #
 # What it standardizes (originally proven in future-pay, FUT-213):
-#   - paths-filtered `changes` detection (positive globs only — see below)
+#   - paths-filtered `changes` detection (positive globs only — see below),
+#     including the CALLER's own repo-specific filters via `extra-filters` —
+#     one `Detect Changes` job for the whole pipeline. A consumer-side second
+#     one costs a full billed minute per CI trigger for ~6s of work (FUT-468)
 #   - full-suite behavior on `push` events (every output forced 'true', no
 #     --affected): the post-merge safety net that makes PR-time incremental
 #     selection safe to trust
@@ -65,6 +68,46 @@ on:
         type: string
         required: false
         default: ''
+      extra-filters:
+        description: >-
+          Optional RAW YAML appended verbatim to the generated paths-filter
+          spec, so a consumer can fold its repo-specific filters into THIS job
+          instead of paying for a second `Detect Changes` job of its own
+          (GitHub bills every job that starts, rounded up to a whole minute —
+          the duplicate cost ~1 min per CI trigger). Their results come back
+          through the `matched` output.
+
+
+          Pass it as an unindented block scalar (`extra-filters: |`) with each
+          filter name at column 0 — those column-0 `name:` lines are what the
+          job reads to learn the filter names, which it needs on `push` where
+          the filter step does not run at all. A block whose names are indented
+          declares none and FAILS the job rather than silently disabling the
+          caller's lanes on the branch that gates releases.
+
+
+          The same positive-globs-only rule as `code-paths` applies (no `!`
+          negations under `predicate-quantifier: some`). `code`, `workflows`
+          and `changes` are reserved names and are rejected.
+        type: string
+        required: false
+        default: ''
+      probe-scripts:
+        description: >-
+          Optional newline-separated list of root `package.json` script names
+          to probe for. The ones that exist come back in the `scripts` output,
+          so a caller can put "does this repo define script X?" in a job-level
+          `if:` — which is otherwise impossible, because `if:` is evaluated
+          BEFORE the job starts, when there is no checkout to inspect and
+          expressions cannot read file contents. Answering it here costs
+          nothing: this job already runs and already bills its whole minute.
+
+
+          Deliberately NOT event-gated (unlike the path filters): the answer is
+          a property of the repo, not of the diff, so it is correct on push too.
+        type: string
+        required: false
+        default: ''
       run-actionlint:
         description: 'Lint workflow files (actionlint + shellcheck) when they change.'
         type: boolean
@@ -85,6 +128,27 @@ on:
       workflows:
         description: "'true' when .github/workflows/** changed (or on push)."
         value: ${{ jobs.changes.outputs.workflows }}
+      matched:
+        description: >-
+          JSON array of every filter name that matched — the built-in `code` /
+          `workflows` plus anything declared via `extra-filters`. Gate a
+          repo-specific job with
+          `contains(fromJSON(needs.<job>.outputs.matched), '<name>')`.
+
+
+          On `push` it lists EVERY declared name, matched or not: the full-suite
+          safety net skips nothing, exactly as `code` and `workflows` are forced
+          'true' there. Never empty — it falls back to `[]` so `fromJSON` on it
+          can't blow up.
+        value: ${{ jobs.changes.outputs.matched }}
+      scripts:
+        description: >-
+          JSON array of the `probe-scripts` names that the root `package.json`
+          actually defines (on every event, push included). Gate a lane that
+          only makes sense once a script exists with
+          `contains(fromJSON(needs.<job>.outputs.scripts), '<script>')`.
+          Never empty — falls back to `[]`.
+        value: ${{ jobs.changes.outputs.scripts }}
 
 jobs:
   changes:
@@ -92,23 +156,85 @@ jobs:
     runs-on: ubuntu-latest
     # On a push (the full-suite safety net) every output is forced 'true':
     # the whole point of that run is to skip nothing, so the filter step does
-    # not even execute.
+    # not even execute. `matched` mirrors that contract for the caller's
+    # `extra-filters` — on push it carries EVERY declared name, which is why
+    # the spec step (which is where the names are parsed) runs unconditionally
+    # while the filter step below stays PR-only.
+    #
+    # The trailing `|| '[]'` on the two JSON outputs is deliberate: a consumer
+    # reads them through `fromJSON`, and `fromJSON('')` is a hard expression
+    # error, so they must never resolve empty.
     outputs:
       code: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.code }}
       workflows: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.workflows }}
+      matched: ${{ (github.event_name != 'pull_request' && steps.spec.outputs.names || steps.filter.outputs.changes) || '[]' }}
+      scripts: ${{ steps.probe.outputs.scripts || '[]' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       # dorny/paths-filter takes its filter spec as a YAML string; build it
       # from the newline-list input so consumers pass plain globs, not YAML.
+      #
+      # NOT event-gated (the filter step is): on push this step is the only
+      # thing that knows which extra-filter names were declared, and `matched`
+      # has to report all of them for the full-suite safety net to hold.
       - name: Build filter spec
         id: spec
-        if: github.event_name == 'pull_request'
         shell: bash
         env:
           CODE_PATHS: ${{ inputs.code-paths }}
+          EXTRA_FILTERS: ${{ inputs.extra-filters }}
         run: |
+          set -euo pipefail
+
+          # Top-level keys of the raw extra YAML = the caller's filter names.
+          # Only column-0 `name:` lines count, which is what a `|` block scalar
+          # produces; comments and the indented glob lines are skipped.
+          names=()
+          while IFS= read -r line; do
+            if [[ "$line" =~ ^([A-Za-z0-9_.-]+): ]]; then
+              names+=("${BASH_REMATCH[1]}")
+            fi
+          done <<< "$EXTRA_FILTERS"
+
+          # Fail LOUD on a non-empty block that declares nothing (the classic
+          # cause: the whole block indented one level). Silently accepting it
+          # would leave `matched` missing those names on push, and the caller's
+          # lanes would stop running on main with CI still green.
+          if [ -n "${EXTRA_FILTERS//[[:space:]]/}" ] && [ "${#names[@]}" -eq 0 ]; then
+            echo "::error::extra-filters is non-empty but declares no top-level filter names. Pass it as an UNINDENTED block scalar (extra-filters: |) with every filter name at column 0."
+            exit 1
+          fi
+
+          for name in ${names[@]+"${names[@]}"}; do
+            case "$name" in
+              code | workflows)
+                echo "::error::extra-filters may not redefine the built-in '$name' filter."
+                exit 1
+                ;;
+              changes)
+                # dorny/paths-filter refuses to set its own `changes` output
+                # when a filter of that name exists ("Cannot set changes output
+                # variable - name already used by filter output"), which would
+                # empty `matched` on every PR without failing anything.
+                echo "::error::extra-filters may not define a filter named 'changes' — dorny/paths-filter then suppresses its own 'changes' output and 'matched' would be silently empty on pull_request."
+                exit 1
+                ;;
+            esac
+          done
+
+          # Every declared name, for the push safety net. Names are validated
+          # against [A-Za-z0-9_.-]+ above, so no JSON escaping is needed.
+          json='['
+          sep=''
+          for name in code workflows ${names[@]+"${names[@]}"}; do
+            json="${json}${sep}\"${name}\""
+            sep=','
+          done
+          json="${json}]"
+          echo "names=$json" >> "$GITHUB_OUTPUT"
+
           {
             echo 'yaml<<__FILTERS__'
             echo 'code:'
@@ -117,8 +243,37 @@ jobs:
             done <<< "$CODE_PATHS"
             echo 'workflows:'
             echo "  - '.github/workflows/**'"
+            if [ -n "${EXTRA_FILTERS//[[:space:]]/}" ]; then
+              printf '%s\n' "$EXTRA_FILTERS"
+            fi
             echo '__FILTERS__'
           } >> "$GITHUB_OUTPUT"
+
+      # Answers "does the repo define script X?" for a caller's job-level `if:`
+      # — see the probe-scripts input. Runs on every event: the answer is a
+      # property of the repo, not of the diff.
+      - name: Probe package.json scripts
+        id: probe
+        if: ${{ inputs.probe-scripts != '' }}
+        shell: bash
+        env:
+          PROBE_SCRIPTS: ${{ inputs.probe-scripts }}
+        run: |
+          set -euo pipefail
+          present=()
+          while IFS= read -r script; do
+            [ -n "$script" ] || continue
+            if SCRIPT="$script" node -e "const s=require('./package.json').scripts||{};process.exit(Object.hasOwn(s,process.env.SCRIPT)?0:1)"; then
+              present+=("$script")
+            else
+              echo "::notice::no '$script' script defined in package.json — any lane gated on it will not start"
+            fi
+          done <<< "$PROBE_SCRIPTS"
+          # Script names can contain ':' and '-' but JSON-escaping is still the
+          # safe move here, since these come from a free-form input.
+          printf '%s\n' ${present[@]+"${present[@]}"} \
+            | node -e "const l=require('fs').readFileSync(0,'utf8').split('\n').filter(Boolean);console.log('scripts='+JSON.stringify(l))" \
+            >> "$GITHUB_OUTPUT"
 
       - name: Check for code changes
         uses: dorny/paths-filter@v3
