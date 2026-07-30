@@ -59,11 +59,27 @@ jobs:
   # ---------------------------------------------------------------------------
   # Artifact factory — build & push provider-agnostic container images once.
   # ---------------------------------------------------------------------------
+  # Cancellation is scoped to the BUILD phase, per image, and deliberately NOT
+  # declared at workflow level. A workflow-level `cancel-in-progress: true` would
+  # cancel the whole run including the deploy adapter, whose one step is
+  # `Pull prebuilt images and (re)start over SSH` — 234s measured, and mostly a
+  # `docker compose up --force-recreate` on the droplet. Killing that mid-flight
+  # leaves the box with some containers on the new image and some on the old, and
+  # there is no rollback. Job-level concurrency does not shield a job from a
+  # workflow-level cancel, so the ONLY safe place for it is here.
+  #
+  # A build is safe to cancel because it is idempotent: it pushes content-addressed
+  # layers and two tags, and the superseding run redoes it. The deploy gates below
+  # then require an affirmative `success`, so a cancelled build cannot leak a
+  # never-pushed `<ref>:<sha>` into a deploy.
   build-images:
     name: Build image · ${{ matrix.image }}
     needs: discover
     if: needs.discover.outputs.has_images == 'true'
     runs-on: ubuntu-latest
+    concurrency:
+      group: cd-build-image-${{ github.workflow }}-${{ matrix.image }}-${{ github.ref }}
+      cancel-in-progress: true
     permissions:
       contents: read
       packages: write
@@ -101,6 +117,10 @@ jobs:
     needs: discover
     if: needs.discover.outputs.has_statics == 'true'
     runs-on: ubuntu-latest
+    # Build-phase-only cancellation — see the note on build-images.
+    concurrency:
+      group: cd-build-static-${{ github.workflow }}-${{ matrix.app }}-${{ github.ref }}
+      cancel-in-progress: true
     strategy:
       fail-fast: false
       matrix:
@@ -127,12 +147,24 @@ jobs:
   # (uses: cannot be templated from a matrix value). vars.* reads the CALLER's
   # repo/org Variables.
   # ---------------------------------------------------------------------------
+  # GATE: `!= 'failure'` was not sufficient. `cancelled()` reflects THIS job, not
+  # the dependency, so a CANCELLED build-images left `'cancelled' != 'failure'`
+  # true and the deploy proceeded — pulling `<ref>:<github.sha>`, a tag the
+  # cancelled build never pushed. Reachable today on a runner death or a
+  # single-job manual cancel; the build-phase concurrency above makes it routine.
+  # Require an affirmative success instead.
+  #
+  # Phrased as "if there are images, the build must have SUCCEEDED" rather than a
+  # bare `== 'success'`: on `action: destroy` the whole discover→build chain is
+  # skipped, so `has_images` is empty and build-images reports 'skipped'. A bare
+  # success check would silently disable destroy.
   digitalocean:
     name: DigitalOcean
     needs: [discover, build-images]
     if: >-
-      !cancelled() && needs.build-images.result != 'failure' &&
+      !cancelled() &&
       vars.ENABLE_DEPLOY_DIGITALOCEAN == 'true' &&
+      (needs.discover.outputs.has_images != 'true' || needs.build-images.result == 'success') &&
       (needs.discover.outputs.has_images == 'true' || inputs.action == 'destroy') &&
       (github.event_name == 'push' ||
         inputs.target == 'all' || inputs.target == 'digitalocean')
@@ -146,12 +178,16 @@ jobs:
       group: deploy-digitalocean
       cancel-in-progress: false
 
+  # Same gate correction as digitalocean. The "only if there ARE statics" phrasing
+  # matters more here: a workers-only consumer has no statics at all, so
+  # build-static is skipped and a bare `== 'success'` would never deploy it.
   cloudflare:
     name: Cloudflare
     needs: [discover, build-static]
     if: >-
-      !cancelled() && needs.build-static.result != 'failure' &&
+      !cancelled() &&
       vars.ENABLE_DEPLOY_CLOUDFLARE == 'true' &&
+      (needs.discover.outputs.has_statics != 'true' || needs.build-static.result == 'success') &&
       (needs.discover.outputs.has_statics == 'true' || needs.discover.outputs.has_workers == 'true') &&
       (github.event_name == 'push' ||
         ((inputs.target == 'all' || inputs.target == 'cloudflare') && inputs.action == 'deploy'))
