@@ -100,8 +100,12 @@ A trailing `/` is a root-anchored directory prefix; anything else is an exact
 root-relative path — so a nested `packages/foo/package.json` does **not** trigger
 it (turbo already attributes that to its own package). A value **replaces** the
 default rather than adding to it, which is why the example repeats the default
-entries. An empty or whitespace-only value falls back to the default with a
-`::warning::` — the gate cannot be switched off by emptying the list.
+entries. Entries are whitespace-separated, and a literal block scalar (`|`, one
+line per group) is honoured in full exactly like the folded `>-` above — newlines
+count as separators, not terminators. An empty or whitespace-only value falls back
+to the default with a `::warning::` — the gate cannot be switched off by emptying
+the list. The effective entry list is echoed as a `::notice::` on **every** run,
+fired or not, so a narrowed or mistyped list is visible in the log.
 
 **Also worth doing on your side:** declare `globalDependencies` in your own
 `turbo.json` for the same files. That is the more complete fix — it corrects
