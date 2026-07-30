@@ -87,18 +87,70 @@ jobs:
     name: Redeploy
     if: inputs.action == 'deploy'
     runs-on: ubuntu-latest
+    # A superseded deploy still SUCCEEDS as a job (it correctly did nothing), so
+    # `needs.deploy.result` cannot distinguish "deployed" from "skipped".
+    # Downstream consumers must read this output instead.
+    outputs:
+      superseded: ${{ steps.supersede.outputs.skip }}
     steps:
+      # Supersede check — SKIP (not cancel) a deploy that is already obsolete.
+      #
+      # cd.yml serializes deploys (`cancel-in-progress: false`, deliberately —
+      # cancelling mid-`docker compose up` has no rollback). So merging A then B
+      # deploys A in full, then immediately overwrites it with B: A's 234s is pure
+      # waste. Because a deploy only starts after its build finishes (~2 min), by
+      # then B is usually already main's tip — so asking "am I still the tip?"
+      # here, BEFORE touching the droplet, reclaims that whole run.
+      #
+      # Skipping is safe in a way cancelling is not: nothing has been mutated yet.
+      # It also removes a live inconsistency — the remote script does
+      # `git reset --hard origin/main` for the compose file while pinning images to
+      # `github.sha`, so a superseded deploy ran B's compose against A's images.
+      #
+      # Push only. A workflow_dispatch deploy is an explicit human act (a rollback
+      # or a re-deploy of a known sha) and must never be second-guessed.
+      - name: Supersede check — is this still the branch tip?
+        id: supersede
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          tip=$(curl -fsS \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/commits/$GITHUB_REF_NAME" \
+            | jq -r '.sha') || tip=""
+          # Fail OPEN: an unreadable tip must deploy, never silently skip. A
+          # missed deploy is the one outcome worse than a redundant one.
+          if [ -z "$tip" ] || [ "$tip" = "null" ]; then
+            echo "::warning::could not resolve $GITHUB_REF_NAME tip — deploying anyway"
+            exit 0
+          fi
+          if [ "$tip" != "$GITHUB_SHA" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::superseded — $GITHUB_REF_NAME is now at ${tip:0:7}, this run is ${GITHUB_SHA:0:7}. Skipping; that commit's own deploy will ship it."
+            {
+              echo "## Deploy skipped — superseded ⏭️"
+              echo ""
+              echo "\`$GITHUB_REF_NAME\` advanced to \`${tip:0:7}\` while this run (\`${GITHUB_SHA:0:7}\`) was building."
+              echo "Deploying it would be immediately overwritten, so the droplet was left untouched."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Guard — DEPLOY_HOST must be set
+        if: steps.supersede.outputs.skip != 'true'
         run: |
           if [ -z "${{ vars.DEPLOY_HOST }}" ]; then
             echo "::error::DEPLOY_HOST variable is not set. Run cd.yml with action=provision (target=digitalocean) first, then add the DEPLOY_HOST repo variable."
             exit 1
           fi
       - name: Setup SSH key
+        if: steps.supersede.outputs.skip != 'true'
         run: |
           echo "${{ secrets.DO_SSH_PRIVATE_KEY_B64 }}" | tr -d ' \n\r\t' | base64 -d > /tmp/do_key
           chmod 600 /tmp/do_key
       - name: Pull prebuilt images and (re)start over SSH
+        if: steps.supersede.outputs.skip != 'true'
         run: |
           ssh -i /tmp/do_key -o StrictHostKeyChecking=no -o LogLevel=ERROR \
             root@${{ vars.DEPLOY_HOST }} 'bash -s' -- \
@@ -217,6 +269,7 @@ jobs:
           fi
           REMOTE
       - name: Summary
+        if: steps.supersede.outputs.skip != 'true'
         run: |
           {
             echo "## Redeployed ✅"
@@ -235,7 +288,11 @@ jobs:
     permissions:
       contents: read
       actions: write
-    if: needs.deploy.result == 'success'
+    # A superseded deploy left the droplet untouched, so there is nothing new to
+    # smoke — and the superseding commit's own run will do it. Without this the
+    # skip would still pay for a post-cd dispatch plus a full e2e pass against
+    # whatever happens to be live, which is the waste this was meant to remove.
+    if: needs.deploy.result == 'success' && needs.deploy.outputs.superseded != 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Trigger post-cd workflow
