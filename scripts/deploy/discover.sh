@@ -32,9 +32,16 @@
 #   PLAN_ONLY=1         print the human summary only; never write GITHUB_OUTPUT
 # Out ($GITHUB_OUTPUT):
 #   image_namespace=ghcr.io/<lower(owner/repo)>
-#   images=[{app,provider,image,ref,dockerfile,target,cache,role}]    has_images=true|false
-#   statics=[{app,provider,command,outputPath,artifact,projectName}]  has_statics=true|false
-#   workers=[{app,provider,wranglerDir,command}]                      has_workers=true|false
+#   images=[{app,dir,provider,image,ref,dockerfile,target,cache,role}]     has_images=true|false
+#   statics=[{app,dir,provider,command,outputPath,artifact,projectName}]   has_statics=true|false
+#   workers=[{app,dir,provider,wranglerDir,command}]                       has_workers=true|false
+#
+# `dir` is the app directory the descriptor lives in (apps/web/deploy/config.json
+# → "apps/web"), derived from the descriptor's PATH and never from its `name`.
+# select-images.sh maps an image to a workspace package by `dir`, so a consumer
+# that sets `name` != directory cannot silently break change detection — and the
+# `migrate` image, which is a second *target* of apps/web's descriptor, inherits
+# apps/web's affectedness instead of looking for a package called "migrate".
 #
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,15 +68,28 @@ if [ "${#descs[@]}" -gt 0 ]; then
   done
 fi
 
+# Pair each descriptor with its own location before flattening. jq's `inputs`
+# loses the filename, and `input_filename` is read-ahead-sensitive across
+# multiple files, so the path is attached here in bash where it is unambiguous.
+descriptors='[]'
+if [ "${#valid[@]}" -gt 0 ]; then
+  descriptors="$(
+    for f in "${valid[@]}"; do
+      p="${f#./}"                        # apps/web/deploy/config.json
+      d="$(dirname "$(dirname "$p")")"   # apps/web  (find only matches */deploy/config.json)
+      jq -c --arg dir "$d" '{dir: $dir, doc: .}' "$f"
+    done | jq -sc '.'
+  )"
+fi
+
 # Flatten every descriptor's targets into the three matrices in one jq pass.
-plan="$(jq -n --arg ns "$NS" --arg target "$TARGET" '
-  [ inputs ]
-  | [ .[] as $d | ($d.targets // [])[] | . + {app: ($d.name // "")} ]
+plan="$(jq -n --arg ns "$NS" --arg target "$TARGET" --argjson descs "$descriptors" '
+  [ $descs[] as $e | ($e.doc.targets // [])[] | . + {app: ($e.doc.name // ""), dir: $e.dir} ]
   | map(select(.app != "" and (.build.type != null)))
   | map(select($target == "all" or .provider == $target))
   | {
       images: [ .[] | select(.build.type == "container")
-        | { app, provider,
+        | { app, dir, provider,
             image:  (.build.image // .app),
             ref:    ($ns + "-" + (.build.image // .app)),
             dockerfile: (.build.dockerfile // "Dockerfile"),
@@ -77,17 +97,17 @@ plan="$(jq -n --arg ns "$NS" --arg target "$TARGET" '
             cache:  (.build.cache // (.build.image // .app)),
             role:   (.build.role // "runner") } ],
       statics: [ .[] | select(.build.type == "static")
-        | { app, provider,
+        | { app, dir, provider,
             command: .build.command,
             outputPath: .build.outputPath,
             artifact: ("deploy-static-" + (.deploy.projectName // .app)),
             projectName: (.deploy.projectName // .app) } ],
       workers: [ .[] | select(.build.type == "worker")
-        | { app, provider,
+        | { app, dir, provider,
             wranglerDir: ((.build.wranglerDir // "") | ltrimstr("./")),
             command: (.deploy.command // "deploy") } ]
     }
-' "${valid[@]:-/dev/null}")"
+')"
 
 # Fallback: a bare wrangler.toml with no descriptor → synthesize a worker target.
 if [ "$TARGET" = "all" ] || [ "$TARGET" = "cloudflare" ]; then
@@ -95,7 +115,7 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "cloudflare" ]; then
     dir="$(dirname "$toml")"; dir="${dir#./}"
     if ! jq -e --arg d "$dir" 'any(.workers[]; .wranglerDir == $d)' >/dev/null <<<"$plan"; then
       plan="$(jq --arg d "$dir" --arg app "$(basename "$dir")" \
-        '.workers += [{app:$app, provider:"cloudflare", wranglerDir:$d, command:"deploy"}]' <<<"$plan")"
+        '.workers += [{app:$app, dir:$d, provider:"cloudflare", wranglerDir:$d, command:"deploy"}]' <<<"$plan")"
     fi
   done < <(find . -name wrangler.toml -not -path './node_modules/*' -print0 2>/dev/null)
 fi
@@ -118,7 +138,7 @@ emit workers "$workers"; emit has_workers "$(has "$workers")"
 # Human summary — always to stderr (and the only output under PLAN_ONLY).
 {
   echo "deploy discovery — namespace: $NS  (target: $TARGET)"
-  echo "  images : $(jq -r 'if length==0 then "none" else map("\(.image)->\(.ref):\(.target)")|join(", ") end' <<<"$images")"
+  echo "  images : $(jq -r 'if length==0 then "none" else map("\(.image)[\(.dir)]->\(.ref):\(.target)")|join(", ") end' <<<"$images")"
   echo "  statics: $(jq -r 'if length==0 then "none" else map("\(.app)->\(.projectName)")|join(", ") end' <<<"$statics")"
   echo "  workers: $(jq -r 'if length==0 then "none" else map("\(.app)@\(.wranglerDir)")|join(", ") end' <<<"$workers")"
 } >&2
