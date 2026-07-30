@@ -271,7 +271,17 @@ fi
 # just this planner). It is not what this gate relies on, because that would put
 # this engine's safety in a file the engine neither owns nor can verify — a
 # consumer that never sets it would get silent staleness with no warning.
-read -ra gbi_list <<<"$GLOBAL_BUILD_INPUTS"
+#
+# `read` stops at the FIRST NEWLINE, so a YAML block scalar (`global_build_inputs:
+# |`) — the natural thing to reach for when extending a long list — would hand
+# this step a multi-line value and only line one's entries would be honoured, the
+# rest silently dropped. That is a gate that READS as configured protection while
+# checking less than the author wrote, the one direction this script never goes.
+# Fold newlines to spaces before splitting: a no-op when there are none (so the
+# `>-` folded scalar CONSUMING.md documents is unchanged), and a value of only
+# newlines still collapses to whitespace, splits to zero entries, and lands in
+# the blank fallback below.
+read -ra gbi_list <<<"${GLOBAL_BUILD_INPUTS//$'\n'/ }"
 if [ "${#gbi_list[@]}" -eq 0 ]; then
   # Blank or whitespace-only. `${VAR:-default}` above only catches the truly
   # empty case, and a YAML folded scalar can easily hand this step a lone space.
@@ -280,6 +290,10 @@ if [ "${#gbi_list[@]}" -eq 0 ]; then
   read -ra gbi_list <<<"$GBI_DEFAULT"
   warn "GLOBAL_BUILD_INPUTS is blank — using the engine default instead. The root-level build-input gate cannot be turned off by emptying the list; to narrow it, name the paths you do want."
 fi
+# The gate's CONFIGURATION, on EVERY run and not only when it fires: a truncated
+# or wrongly-narrowed list does its damage on exactly the runs where it stays
+# quiet, so the effective entry list has to be readable from the log either way.
+notice "CD image reuse: root-level build-input gate is checking ${#gbi_list[@]} entries: ${gbi_list[*]}"
 gbi_hit=''
 for gbi in "${gbi_list[@]}"; do
   case "$gbi" in
