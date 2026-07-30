@@ -66,6 +66,52 @@ selection bug):
       reuse_unaffected_images: false
 ```
 
+#### Root-level build inputs (`global_build_inputs`)
+
+One case needs naming because turbo cannot see it. turbo attributes a change to
+the package that **contains** it, so a **root-level** file belongs to no package
+and a root-only commit reports *zero* affected packages. For `.github/**` and
+`scripts/**` that is correct, and it is the saving. For a root file that is in the
+Docker build context it is not: if your Dockerfiles `COPY . .` into a
+`turbo prune` stage — the shape this framework expects — then `.npmrc`,
+`patches/**` and friends *are* in every image's context. An `.npmrc`-only commit
+would otherwise retag every image and the new `.npmrc` would never reach a build:
+green CD, green deploy, green post-CD smoke tests, all running the previous
+commit's binaries under the new sha.
+
+The planner therefore fails open on a change to any **global build input**, with a
+`::notice::` naming the file. The default list needs nothing from you:
+
+```
+.npmrc pnpm-lock.yaml pnpm-workspace.yaml turbo.json turbo.jsonc package.json patches/
+```
+
+Extend it if your repo has other root-level files in the build context (a root
+`Makefile`, a `docker/` directory, a shared `tsconfig.base.json`, …):
+
+```yaml
+    with:
+      global_build_inputs: >-
+        .npmrc pnpm-lock.yaml pnpm-workspace.yaml turbo.json turbo.jsonc
+        package.json patches/ tsconfig.base.json docker/
+```
+
+A trailing `/` is a root-anchored directory prefix; anything else is an exact
+root-relative path — so a nested `packages/foo/package.json` does **not** trigger
+it (turbo already attributes that to its own package). A value **replaces** the
+default rather than adding to it, which is why the example repeats the default
+entries. An empty or whitespace-only value falls back to the default with a
+`::warning::` — the gate cannot be switched off by emptying the list.
+
+**Also worth doing on your side:** declare `globalDependencies` in your own
+`turbo.json` for the same files. That is the more complete fix — it corrects
+affectedness for *every* turbo consumer (`turbo run`, remote cache, your own CI
+filters), not just this planner. It is deliberately *not* what the gate above
+relies on: that would put this engine's safety in a file the engine neither owns
+nor can verify, and a consumer that never sets it would get silent staleness with
+no warning. Doing both is fine — correct `globalDependencies` just makes the gate
+fire redundantly at worst.
+
 ## 3. Per-app descriptor — `apps/<app>/deploy/config.json`
 
 ```jsonc

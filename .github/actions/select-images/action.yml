@@ -29,6 +29,24 @@ inputs:
     description: 'turbo task used by the fallback affected probe.'
     required: false
     default: build
+  global_build_inputs:
+    description: >-
+      Space-separated root-level paths that belong to no workspace package but
+      ARE in every image's Docker build context (the app Dockerfiles `COPY . .`
+      into a `turbo prune` stage). turbo attributes a change to the package
+      containing it, so a root file is invisible to `--affected`; a change to one
+      of these therefore rebuilds EVERY image. A trailing `/` is a root-anchored
+      directory prefix; anything else is an exact root-relative path — so a
+      nested `packages/foo/package.json` does NOT trigger it, because turbo
+      already attributes that to its own package.
+      Empty (the default) uses the engine's own conservative list, which is
+      authoritative in `scripts/deploy/select-images.sh` and documented in
+      `.github/deploy/README.md`. A value REPLACES that list rather than adding
+      to it, so repeat the entries you still want — which is also why an empty or
+      whitespace-only value falls back to the default (loudly) instead of
+      disabling the gate.
+    required: false
+    default: ''
   registry:
     description: 'Registry to log in to for the reuse-source manifest probe.'
     required: false
@@ -95,6 +113,7 @@ runs:
         HEAD_SHA: ${{ inputs.head_sha }}
         REUSE_ENABLED: ${{ inputs.reuse }}
         AFFECTED_TASK: ${{ inputs.affected_task }}
+        GLOBAL_BUILD_INPUTS: ${{ inputs.global_build_inputs }}
         # Always probe. With no token the probe simply finds nothing and every
         # image is rebuilt; assuming the source exists would instead hand the
         # reuse job a tag that may not be there.

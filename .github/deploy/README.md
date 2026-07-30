@@ -56,8 +56,61 @@ Two things about this are load-bearing:
 Everything ambiguous **fails open** (rebuilds everything) and says so with a
 `::notice::`/`::warning::` and a job-summary table, every run: all-zeros or
 unreachable base, missing/erroring/unparseable turbo, no `turbo.json`, a changed
-`.dockerignore`, a reuse source manifest that is not in the registry. Pass
-`reuse_unaffected_images: false` to the `cd.yml` caller to force full rebuilds.
+`.dockerignore`, a changed **global build input** (below), a reuse source manifest
+that is not in the registry. Pass `reuse_unaffected_images: false` to the `cd.yml`
+caller to force full rebuilds.
+
+### Global build inputs — the root-level blind spot
+
+turbo attributes a change to the package that **contains** it, and a root-level
+file belongs to no package. So a root-only commit reports *zero* affected
+packages (measured on turbo 2.7.5: a commit touching only `.github/` and
+`scripts/` → `0 no packages`). For `.github/**` and `scripts/**` that is correct,
+and it is the whole saving.
+
+It is **wrong** for root files that reach the image. The app Dockerfiles do
+`COPY . .` into their `turbo prune` stage, so the pruner's input is the entire
+repo root. `.npmrc` is the sharpest case: it changes how `pnpm install` resolves
+and authenticates *inside* the image, yet an `.npmrc`-only commit would retag all
+images and the new `.npmrc` would never reach a build — a green CD, a green deploy
+and green post-CD smoke tests, all exercising the previous commit's binaries under
+the new sha. Same shape for `patches/**` once pnpm patches are in use. Neither
+existing build-context guard covers it: `.dockerignore` and each image's own
+`dockerfile` field are both exact-path checks.
+
+`GLOBAL_BUILD_INPUTS` is that gate. A change to any entry fails open the same way
+a changed `.dockerignore` does, with a `::notice::` naming the file. Default:
+
+```
+.npmrc pnpm-lock.yaml pnpm-workspace.yaml turbo.json turbo.jsonc package.json patches/
+```
+
+- A trailing `/` is a **root-anchored directory prefix** — `patches/` matches
+  `patches/react@19.patch` but not `packages/x/patches/y.patch`.
+- Anything else is an **exact root-relative path**. That is deliberate: a nested
+  `packages/foo/package.json` must *not* trigger it, because turbo already
+  attributes that change to its own package, and matching it here would rebuild
+  everything on any manifest edit anywhere.
+- Deliberately conservative. `pnpm-lock.yaml` and the root `package.json` are
+  probably already covered by turbo's lockfile handling and
+  `RootInternalDepChanged`, so listing them costs an occasional redundant full
+  rebuild and buys certainty. A missed rebuild ships stale code silently; a
+  redundant one costs a minute.
+
+Override with the `global_build_inputs` input on `cd.yml` (or on the
+`select-images` action directly) — space separated. A value **replaces** the
+default rather than adding to it, so repeat the entries you still want. An empty
+or whitespace-only value falls back to the default with a `::warning::` — the gate
+cannot be switched off by emptying the list.
+
+> A consumer that declares `globalDependencies` in its own `turbo.json` gets a
+> more complete fix, because it corrects affectedness for *every* turbo consumer
+> (`turbo run`, remote cache, CI filters) rather than just this planner — and it
+> is worth doing. It is not what this gate relies on, because that would put the
+> engine's safety in a file the engine neither owns nor can verify: a consumer
+> that never sets it would get silent staleness with no warning. The two compose
+> fine — a repo with `globalDependencies` set correctly just sees the gate fire
+> redundantly at worst.
 
 ## Add an app
 
