@@ -508,17 +508,38 @@ generated surface never drifts from the endpoint surface.
 run as sequential STEPS of a single `MCP Contract Gates` job — one checkout, one
 `pnpm install --frozen-lockfile`, one `pre-command` — not four jobs each
 repeating that setup. Every gate step is guarded by `!cancelled() &&
-steps.install.outcome == 'success'`, so a failing gate still reports the ones
-after it (only a broken install short-circuits the set) and the job ends failed
-if any gate failed. `store-compliance` stays a separate job on purpose: it reads
-the committed manifest and needs neither the install nor the `pre-command`.
-The whole job is skipped when `run-drift`, `run-lint`, `run-coverage` and
-`run-parity` are all false.
+steps.install.outcome == 'success' && steps.pre.outcome != 'failure'` plus its
+own toggle. That means:
+
+- **A failing gate does not hide the gates after it** — one run reports the whole
+  inventory, and the job ends failed if any gate failed.
+- **A failed install or a failed `pre-command` skips all four gates.** The
+  `pre-command` usually builds something the `mcp:*` scripts import, so without
+  this the job would report the real error once and then four identical
+  `Cannot find module …` failures on top of it.
+- The `pre-command` term is `!= 'failure'`, **not** `== 'success'`, because a
+  caller that passes no `pre-command` leaves that step *skipped* — `== 'success'`
+  would silently skip every gate and report green.
+
+`store-compliance` stays a separate job on purpose: it reads the committed
+manifest and needs neither the install nor the `pre-command`. The whole
+`MCP Contract Gates` job is skipped when `run-drift`, `run-lint`, `run-coverage`
+and `run-parity` are all false; and when `run-coverage` is the *only* one of the
+four that is on and your repo has no `mcp:coverage` script, the job still starts
+but skips the pnpm/Node setup, the install and the `pre-command` — see the
+`mcp:coverage` row of the script table in **B. Required in the consumer repo**
+below for exactly what that does and does not save.
 
 Consequence for branch rules: the per-gate check runs (`MCP Drift`, `MCP Lint`,
 `MCP Coverage`, `MCP Parity`) no longer exist — they are steps inside `MCP
-Contract Gates`. Require only your own aggregation job (see the CD section), as
-this doc has always advised; never the reusable workflow's internal job names.
+Contract Gates`. Prefer requiring your own aggregation job (the `ci-success`
+pattern in the *Consuming the Monorepo CI pipeline* section above) rather than
+this workflow's internal job names, which are not part of the contract and may
+be renamed or merged again. Note this is a preference, not a doc-wide rule: two
+other sections here — the `.quality-exceptions` ratchet and the MCP test-coverage
+gate — do tell you to require a reusable workflow's check by name. If you follow
+that style for this gate, the only names that exist are `MCP Contract Gates` and
+`MCP Store Compliance`.
 
 ## A. Caller job (add to your CI workflow)
 
@@ -589,7 +610,7 @@ in-process served-schema parity), `run-store-compliance` (default true),
 |--------|---------|
 | `mcp:check` | Regenerate the MCP tool manifest from the app's OpenAPI and **exit non-zero on drift** (typically: regenerate to a temp path, then `git diff --exit-code` the committed manifest). The load-bearing gate. |
 | `mcp:lint` | Static lint of the exposed surface — no secret-bearing fields leak into tool schemas, every tool has an input schema, write tools are classified. Fails on violation. |
-| `mcp:coverage` | Route/action coverage: every HTTP route the app serves must be registered on the MCP surface (or sit on a documented infra allowlist), and every server action/RPC must map to a registered operation or carry a reviewed exclusion. This is what makes the surface **complete**, not just non-drifting — without it a new endpoint ships silently outside the agent contract. The gate is on by default but only runs when the script exists (skips with a notice otherwise — the script probe runs before the install, so an unadopted consumer pays nothing), so adoption is per-repo: define the script and the gate arms itself. For a staged rollout — or to silence even the skip notice — callers can opt out explicitly with `run-coverage: false` (mirrors `run-parity`). |
+| `mcp:coverage` | Route/action coverage: every HTTP route the app serves must be registered on the MCP surface (or sit on a documented infra allowlist), and every server action/RPC must map to a registered operation or carry a reviewed exclusion. This is what makes the surface **complete**, not just non-drifting — without it a new endpoint ships silently outside the agent contract. The gate is on by default but only runs when the script exists (skips with a notice otherwise), so adoption is per-repo: define the script and the gate arms itself. What that skip costs, precisely: the probe runs before the pnpm/Node setup, so if `run-coverage` is the **only** enabled gate in `MCP Contract Gates` and the script is absent, the job skips the setup, the `pnpm install` and the `pre-command`, and costs one runner + one checkout + the probe. If any of `run-drift` / `run-lint` / `run-parity` is also on — the default — the install and `pre-command` run regardless, because those gates need them; the probe then saves only the coverage script's own runtime, not the setup. For a staged rollout — or to silence even the skip notice — callers can opt out explicitly with `run-coverage: false` (mirrors `run-parity`). |
 | `mcp:parity` | (only if `run-parity: true`) Boot the MCP server in-process against the rendered OpenAPI and diff served tool schemas vs the manifest. |
 
 ## The store-compliance floor (no consumer script)
