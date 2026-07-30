@@ -19,13 +19,15 @@ name: MCP Contract (reusable)
 # parity — run as sequential STEPS of one `contract-gates` job: one runner, one
 # checkout, one pnpm/Node setup, one `pnpm install --frozen-lockfile`, one
 # `pre-command`. They used to be four jobs each repeating all of that to run a
-# single offline script that finishes in seconds. Same consolidation, and the
-# same failure isolation, as quality.yml's `Static Gates`. store-compliance
-# stays its own job because it needs neither the install nor the pre-command
-# (see its comment below). Consumers' required-check identity is the reusable
-# workflow's overall result — CONSUMING.md tells consumers to require ONLY
-# their aggregation job in the branch ruleset — so the per-gate check-run names
-# are not part of the contract.
+# single offline script that finishes in seconds. The consolidation and the
+# gate-vs-gate failure isolation follow quality.yml's `Static Gates`; the
+# `pre-command` handling does NOT — that job has no pre-command step at all, so
+# it is no precedent either way (see the GATE GUARD comment below for what is
+# actually modelled on what). store-compliance stays its own job because it
+# needs neither the install nor the pre-command (see its comment below).
+# CONSUMING.md points consumers at their own aggregation job for the branch
+# ruleset rather than this workflow's internal job names, so the per-gate
+# check-run names are not part of the contract.
 #
 # SECRETS: this gate needs NONE, and MUST NOT be given any. Every gate runs
 # consumer-controlled code (dependency install, pre-command, and the mcp:*
@@ -155,14 +157,17 @@ jobs:
   # one runner spin-up + checkout + pnpm install + pre-command, instead of four
   # of each to run four offline scripts that finish in seconds.
   #
-  # FAILURE ISOLATION (copied from quality.yml's `Static Gates`): every gate step
-  # is guarded by `!cancelled() && steps.install.outcome == 'success'`, NOT the
-  # implicit `success()`. Under plain success() the first failing gate would mask
-  # every gate after it, so a PR would surface one violation per run instead of
-  # the full inventory four independent jobs gave us. Only a broken install
-  # short-circuits the set — nothing downstream can run without node_modules.
-  # The job still ends FAILED if any gate failed, which is what the caller's
-  # required check reads.
+  # FAILURE ISOLATION, gate vs gate (this half IS quality.yml's `Static Gates`
+  # shape): every gate step is guarded by `!cancelled()`, NOT the implicit
+  # `success()`. Under plain success() the first failing gate would mask every
+  # gate after it, so a PR would surface one violation per run instead of the
+  # full inventory four independent jobs gave us. The job still ends FAILED if
+  # any gate failed, which is what the caller's required check reads.
+  #
+  # Because `!cancelled()` is a status-check function it also DELETES the
+  # implicit `success()`, so anything that must still short-circuit the gates has
+  # to be named explicitly — hence the `steps.install.*` and `steps.pre.*` terms
+  # in the GATE GUARD comment below.
   contract-gates:
     name: MCP Contract Gates
     # Skip the runner entirely when every gate in this job is off; otherwise it
@@ -172,12 +177,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Probe FIRST, before the toolchain setup and install: a consumer that has
-      # not adopted mcp:coverage must get the promised skip notice without paying
-      # for — or failing on — the heavy setup steps. Uses only the checkout and
-      # the runner's preinstalled node. Itself skipped when the caller opted out
-      # of coverage, so `run-coverage: false` stays silent (as it did when this
-      # was its own job with a job-level `if`).
+      # Probe FIRST, before the toolchain setup and install, so its answer can
+      # gate them (see the next step). Uses only the checkout and the runner's
+      # preinstalled node. Itself skipped when the caller opted out of coverage,
+      # so `run-coverage: false` stays silent (as it did when this was its own
+      # job with a job-level `if`).
       - name: Probe for mcp:coverage script
         id: probe
         if: ${{ inputs.run-coverage }}
@@ -190,10 +194,45 @@ jobs:
             echo "present=false" >> "$GITHUB_OUTPUT"
             echo "::notice::mcp:coverage script not defined — skipping (see CONSUMING.md to adopt the coverage gate)"
           fi
+      # One decision for the whole toolchain block below: can ANY gate in this
+      # job actually run? drift / lint / parity need only their own toggle;
+      # coverage additionally needs the consumer to define the script, which only
+      # the probe above can answer. When the answer is no there is nothing for an
+      # install to serve, so pnpm/Node setup, the npmrc wiring, the install and
+      # the pre-command are all skipped and the job reports green having honestly
+      # run nothing.
+      #
+      # That state is reachable in exactly one way: coverage is the only enabled
+      # gate and the consumer has not adopted `mcp:coverage`. Before the four
+      # jobs were merged into this one, the `coverage` job guarded every heavy
+      # step on this same probe output, so such a caller paid a checkout and
+      # nothing else; without this step the merged job would pay a full
+      # `pnpm install --frozen-lockfile` plus an arbitrary `pre-command` to run
+      # zero gates, and would report FAILED if either of them broke — a failure
+      # about no gate the caller enabled.
+      #
+      # Modelled on quality.yml's `e2e-reliability`, which gates pnpm setup,
+      # Node setup, install and `Pre-e2e setup` on a `changed-specs` step output
+      # for the same reason. (`Static Gates` is NOT the precedent here: it has no
+      # skippable setup and no pre-command.)
+      - name: Any install-dependent gate to run?
+        id: need
+        shell: bash
+        env:
+          ANY: >-
+            ${{ inputs.run-drift || inputs.run-lint || inputs.run-parity || (inputs.run-coverage && steps.probe.outputs.present == 'true') }}
+        run: |
+          set -o pipefail
+          echo "any=${ANY}" >> "$GITHUB_OUTPUT"
+          if [ "${ANY}" != 'true' ]; then
+            echo "::notice::no install-dependent gate can run (drift/lint/parity off and mcp:coverage not defined) — skipping pnpm/Node setup, install and pre-command"
+          fi
       - uses: pnpm/action-setup@v4
+        if: ${{ steps.need.outputs.any == 'true' }}
         with:
           run_install: false
       - uses: actions/setup-node@v4
+        if: ${{ steps.need.outputs.any == 'true' }}
         with:
           node-version: ${{ inputs.node-version }}
           cache: 'pnpm'
@@ -202,7 +241,7 @@ jobs:
       # no-secrets boundary holds. Skipped entirely unless a scope is given, so
       # public-only consumers are unaffected and the token is never written.
       - name: Configure GitHub Packages auth
-        if: ${{ inputs.github-packages-scope != '' }}
+        if: ${{ steps.need.outputs.any == 'true' && inputs.github-packages-scope != '' }}
         shell: bash
         env:
           GH_PKG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -212,38 +251,84 @@ jobs:
             echo "${{ inputs.github-packages-scope }}:registry=https://npm.pkg.github.com"
             echo "//npm.pkg.github.com/:_authToken=${GH_PKG_TOKEN}"
           } >> "$HOME/.npmrc"
-      # `id: install` is what every gate guard below keys on: a failed install is
-      # the ONE condition that short-circuits the whole set.
+      # `id: install` is one of the two conditions every gate guard below keys on
+      # (the other is `id: pre`): no gate can run without node_modules.
       - name: Install dependencies
         id: install
+        if: ${{ steps.need.outputs.any == 'true' }}
         shell: bash
         run: |
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
       # Runs ONCE for all four gates (it used to run four times, once per job).
-      # Deliberately left on the implicit `success()`, so a failed install skips
-      # it; a failed pre-command does NOT hide the gates below — each still runs
-      # and reports its own result.
+      # `id: pre` is read by all four gate guards below — a failed pre-command
+      # short-circuits them instead of letting each one fail again downstream of
+      # the same missing build product. Left on the implicit `success()` itself,
+      # so a failed install skips it.
       - name: Pre-command
-        if: ${{ inputs.pre-command != '' }}
+        id: pre
+        if: ${{ steps.need.outputs.any == 'true' && inputs.pre-command != '' }}
         shell: bash
         run: |
           set -o pipefail
           ${{ inputs.pre-command }} 2>&1 | tee pre-command.log
 
+      # GATE GUARD — the same three shared terms on all four gates, plus that
+      # gate's own toggle. Term by term:
+      #
+      #   !cancelled()
+      #     Keep running after an EARLIER GATE failed, so one run reports the full
+      #     inventory instead of the first violation (FAILURE ISOLATION above).
+      #     It is a status-check function, so it removes the implicit `success()`
+      #     — which is why the two step-outcome terms below have to be spelled
+      #     out; without them nothing would short-circuit the gates at all.
+      #
+      #   steps.install.outcome == 'success'
+      #     No gate can run without node_modules. `== 'success'` is right here
+      #     because the only way install is SKIPPED is `steps.need.outputs.any !=
+      #     'true'` — i.e. no gate could have run anyway, and each gate's own
+      #     toggle/probe term is false in that state too. So this term never
+      #     hides a gate that had work to do.
+      #
+      #   steps.pre.outcome != 'failure'
+      #     A broken pre-command must not be followed by four cascading failures.
+      #     The pre-command typically builds something the mcp:* scripts import,
+      #     so when it dies the four gates all die on the same missing artifact
+      #     (in future-pay: four `Cannot find module …/dist/search/index.js`),
+      #     burying the one real error under noise. The old five-job shape ended
+      #     at `Pre-command` with the real error last and the gate SKIPPED; this
+      #     restores that.
+      #
+      #     `!= 'failure'` and deliberately NOT `== 'success'`: `pre-command` is
+      #     optional, so the step is SKIPPED (outcome 'skipped', not 'success')
+      #     whenever the caller passes none — and skipped again when the
+      #     toolchain block above is skipped. Under `== 'success'` every consumer
+      #     that passes no pre-command would silently skip ALL FOUR gates and the
+      #     job would report GREEN having run nothing: a far worse bug than the
+      #     cascade this term fixes. `!= 'failure'` treats 'skipped' as "no
+      #     obstacle", which is exactly what it is.
+      #
+      # Provenance, since #29's comment got it wrong: the `!cancelled()` half is
+      # quality.yml's `Static Gates`; the pre-command half is NOT — that job has
+      # no pre-command step. quality.yml's only pre-command steps are `Pre-e2e
+      # setup` in `e2e-affected` and in `e2e-reliability`, and both leave every
+      # later step on the implicit `success()`, so there a failed pre-command
+      # skips the rest of the job. `!= 'failure'` is the narrowest form of that
+      # same precedent, kept compatible with the gate-vs-gate isolation above.
+      #
       # DRIFT is the primary gate: it proves the generated MCP tool surface still
       # matches the app's OpenAPI. mcp:check must regenerate and exit non-zero when
       # the committed manifest is stale (the consumer typically regenerates to a temp
       # path and `git diff --exit-code`s the committed artifact).
       - name: MCP manifest drift (regenerate + diff)
-        if: ${{ !cancelled() && steps.install.outcome == 'success' && inputs.run-drift }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.pre.outcome != 'failure' && inputs.run-drift }}
         shell: bash
         run: |
           set -o pipefail
           pnpm mcp:check 2>&1 | tee mcp-check.log
 
       - name: MCP surface lint (secret-leak + schema-shape)
-        if: ${{ !cancelled() && steps.install.outcome == 'success' && inputs.run-lint }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.pre.outcome != 'failure' && inputs.run-lint }}
         shell: bash
         run: |
           set -o pipefail
@@ -255,14 +340,14 @@ jobs:
       # probe above keeps the gate non-breaking for consumers that have not adopted
       # mcp:coverage yet — they see a skip notice, not a failure.
       - name: MCP route/action coverage
-        if: ${{ !cancelled() && steps.install.outcome == 'success' && inputs.run-coverage && steps.probe.outputs.present == 'true' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.pre.outcome != 'failure' && inputs.run-coverage && steps.probe.outputs.present == 'true' }}
         shell: bash
         run: |
           set -o pipefail
           pnpm mcp:coverage 2>&1 | tee mcp-coverage.log
 
       - name: MCP served-schema parity (in-process)
-        if: ${{ !cancelled() && steps.install.outcome == 'success' && inputs.run-parity }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.pre.outcome != 'failure' && inputs.run-parity }}
         shell: bash
         run: |
           set -o pipefail
