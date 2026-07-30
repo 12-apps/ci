@@ -223,9 +223,16 @@ jobs:
             ${{ inputs.run-drift || inputs.run-lint || inputs.run-parity || (inputs.run-coverage && steps.probe.outputs.present == 'true') }}
         run: |
           set -o pipefail
-          echo "any=${ANY}" >> "$GITHUB_OUTPUT"
-          if [ "${ANY}" != 'true' ]; then
+          # Compared against 'false', not 'true', so this FAILS SAFE: only a
+          # definite `false` skips the toolchain. Any unexpected value runs the
+          # install and lets each gate's own guard decide — the one thing that
+          # must never happen here is silently skipping every gate and
+          # reporting green.
+          if [ "${ANY}" = 'false' ]; then
+            echo "any=false" >> "$GITHUB_OUTPUT"
             echo "::notice::no install-dependent gate can run (drift/lint/parity off and mcp:coverage not defined) — skipping pnpm/Node setup, install and pre-command"
+          else
+            echo "any=true" >> "$GITHUB_OUTPUT"
           fi
       - uses: pnpm/action-setup@v4
         if: ${{ steps.need.outputs.any == 'true' }}
