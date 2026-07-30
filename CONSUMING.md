@@ -164,6 +164,57 @@ Purely opt-in — the adapter asks the compose file whether the service exists, 
 a repo without one skips it silently. Anything destructive the reset does is the
 consumer's concern; the engine only invokes it.
 
+### Optional: zero-downtime rollout (`scripts/deploy/rollout.sh`)
+
+By default the DigitalOcean adapter brings a deploy live with:
+
+```bash
+docker compose up -d --no-build --force-recreate --remove-orphans
+```
+
+That recreates **every** service in the compose file, not only the ones whose
+image moved — the database, the background worker and the reverse proxy
+included. While the proxy container is gone nothing is listening on :80/:443,
+so clients get connection refused rather than an error they could retry
+through, and every app container additionally waits for the data tier to come
+back healthy. The gap is the sum of all of that.
+
+A repo that wants a gapless deploy ships an **executable**
+`scripts/deploy/rollout.sh`; the adapter runs it in place of the line above,
+still under `doppler run` so the compose environment is identical:
+
+```bash
+if [ -x scripts/deploy/rollout.sh ]; then
+  doppler run -- bash scripts/deploy/rollout.sh
+else
+  doppler run -- docker compose up -d --no-build --force-recreate --remove-orphans
+fi
+```
+
+The engine hands over completely at that point — it does not tell the script
+what to roll or how. What it expects back is only an exit code: **non-zero
+fails the deploy**, so a script that cannot get the new images live must say so
+rather than exit 0 with the old ones still serving.
+
+A working implementation to copy is `scripts/deploy/rollout.sh` in
+`12-apps/future-pay`. The shape that matters:
+
+- leave `postgres`/`redis` alone unless their compose definition changed
+  (`up -d` **without** `--force-recreate` already has exactly that semantics);
+- for each service that serves traffic, `up -d --no-recreate --scale <svc>=2`
+  so the successor starts alongside its predecessor, wait for the new container
+  to report **healthy**, then stop and remove the old one — which requires the
+  service to have a `healthcheck:` and to have **no `container_name:`** (a
+  fixed name caps the service at one container);
+- hot-reload the edge proxy instead of recreating it;
+- on a container that never goes healthy, remove the new one and leave the old
+  one serving — the deploy fails with the previous version still up.
+
+Purely opt-in, and unchanged for every repo without the file. Note this needs
+enough free memory on the box to run two copies of the largest rolled service
+at once; the future-pay implementation measures that at deploy time and falls
+back to in-place replacement per service rather than risking the OOM killer.
+
 ## 5. Variables & secrets (consumer repo)
 
 | Kind | Name | When |
