@@ -38,6 +38,18 @@ on:
         type: boolean
         required: false
         default: true
+      global_build_inputs:
+        description: >-
+          Space-separated root-level paths that sit in every image's Docker build
+          context but in no workspace package, so turbo's --affected cannot see
+          them and a change to one must rebuild every image. Trailing `/` is a
+          root-anchored directory prefix, anything else an exact root-relative
+          path. Leave empty for the engine's conservative default (documented in
+          .github/deploy/README.md); a value REPLACES that default, so repeat the
+          entries you still want.
+        type: string
+        required: false
+        default: ''
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -84,6 +96,12 @@ jobs:
       # packages, retag every image from the parent commit and build none — a green
       # deploy shipping the previous commit's code. monorepo-static.yml documents
       # the same trap at its Lint step. See scripts/deploy/select-images.sh.
+      #
+      # The planner also has to cover the mirror image of that trap: a change to a
+      # ROOT-level build input (.npmrc, patches/, the lockfile) belongs to no
+      # workspace package, so --affected reports zero — yet the Dockerfiles
+      # `COPY . .`, so it is in every build context. global_build_inputs is that
+      # gate; empty means "the engine's conservative default".
       - id: plan
         uses: 12-apps/ci/.github/actions/select-images@v1
         with:
@@ -91,6 +109,7 @@ jobs:
           base_sha: ${{ github.event.before }}
           head_sha: ${{ github.sha }}
           reuse: ${{ inputs.reuse_unaffected_images }}
+          global_build_inputs: ${{ inputs.global_build_inputs }}
           registry_token: ${{ secrets.GITHUB_TOKEN }}
 
   # ---------------------------------------------------------------------------

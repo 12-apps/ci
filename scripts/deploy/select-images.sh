@@ -36,6 +36,8 @@
 #   - turbo missing, erroring, or emitting JSON this script cannot parse
 #   - an image whose descriptor `dir` is not a workspace package at all
 #   - an image whose Dockerfile (or any .dockerignore) changed in the range
+#   - a GLOBAL_BUILD_INPUTS entry changed in the range (root-level build inputs
+#     turbo cannot attribute to any package — see the gate for why)
 #   - the reuse source manifest `<ref>:$BASE_SHA` is not in the registry
 # Each one is logged with ::notice:: / ::warning:: and lands in the job summary,
 # every run: a silent cap reads as "covered everything" when it did not.
@@ -46,6 +48,13 @@
 #   HEAD_SHA            commit being built (github.sha); defaults to HEAD
 #   REUSE_ENABLED       true|false — caller kill switch; default true
 #   AFFECTED_TASK       turbo task for the fallback probe; default build
+#   GLOBAL_BUILD_INPUTS space-separated root-level paths that are in every
+#                       image's build context but in no workspace package; a
+#                       change to one rebuilds everything. Trailing `/` = a
+#                       root-anchored directory prefix, otherwise an exact
+#                       root-relative path. Conservative default below; an
+#                       empty or whitespace-only value falls back to it (the
+#                       gate cannot be switched off by emptying the list).
 #   TURBO_VERSION       pin for the npx fallback; default: read from package.json
 #   TURBO_TIMEOUT       seconds per turbo call; default 180 (npx can block)
 #   PROBE_TIMEOUT       seconds per registry probe; default 30
@@ -69,6 +78,8 @@ BASE_SHA="${BASE_SHA:-}"
 HEAD_SHA="${HEAD_SHA:-}"
 REUSE_ENABLED="${REUSE_ENABLED:-true}"
 AFFECTED_TASK="${AFFECTED_TASK:-build}"
+GBI_DEFAULT='.npmrc pnpm-lock.yaml pnpm-workspace.yaml turbo.json turbo.jsonc package.json patches/'
+GLOBAL_BUILD_INPUTS="${GLOBAL_BUILD_INPUTS:-$GBI_DEFAULT}"
 PROBE_SOURCE_TAGS="${PROBE_SOURCE_TAGS:-1}"
 TURBO_TIMEOUT="${TURBO_TIMEOUT:-180}"
 PROBE_TIMEOUT="${PROBE_TIMEOUT:-30}"
@@ -227,6 +238,64 @@ fi
 if grep -qE '(^|/)\.dockerignore$' "$TMP/changed"; then
   build_all "a .dockerignore changed in this range — every build context is affected"
 fi
+
+# Same blind spot, one level up: ROOT-LEVEL build inputs. turbo attributes a
+# change to the package that CONTAINS it, and a root file belongs to none — so a
+# root-only commit reports ZERO affected packages (measured: turbo 2.7.5, a
+# commit touching only .github/ and scripts/ → "0 no packages"). For .github/**
+# and scripts/** that is correct and is the whole saving. It is WRONG for root
+# files that reach the image: the app Dockerfiles `COPY . .` into their
+# `turbo prune` stage, so the pruner's input is the entire root. `.npmrc` is the
+# sharpest case — it changes how `pnpm install` resolves and authenticates
+# INSIDE the image, yet an .npmrc-only commit would retag every image and the
+# new .npmrc would never reach a build. Same shape for `patches/` once pnpm
+# patches are in use: patched dependency code changes, turbo reports nothing.
+# The two existing build-context guards (.dockerignore, each image's own
+# `dockerfile`) are exact-path checks and cover none of this.
+#
+# Entry semantics: a trailing `/` is a root-anchored DIRECTORY PREFIX
+# (`patches/` matches `patches/react.patch`, not `packages/x/patches/y.patch`);
+# anything else is an EXACT root-relative path. Exact is what keeps a nested
+# `packages/foo/package.json` out of it — turbo already attributes that to its
+# own package, and matching it here would rebuild everything on any manifest
+# edit anywhere, destroying the saving.
+#
+# The default is deliberately conservative: pnpm-lock.yaml and the root
+# package.json are probably already covered by turbo's lockfile handling and
+# RootInternalDepChanged, so listing them costs an occasional redundant full
+# rebuild and buys certainty. That is the correct direction of error — a missed
+# rebuild ships stale code silently, a redundant one costs a minute.
+#
+# NOTE for consumers: declaring `globalDependencies` in your own turbo.json is
+# the more complete fix (it corrects affectedness for every turbo consumer, not
+# just this planner). It is not what this gate relies on, because that would put
+# this engine's safety in a file the engine neither owns nor can verify — a
+# consumer that never sets it would get silent staleness with no warning.
+read -ra gbi_list <<<"$GLOBAL_BUILD_INPUTS"
+if [ "${#gbi_list[@]}" -eq 0 ]; then
+  # Blank or whitespace-only. `${VAR:-default}` above only catches the truly
+  # empty case, and a YAML folded scalar can easily hand this step a lone space.
+  # Silently honouring it would DISABLE the gate, which is the one direction this
+  # script never goes: fall back to the default and say so.
+  read -ra gbi_list <<<"$GBI_DEFAULT"
+  warn "GLOBAL_BUILD_INPUTS is blank — using the engine default instead. The root-level build-input gate cannot be turned off by emptying the list; to narrow it, name the paths you do want."
+fi
+gbi_hit=''
+for gbi in "${gbi_list[@]}"; do
+  case "$gbi" in
+    */)                                      # root-anchored directory prefix
+      while IFS= read -r changed_path; do
+        case "$changed_path" in "$gbi"*) gbi_hit="$changed_path"; break ;; esac
+      done <"$TMP/changed"
+      ;;
+    *)                                       # exact root-relative path
+      grep -Fxq -- "$gbi" "$TMP/changed" && gbi_hit="$gbi"
+      ;;
+  esac
+  [ -z "$gbi_hit" ] || break
+done
+[ -z "$gbi_hit" ] \
+  || build_all "'$gbi_hit' is a global build input (GLOBAL_BUILD_INPUTS) and changed in ${BASE_SHA:0:12}..${HEAD_SHA:0:12} — it is in every image's Docker build context but belongs to no workspace package, so turbo cannot report it affected"
 
 count_of() { wc -l <"$1" | tr -d ' '; }
 list_of()  { local s; s="$(paste -sd, "$1")"; printf '%s' "${s:-none}"; }
