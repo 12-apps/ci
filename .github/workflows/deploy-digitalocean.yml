@@ -219,12 +219,38 @@ jobs:
           # deploy silently ends before recreating anything. Redirect stdin so the
           # remaining commands actually run.
           doppler run -- docker compose run --rm -T migrate < /dev/null
-          # --force-recreate: a plain `up` can leave the old container running when
-          # only the image tag changed (observed: new image pulled + resolved, but
-          # the container stayed on the prior SHA). Force it so the new image
-          # actually goes live. --remove-orphans drops services removed from the
-          # compose file (e.g. the retired redis).
-          doppler run -- docker compose up -d --no-build --force-recreate --remove-orphans
+          # Bring the new images live — OPT-IN zero-downtime, per consumer.
+          #
+          # A repo that wants a gapless deploy ships an executable
+          # scripts/deploy/rollout.sh and this runs it instead of the blanket
+          # recreate below; a repo that does not has no such file and nothing
+          # changes for it. Same shape as the demo-seed opt-in further down: the
+          # engine asks the consumer what it has rather than knowing anything
+          # about any particular consumer.
+          #
+          # Why the fallback is not good enough to be the only path:
+          # --force-recreate rebuilds EVERY service in the compose file, not just
+          # the ones whose image moved. That includes the database, and it
+          # includes the reverse proxy — so for the length of the recreate there
+          # is no listener on :80/:443 at all and clients get connection refused
+          # rather than a proxy error they could retry through. It stays as the
+          # default only because it is the behaviour every existing consumer is
+          # already running; a rollout script is strictly better where one exists.
+          #
+          # The script owns its own health gating and rollback, so a failure here
+          # means it could not get the new code live — and it fails the deploy
+          # with the old containers left serving.
+          if [ -x scripts/deploy/rollout.sh ]; then
+            echo "Consumer provides scripts/deploy/rollout.sh — using zero-downtime rollout"
+            doppler run -- bash scripts/deploy/rollout.sh
+          else
+            # --force-recreate: a plain `up` can leave the old container running when
+            # only the image tag changed (observed: new image pulled + resolved, but
+            # the container stayed on the prior SHA). Force it so the new image
+            # actually goes live. --remove-orphans drops services removed from the
+            # compose file (e.g. the retired redis).
+            doppler run -- docker compose up -d --no-build --force-recreate --remove-orphans
+          fi
           docker compose ps
 
           # Demo/e2e fixture reset — OPT-IN per consumer.
