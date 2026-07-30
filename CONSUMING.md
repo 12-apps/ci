@@ -113,9 +113,10 @@ deploys nothing.
 The fail-fast CI core for pnpm + turborepo monorepos, split in two reusable
 workflows so consumers keep the fail-fast topology around their own jobs:
 
-- **`monorepo-static.yml`** — changes paths-filter, `turbo lint/check-types
-  --affected` with cross-run `.turbo` caches, actionlint. Exposes `code` /
-  `workflows` outputs.
+- **`monorepo-static.yml`** — changes paths-filter (yours included, via
+  `extra-filters`), `turbo lint/check-types --affected` with cross-run `.turbo`
+  caches, actionlint. Exposes `code` / `workflows` / `matched` / `scripts`
+  outputs.
 - **`monorepo-tests.yml`** — unit tests (turbo cache + vitest results-cache
   persistence for failed-first/slowest-first ordering + fail-fast bail), build,
   opt-in integration lane.
@@ -144,26 +145,6 @@ permissions:
   pull-requests: read
 
 jobs:
-  # Consumer-side filters for repo-specific gating (e.g. run integration only
-  # when the integration-relevant surface changed). Force outputs 'true' on
-  # push so the safety net skips nothing. Omit this job entirely (and the
-  # `run-integration` line below) if you don't need repo-specific filters.
-  changes:
-    runs-on: ubuntu-latest
-    outputs:
-      integration: ${{ github.event_name == 'push' && 'true' || steps.filter.outputs.integration }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
-        id: filter
-        if: github.event_name == 'pull_request'
-        with:
-          filters: |
-            integration:
-              - 'apps/web/**'
-              - 'packages/**'
-              - 'pnpm-lock.yaml'
-
   static:
     permissions:
       contents: read
@@ -173,12 +154,25 @@ jobs:
       # e.g. Prisma: the generated client lives in node_modules, outside any
       # turbo output — regenerate before type-checking.
       pre-typecheck-command: pnpm --filter @repo/shared-helpers prisma:generate
+      # Repo-specific filters go HERE, not in a consumer-side `changes` job of
+      # your own: a second Detect Changes job does ~6s of work and bills a
+      # whole minute on every PR push and every merge (FUT-468). Raw YAML,
+      # UNINDENTED — each filter name at column 0. Results come back in
+      # `matched`; on push it lists every declared name, so the full-suite
+      # safety net still skips nothing.
+      extra-filters: |
+        integration:
+          - 'apps/web/**'
+          - 'packages/**'
+          - 'pnpm-lock.yaml'
+      # Optional: "does the repo define this script?" — a question a job-level
+      # `if:` cannot answer (it is evaluated before any checkout exists).
+      # Answered here for free and read back via the `scripts` output.
+      probe-scripts: |
+        test:smoke
 
   tests:
-    # `changes` must be in needs for `needs.changes.outputs.integration` below
-    # to resolve — without it the expression is empty and run-integration is
-    # silently always false.
-    needs: [changes, static]
+    needs: static
     if: needs.static.outputs.code == 'true'
     permissions:
       contents: read
@@ -193,23 +187,24 @@ jobs:
       vitest-cache-paths: |
         apps/web/node_modules/.vite/vitest
         packages/ui/node_modules/.vite/vitest
-      run-integration: ${{ needs.changes.outputs.integration == 'true' }}
+      run-integration: ${{ contains(fromJSON(needs.static.outputs.matched), 'integration') }}
       integration-cache-path: node_modules/.vite/vitest
 
-  # Repo-specific jobs gate on the static tier the same way `tests` does:
+  # Repo-specific jobs gate on the static tier the same way `tests` does, and
+  # read their own filters out of `matched`:
   my-repo-gate:
     needs: static
-    if: needs.static.outputs.code == 'true'
+    if: needs.static.outputs.code == 'true' && contains(fromJSON(needs.static.outputs.matched), 'integration')
     ...
 
   # Required-checks aggregation: require ONLY this job in the branch ruleset.
   ci-success:
     if: always()
-    # `changes` MUST be listed even though every other job depends on it: if it
+    # `static` MUST be listed even though every other job depends on it: if it
     # FAILS (e.g. the paths-filter action errors), its dependents go `skipped`
     # — not `failure` — and an aggregation that only watches the dependents
     # would pass with zero tests run. Listing it surfaces the failure here.
-    needs: [changes, static, tests, my-repo-gate]
+    needs: [static, tests, my-repo-gate]
     runs-on: ubuntu-latest
     steps:
       - env:
@@ -231,8 +226,19 @@ jobs:
   turbo outputs — regenerate them via the `pre-*-command` inputs.
 - Optional file-level unit selection: copy `scripts/ci-affected-tests.mjs`
   from `future-pay` (supports `CI_AFFECTED_BASE`, `CI_FULL_SUITE`, `CI_BAIL`).
-- Keep repo-specific filters (e.g. an `integration` or `mcp` paths filter) in
-  a small consumer-side `changes` job and feed them in via `with:`.
+- Pass repo-specific filters (e.g. an `integration` or `mcp` paths filter)
+  through `extra-filters` — **do not** add a consumer-side `changes` job. Two
+  Detect Changes jobs back to back is the exact regression FUT-468 removed: the
+  second one did ~6s of work and cost a full billed minute on every PR push and
+  every merge. Two consequences to know before you move a filter in:
+  - a lane that previously needed only your own fast `changes` job now needs
+    `static`, and **a reusable workflow's outputs are not available until the
+    WHOLE called workflow finishes** — so that lane starts behind Lint and Type
+    Check (~85s in rather than ~6s), and is *skipped* if the static tier fails.
+    Cheaper and more fail-fast, but it is a behaviour change.
+  - `extra-filters` must be UNINDENTED. An indented block declares no filter
+    names, and the job fails loudly instead of quietly dropping those names from
+    `matched` on push.
 
 # Consuming the Quality gate
 
@@ -244,8 +250,8 @@ config and scripts — the workflow only orchestrates.
 
 ```yaml
   quality:
-    needs: changes            # optional: gate on a paths-filter change-detector
-    if: needs.changes.outputs.code == 'true'
+    needs: static             # optional: gate on the static tier's change-detector
+    if: needs.static.outputs.code == 'true'
     # Least-privilege: the quality gate only reads the repo. Grant exactly this
     # so a combined CI file's broader grants (packages/actions write) don't leak
     # in. (The reusable workflow also caps itself at contents:read, so this is
@@ -496,8 +502,8 @@ this doc has always advised; never the reusable workflow's internal job names.
 
 ```yaml
   mcp-contract:
-    needs: changes            # optional: gate on a paths-filter change-detector
-    if: needs.changes.outputs.code == 'true'
+    needs: static             # optional: gate on the static tier's change-detector
+    if: needs.static.outputs.code == 'true'
     # Least-privilege on two axes (see the notes below): a read-only token, and
     # NO inherited secrets.
     permissions:
@@ -635,8 +641,8 @@ an unregistered permission).
 
 ```yaml
   rbac-coverage:
-    needs: changes            # optional: gate on a paths-filter change-detector
-    if: needs.changes.outputs.code == 'true'
+    needs: static             # optional: gate on the static tier's change-detector
+    if: needs.static.outputs.code == 'true'
     # Least-privilege on two axes (see the MCP notes above): a read-only token,
     # and NO inherited secrets.
     permissions:
@@ -718,8 +724,8 @@ MCP Test Coverage`) so the burn-down cannot be bypassed.
 
 ```yaml
   mcp-test-coverage:
-    needs: [changes, static]  # optional: gate on a paths-filter change-detector
-    if: needs.static.outputs.code == 'true' && needs.changes.outputs.mcp == 'true'
+    needs: static             # optional: gate on the static tier's change-detector
+    if: needs.static.outputs.code == 'true' && contains(fromJSON(needs.static.outputs.matched), 'mcp')
     # Least-privilege on two axes (see the MCP notes above): a read-only token,
     # and NO inherited secrets.
     permissions:
