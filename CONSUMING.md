@@ -476,6 +476,22 @@ to the real endpoint carrying the caller's bearer token — so an agent gets exa
 the user's permissions, and authz stays in the endpoints. This gate guarantees the
 generated surface never drifts from the endpoint surface.
 
+**Shape (one runner for four gates).** `drift`, `lint`, `coverage` and `parity`
+run as sequential STEPS of a single `MCP Contract Gates` job — one checkout, one
+`pnpm install --frozen-lockfile`, one `pre-command` — not four jobs each
+repeating that setup. Every gate step is guarded by `!cancelled() &&
+steps.install.outcome == 'success'`, so a failing gate still reports the ones
+after it (only a broken install short-circuits the set) and the job ends failed
+if any gate failed. `store-compliance` stays a separate job on purpose: it reads
+the committed manifest and needs neither the install nor the `pre-command`.
+The whole job is skipped when `run-drift`, `run-lint`, `run-coverage` and
+`run-parity` are all false.
+
+Consequence for branch rules: the per-gate check runs (`MCP Drift`, `MCP Lint`,
+`MCP Coverage`, `MCP Parity`) no longer exist — they are steps inside `MCP
+Contract Gates`. Require only your own aggregation job (see the CD section), as
+this doc has always advised; never the reusable workflow's internal job names.
+
 ## A. Caller job (add to your CI workflow)
 
 ```yaml
@@ -510,7 +526,7 @@ covered:
 1. Grant `packages: read` in the caller (commented in the snippet above).
    Otherwise the permissions intersection strips package access and installs
    401/403 before any check runs.
-2. Set the `github-packages-scope` input to your scope. Each job then writes
+2. Set the `github-packages-scope` input to your scope. The gate job then writes
    `~/.npmrc` pointing that scope at `npm.pkg.github.com` and authenticates with
    the job's own `GITHUB_TOKEN` **before** install — so no `.npmrc` or token
    setup is required in your repo, and no user secret is involved.
@@ -531,9 +547,11 @@ secret) must go through your own `.npmrc` wiring, not this input. Public-only
 consumers set neither and are unaffected.
 
 Inputs (all optional): `node-version` (default `24`), `run-drift` (default true),
-`run-lint` (default true), `run-parity` (default **false** — opt-in in-process
-served-schema parity), `pre-command`, `github-packages-scope` (default empty —
-see Private packages below).
+`run-lint` (default true), `run-coverage` (default true — self-skips until the
+`mcp:coverage` script exists), `run-parity` (default **false** — opt-in
+in-process served-schema parity), `run-store-compliance` (default true),
+`manifest-path`, `store-exceptions-path`, `pre-command`,
+`github-packages-scope` (default empty — see Private packages below).
 
 ## B. Required in the consumer repo
 
@@ -543,7 +561,7 @@ see Private packages below).
 |--------|---------|
 | `mcp:check` | Regenerate the MCP tool manifest from the app's OpenAPI and **exit non-zero on drift** (typically: regenerate to a temp path, then `git diff --exit-code` the committed manifest). The load-bearing gate. |
 | `mcp:lint` | Static lint of the exposed surface — no secret-bearing fields leak into tool schemas, every tool has an input schema, write tools are classified. Fails on violation. |
-| `mcp:coverage` | Route/action coverage: every HTTP route the app serves must be registered on the MCP surface (or sit on a documented infra allowlist), and every server action/RPC must map to a registered operation or carry a reviewed exclusion. This is what makes the surface **complete**, not just non-drifting — without it a new endpoint ships silently outside the agent contract. The job is on by default but only runs when the script exists (skips with a notice otherwise), so adoption is per-repo: define the script and the gate arms itself. For a staged rollout — or to silence even the skip notice — callers can opt out explicitly with `run-coverage: false` (mirrors `run-parity`). |
+| `mcp:coverage` | Route/action coverage: every HTTP route the app serves must be registered on the MCP surface (or sit on a documented infra allowlist), and every server action/RPC must map to a registered operation or carry a reviewed exclusion. This is what makes the surface **complete**, not just non-drifting — without it a new endpoint ships silently outside the agent contract. The gate is on by default but only runs when the script exists (skips with a notice otherwise — the script probe runs before the install, so an unadopted consumer pays nothing), so adoption is per-repo: define the script and the gate arms itself. For a staged rollout — or to silence even the skip notice — callers can opt out explicitly with `run-coverage: false` (mirrors `run-parity`). |
 | `mcp:parity` | (only if `run-parity: true`) Boot the MCP server in-process against the rendered OpenAPI and diff served tool schemas vs the manifest. |
 
 ## The store-compliance floor (no consumer script)

@@ -15,7 +15,19 @@ name: MCP Contract (reusable)
 #         # github-packages-scope: '@my-org'   # only if you install private GitHub Packages
 #       # NOTE: deliberately NO `secrets: inherit` — see the security note below.
 #
-# SECRETS: this gate needs NONE, and MUST NOT be given any. Every job runs
+# SHAPE: the four gates that need a dependency install — drift, lint, coverage,
+# parity — run as sequential STEPS of one `contract-gates` job: one runner, one
+# checkout, one pnpm/Node setup, one `pnpm install --frozen-lockfile`, one
+# `pre-command`. They used to be four jobs each repeating all of that to run a
+# single offline script that finishes in seconds. Same consolidation, and the
+# same failure isolation, as quality.yml's `Static Gates`. store-compliance
+# stays its own job because it needs neither the install nor the pre-command
+# (see its comment below). Consumers' required-check identity is the reusable
+# workflow's overall result — CONSUMING.md tells consumers to require ONLY
+# their aggregation job in the branch ruleset — so the per-gate check-run names
+# are not part of the contract.
+#
+# SECRETS: this gate needs NONE, and MUST NOT be given any. Every gate runs
 # consumer-controlled code (dependency install, pre-command, and the mcp:*
 # scripts), so any inherited secret could be exfiltrated by a compromised
 # dependency or script. `permissions: contents: read` scopes only the
@@ -42,7 +54,7 @@ name: MCP Contract (reusable)
 #                 operation or a reviewed exclusion. Completeness, where
 #                 mcp:check is only non-drift. Runs when the consumer defines
 #                 the script; skips with a notice otherwise, so rolling this
-#                 job out via the floating major tag breaks no caller.
+#                 gate out via the floating major tag breaks no caller.
 # A fifth gate, store-compliance, needs NO consumer script: it reads the
 # generated manifest directly and holds it to the assistant-directory review
 # rules. Keeping it here rather than in each repo's mcp:lint is deliberate —
@@ -74,9 +86,9 @@ on:
       run-coverage:
         description: >-
           Route/action coverage of the MCP surface (mcp:coverage). On by default,
-          but the job self-skips (with a notice) when the consumer does not define
-          the script — so existing callers on the floating major tag are unaffected
-          until they adopt it.
+          but the gate self-skips (with a notice) when the consumer does not
+          define the script — so existing callers on the floating major tag are
+          unaffected until they adopt it.
         type: boolean
         required: false
         default: true
@@ -116,7 +128,7 @@ on:
       github-packages-scope:
         description: >-
           npm scope (e.g. @my-org) whose dependencies come from GitHub Packages.
-          When set, each job wires ~/.npmrc to install that scope from
+          When set, the gate job wires ~/.npmrc to install that scope from
           npm.pkg.github.com using the job GITHUB_TOKEN (requires packages: read
           on the caller). Empty (default) = no private-registry wiring; the token
           is never used and public installs are unaffected.
@@ -139,117 +151,36 @@ permissions:
   packages: read
 
 jobs:
-  # DRIFT is the primary gate: it proves the generated MCP tool surface still
-  # matches the app's OpenAPI. mcp:check must regenerate and exit non-zero when
-  # the committed manifest is stale (the consumer typically regenerates to a temp
-  # path and `git diff --exit-code`s the committed artifact).
-  drift:
-    name: MCP Drift
-    if: ${{ inputs.run-drift }}
+  # The four install-dependent gates run as sequential steps of this ONE job —
+  # one runner spin-up + checkout + pnpm install + pre-command, instead of four
+  # of each to run four offline scripts that finish in seconds.
+  #
+  # FAILURE ISOLATION (copied from quality.yml's `Static Gates`): every gate step
+  # is guarded by `!cancelled() && steps.install.outcome == 'success'`, NOT the
+  # implicit `success()`. Under plain success() the first failing gate would mask
+  # every gate after it, so a PR would surface one violation per run instead of
+  # the full inventory four independent jobs gave us. Only a broken install
+  # short-circuits the set — nothing downstream can run without node_modules.
+  # The job still ends FAILED if any gate failed, which is what the caller's
+  # required check reads.
+  contract-gates:
+    name: MCP Contract Gates
+    # Skip the runner entirely when every gate in this job is off; otherwise it
+    # would boot, install, and then run nothing. store-compliance is a separate
+    # job and is unaffected by this condition.
+    if: ${{ inputs.run-drift || inputs.run-lint || inputs.run-coverage || inputs.run-parity }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          run_install: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node-version }}
-          cache: 'pnpm'
-      # Wire ~/.npmrc for private GitHub Packages BEFORE install, using the job's
-      # own GITHUB_TOKEN (packages: read) — NOT an inherited user secret, so the
-      # no-secrets boundary holds. Skipped entirely unless a scope is given, so
-      # public-only consumers are unaffected and the token is never written.
-      - name: Configure GitHub Packages auth
-        if: ${{ inputs.github-packages-scope != '' }}
-        shell: bash
-        env:
-          GH_PKG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -o pipefail
-          {
-            echo "${{ inputs.github-packages-scope }}:registry=https://npm.pkg.github.com"
-            echo "//npm.pkg.github.com/:_authToken=${GH_PKG_TOKEN}"
-          } >> "$HOME/.npmrc"
-      - name: Install dependencies
-        shell: bash
-        run: |
-          set -o pipefail
-          pnpm install --frozen-lockfile 2>&1 | tee install.log
-      - name: Pre-command
-        if: ${{ inputs.pre-command != '' }}
-        shell: bash
-        run: |
-          set -o pipefail
-          ${{ inputs.pre-command }} 2>&1 | tee pre-command.log
-      - name: MCP manifest drift (regenerate + diff)
-        shell: bash
-        run: |
-          set -o pipefail
-          pnpm mcp:check 2>&1 | tee mcp-check.log
-
-  lint:
-    name: MCP Lint
-    if: ${{ inputs.run-lint }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          run_install: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node-version }}
-          cache: 'pnpm'
-      # Wire ~/.npmrc for private GitHub Packages BEFORE install, using the job's
-      # own GITHUB_TOKEN (packages: read) — NOT an inherited user secret, so the
-      # no-secrets boundary holds. Skipped entirely unless a scope is given, so
-      # public-only consumers are unaffected and the token is never written.
-      - name: Configure GitHub Packages auth
-        if: ${{ inputs.github-packages-scope != '' }}
-        shell: bash
-        env:
-          GH_PKG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -o pipefail
-          {
-            echo "${{ inputs.github-packages-scope }}:registry=https://npm.pkg.github.com"
-            echo "//npm.pkg.github.com/:_authToken=${GH_PKG_TOKEN}"
-          } >> "$HOME/.npmrc"
-      - name: Install dependencies
-        shell: bash
-        run: |
-          set -o pipefail
-          pnpm install --frozen-lockfile 2>&1 | tee install.log
-      - name: Pre-command
-        if: ${{ inputs.pre-command != '' }}
-        shell: bash
-        run: |
-          set -o pipefail
-          ${{ inputs.pre-command }} 2>&1 | tee pre-command.log
-      - name: MCP surface lint (secret-leak + schema-shape)
-        shell: bash
-        run: |
-          set -o pipefail
-          pnpm mcp:lint 2>&1 | tee mcp-lint.log
-
-  # COVERAGE makes the surface COMPLETE where drift only keeps it honest: every
-  # served route must be registered (or explicitly allowlisted as infra) and
-  # every server action mapped or excluded with a reason. The script-existence
-  # probe keeps the job non-breaking for consumers that have not adopted
-  # mcp:coverage yet — they see a skip notice, not a failure.
-  coverage:
-    name: MCP Coverage
-    if: ${{ inputs.run-coverage }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # Probe FIRST, before any install/pre-command: a consumer that has not
-      # adopted mcp:coverage must get the promised skip notice without paying
+      # Probe FIRST, before the toolchain setup and install: a consumer that has
+      # not adopted mcp:coverage must get the promised skip notice without paying
       # for — or failing on — the heavy setup steps. Uses only the checkout and
-      # the runner's preinstalled node.
+      # the runner's preinstalled node. Itself skipped when the caller opted out
+      # of coverage, so `run-coverage: false` stays silent (as it did when this
+      # was its own job with a job-level `if`).
       - name: Probe for mcp:coverage script
         id: probe
+        if: ${{ inputs.run-coverage }}
         shell: bash
         run: |
           set -o pipefail
@@ -260,55 +191,6 @@ jobs:
             echo "::notice::mcp:coverage script not defined — skipping (see CONSUMING.md to adopt the coverage gate)"
           fi
       - uses: pnpm/action-setup@v4
-        if: ${{ steps.probe.outputs.present == 'true' }}
-        with:
-          run_install: false
-      - uses: actions/setup-node@v4
-        if: ${{ steps.probe.outputs.present == 'true' }}
-        with:
-          node-version: ${{ inputs.node-version }}
-          cache: 'pnpm'
-      # Wire ~/.npmrc for private GitHub Packages BEFORE install, using the job's
-      # own GITHUB_TOKEN (packages: read) — NOT an inherited user secret, so the
-      # no-secrets boundary holds. Skipped entirely unless a scope is given, so
-      # public-only consumers are unaffected and the token is never written.
-      - name: Configure GitHub Packages auth
-        if: ${{ steps.probe.outputs.present == 'true' && inputs.github-packages-scope != '' }}
-        shell: bash
-        env:
-          GH_PKG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -o pipefail
-          {
-            echo "${{ inputs.github-packages-scope }}:registry=https://npm.pkg.github.com"
-            echo "//npm.pkg.github.com/:_authToken=${GH_PKG_TOKEN}"
-          } >> "$HOME/.npmrc"
-      - name: Install dependencies
-        if: ${{ steps.probe.outputs.present == 'true' }}
-        shell: bash
-        run: |
-          set -o pipefail
-          pnpm install --frozen-lockfile 2>&1 | tee install.log
-      - name: Pre-command
-        if: ${{ steps.probe.outputs.present == 'true' && inputs.pre-command != '' }}
-        shell: bash
-        run: |
-          set -o pipefail
-          ${{ inputs.pre-command }} 2>&1 | tee pre-command.log
-      - name: MCP route/action coverage
-        if: ${{ steps.probe.outputs.present == 'true' }}
-        shell: bash
-        run: |
-          set -o pipefail
-          pnpm mcp:coverage 2>&1 | tee mcp-coverage.log
-
-  parity:
-    name: MCP Parity
-    if: ${{ inputs.run-parity }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
         with:
           run_install: false
       - uses: actions/setup-node@v4
@@ -330,24 +212,63 @@ jobs:
             echo "${{ inputs.github-packages-scope }}:registry=https://npm.pkg.github.com"
             echo "//npm.pkg.github.com/:_authToken=${GH_PKG_TOKEN}"
           } >> "$HOME/.npmrc"
+      # `id: install` is what every gate guard below keys on: a failed install is
+      # the ONE condition that short-circuits the whole set.
       - name: Install dependencies
+        id: install
         shell: bash
         run: |
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
+      # Runs ONCE for all four gates (it used to run four times, once per job).
+      # Deliberately left on the implicit `success()`, so a failed install skips
+      # it; a failed pre-command does NOT hide the gates below — each still runs
+      # and reports its own result.
       - name: Pre-command
         if: ${{ inputs.pre-command != '' }}
         shell: bash
         run: |
           set -o pipefail
           ${{ inputs.pre-command }} 2>&1 | tee pre-command.log
+
+      # DRIFT is the primary gate: it proves the generated MCP tool surface still
+      # matches the app's OpenAPI. mcp:check must regenerate and exit non-zero when
+      # the committed manifest is stale (the consumer typically regenerates to a temp
+      # path and `git diff --exit-code`s the committed artifact).
+      - name: MCP manifest drift (regenerate + diff)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && inputs.run-drift }}
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm mcp:check 2>&1 | tee mcp-check.log
+
+      - name: MCP surface lint (secret-leak + schema-shape)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && inputs.run-lint }}
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm mcp:lint 2>&1 | tee mcp-lint.log
+
+      # COVERAGE makes the surface COMPLETE where drift only keeps it honest: every
+      # served route must be registered (or explicitly allowlisted as infra) and
+      # every server action mapped or excluded with a reason. The script-existence
+      # probe above keeps the gate non-breaking for consumers that have not adopted
+      # mcp:coverage yet — they see a skip notice, not a failure.
+      - name: MCP route/action coverage
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && inputs.run-coverage && steps.probe.outputs.present == 'true' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm mcp:coverage 2>&1 | tee mcp-coverage.log
+
       - name: MCP served-schema parity (in-process)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && inputs.run-parity }}
         shell: bash
         run: |
           set -o pipefail
           pnpm mcp:parity 2>&1 | tee mcp-parity.log
 
-  # STORE COMPLIANCE is the org-wide floor. Unlike the jobs above it runs a
+  # STORE COMPLIANCE is the org-wide floor. Unlike the gates above it runs a
   # ruleset owned by THIS repo against the consumer's committed manifest, so no
   # repo can ship a tool that would fail an assistant-directory review by
   # shipping a permissive local mcp:lint. A repo may still enforce MORE in its
@@ -359,9 +280,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # The gate reads the COMMITTED manifest, so it needs neither an install
-      # nor the pre-command — the drift job above is what proves that manifest
+      # nor the pre-command — the drift gate above is what proves that manifest
       # is current. Keeping this job dependency-free makes it the cheapest gate
-      # in the set, which matters when it runs in every org repo.
+      # in the set, which matters when it runs in every org repo — and is exactly
+      # why it was NOT folded into `contract-gates`: sharing that job would give
+      # the cheapest gate a pnpm install + pre-command it does not need, ADDING
+      # setup cost instead of removing any.
       - name: MCP store compliance
         uses: 12-apps/ci/.github/actions/mcp-store-compliance@v1
         with:
