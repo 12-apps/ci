@@ -1,0 +1,102 @@
+name: 'Image reuse selection'
+description: >-
+  Split discover.sh's images[] matrix into the images this merge must rebuild and
+  the ones that can be retagged from the previous commit's manifest. Ships
+  scripts/deploy/select-images.sh so consumer repos never vendor it. Fails OPEN
+  (selects every image for build) on any ambiguity.
+
+inputs:
+  images:
+    description: "discover.sh's images[] JSON array"
+    required: true
+  base_sha:
+    description: >-
+      Previous tip of the pushed ref (github.event.before). MUST be explicit:
+      turbo's --affected auto-detection reads GITHUB_BASE_REF, which does not
+      exist on push, and would report zero affected packages. Empty/all-zeros
+      selects everything for build.
+    required: false
+    default: ''
+  head_sha:
+    description: 'Commit being built (github.sha). Defaults to HEAD.'
+    required: false
+    default: ''
+  reuse:
+    description: 'false disables reuse entirely (everything is rebuilt).'
+    required: false
+    default: 'true'
+  affected_task:
+    description: 'turbo task used by the fallback affected probe.'
+    required: false
+    default: build
+  registry:
+    description: 'Registry to log in to for the reuse-source manifest probe.'
+    required: false
+    default: ghcr.io
+  registry_username:
+    description: 'Registry user for the probe. Defaults to the workflow actor.'
+    required: false
+    default: ''
+  registry_token:
+    description: >-
+      Token with read access to the image registry (GITHUB_TOKEN with
+      `packages: read` is enough). Without it the probe cannot confirm the reuse
+      source exists and every image is rebuilt.
+    required: false
+    default: ''
+
+outputs:
+  build_images:
+    description: 'JSON array of images to hand to the build matrix'
+    value: ${{ steps.plan.outputs.build_images }}
+  has_build_images:
+    description: 'true when at least one image must be rebuilt'
+    value: ${{ steps.plan.outputs.has_build_images }}
+  reuse_images:
+    description: 'JSON array of images to retag; each entry carries `source`'
+    value: ${{ steps.plan.outputs.reuse_images }}
+  has_reuse_images:
+    description: 'true when at least one image can be retagged'
+    value: ${{ steps.plan.outputs.has_reuse_images }}
+  selection_mode:
+    description: 'all (everything rebuilt) | partial'
+    value: ${{ steps.plan.outputs.selection_mode }}
+  selection_reason:
+    description: 'One-line human explanation of the decision'
+    value: ${{ steps.plan.outputs.selection_reason }}
+
+runs:
+  using: composite
+  steps:
+    # Registry login for the source-manifest probe only — no image is pushed
+    # here. Done with the plain CLI rather than docker/login-action to keep the
+    # action dependency-free; `docker buildx imagetools` talks straight to the
+    # registry and needs no daemon and no builder instance.
+    - name: Log in to the image registry (probe only)
+      if: inputs.registry_token != ''
+      shell: bash
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        REGISTRY_USERNAME: ${{ inputs.registry_username || github.actor }}
+        REGISTRY_TOKEN: ${{ inputs.registry_token }}
+      # Non-fatal on purpose: a failed login must not fail the run. The probe then
+      # cannot resolve any source manifest, so the planner rebuilds everything —
+      # the fail-open direction.
+      run: |
+        printf '%s' "$REGISTRY_TOKEN" \
+          | docker login "$REGISTRY" --username "$REGISTRY_USERNAME" --password-stdin \
+          || echo "::warning::registry login failed — the image-reuse planner will rebuild everything"
+
+    - id: plan
+      shell: bash
+      env:
+        IMAGES: ${{ inputs.images }}
+        BASE_SHA: ${{ inputs.base_sha }}
+        HEAD_SHA: ${{ inputs.head_sha }}
+        REUSE_ENABLED: ${{ inputs.reuse }}
+        AFFECTED_TASK: ${{ inputs.affected_task }}
+        # Always probe. With no token the probe simply finds nothing and every
+        # image is rebuilt; assuming the source exists would instead hand the
+        # reuse job a tag that may not be there.
+        PROBE_SOURCE_TAGS: '1'
+      run: bash "$GITHUB_ACTION_PATH/../../../scripts/deploy/select-images.sh"

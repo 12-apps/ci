@@ -29,16 +29,29 @@ on:
         type: string
         required: false
         default: deploy
+      reuse_unaffected_images:
+        description: >-
+          Retag unaffected images from the previous commit instead of rebuilding
+          them. Set false to force a full rebuild of every image (the pre-FUT-466
+          behaviour) — e.g. to re-seed the registry, or to rule out a selection
+          bug. Selection already fails open on any ambiguity.
+        type: boolean
+        required: false
+        default: true
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Discover deploy targets from the caller's descriptors → build/deploy matrices.
+  # Discover deploy targets from the caller's descriptors → build/deploy matrices,
+  # then decide which container images this commit actually has to rebuild.
   # Skipped only for `destroy` (nothing to build/discover).
   # ---------------------------------------------------------------------------
   discover:
     name: Discover targets
     if: github.event_name == 'push' || inputs.action != 'destroy'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read   # select-images probes that each reuse source manifest exists
     outputs:
       image_namespace: ${{ steps.d.outputs.image_namespace }}
       images: ${{ steps.d.outputs.images }}
@@ -47,14 +60,38 @@ jobs:
       has_statics: ${{ steps.d.outputs.has_statics }}
       workers: ${{ steps.d.outputs.workers }}
       has_workers: ${{ steps.d.outputs.has_workers }}
+      build_images: ${{ steps.plan.outputs.build_images }}
+      has_build_images: ${{ steps.plan.outputs.has_build_images }}
+      reuse_images: ${{ steps.plan.outputs.reuse_images }}
+      has_reuse_images: ${{ steps.plan.outputs.has_reuse_images }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: the image-reuse planner diffs github.event.before against
+          # github.sha, and a shallow clone does not contain the base commit.
+          # A missing base is a fail-open condition (rebuild everything), so a
+          # shallow checkout here would quietly forfeit the entire saving.
+          fetch-depth: 0
       # Fully-qualified ref (NOT ./) — a reusable workflow resolves ./ against the
       # caller, so the engine action must be addressed in this repo explicitly.
       - id: d
         uses: 12-apps/ci/.github/actions/discover@v1
         with:
           target: ${{ inputs.target }}
+      # base_sha is passed EXPLICITLY, and that is load-bearing: turbo's --affected
+      # infers its base from GITHUB_BASE_REF, which exists only on pull_request.
+      # On a push it would diff main against its own tip, report ZERO affected
+      # packages, retag every image from the parent commit and build none — a green
+      # deploy shipping the previous commit's code. monorepo-static.yml documents
+      # the same trap at its Lint step. See scripts/deploy/select-images.sh.
+      - id: plan
+        uses: 12-apps/ci/.github/actions/select-images@v1
+        with:
+          images: ${{ steps.d.outputs.images }}
+          base_sha: ${{ github.event.before }}
+          head_sha: ${{ github.sha }}
+          reuse: ${{ inputs.reuse_unaffected_images }}
+          registry_token: ${{ secrets.GITHUB_TOKEN }}
 
   # ---------------------------------------------------------------------------
   # Artifact factory — build & push provider-agnostic container images once.
@@ -72,10 +109,16 @@ jobs:
   # layers and two tags, and the superseding run redoes it. The deploy gates below
   # then require an affirmative `success`, so a cancelled build cannot leak a
   # never-pushed `<ref>:<sha>` into a deploy.
+  #
+  # The matrix is `build_images`, NOT `images`: the discover job's planner moves
+  # every image whose workspace package is unaffected by this commit into the
+  # reuse-images job below. It fans out over nothing when a commit touches no
+  # package at all, which is why the deploy gate keys "were there images?" off
+  # `has_images` but "did the build work?" off `has_build_images`.
   build-images:
     name: Build image · ${{ matrix.image }}
     needs: discover
-    if: needs.discover.outputs.has_images == 'true'
+    if: needs.discover.outputs.has_build_images == 'true'
     runs-on: ubuntu-latest
     concurrency:
       group: cd-build-image-${{ github.workflow }}-${{ matrix.image }}-${{ github.ref }}
@@ -86,7 +129,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJson(needs.discover.outputs.images) }}
+        include: ${{ fromJson(needs.discover.outputs.build_images) }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -108,6 +151,61 @@ jobs:
             ${{ matrix.ref }}:main
           cache-from: type=gha,scope=${{ matrix.cache }}
           cache-to: type=gha,mode=max,scope=${{ matrix.cache }}
+
+  # ---------------------------------------------------------------------------
+  # Reuse lane — retag every unaffected image instead of rebuilding it.
+  # ---------------------------------------------------------------------------
+  # This is a REUSE, not a skip. The deploy pulls `<ref>:${{ github.sha }}`, so an
+  # omitted build means a missing tag and a broken deploy.
+  # `docker buildx imagetools create` copies the manifest inside the registry —
+  # no layer transfer, no build context, no daemon, ~2s per image. All of them run
+  # in ONE job, so the four cache-hit builds this replaces (~1 billed minute each,
+  # almost entirely runner spin-up + checkout + setup-buildx + login) become one.
+  #
+  # Each entry's `source` is `<ref>:<github.event.before>` — the manifest the
+  # PARENT commit shipped, resolved and existence-checked by the planner. That is
+  # what "unaffected between base and head" actually proves equal; `:main` would
+  # only coincidentally agree (it can be a newer concurrent run, or an older
+  # commit that never built).
+  #
+  # Both tags are written, matching build-images exactly: `:<sha>` is what the
+  # deploy pulls, `:main` keeps pointing at what main currently runs.
+  reuse-images:
+    name: Reuse unaffected images
+    needs: discover
+    if: needs.discover.outputs.has_reuse_images == 'true'
+    runs-on: ubuntu-latest
+    # Build-phase-only cancellation — see the note on build-images. Grouped for
+    # the whole lane rather than per image, since it is a single job.
+    concurrency:
+      group: cd-reuse-images-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Retag unaffected images
+        env:
+          REUSE_IMAGES: ${{ needs.discover.outputs.reuse_images }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          n="$(jq 'length' <<<"$REUSE_IMAGES")"
+          echo "::notice::retagging $n unaffected image(s) onto $SHA (registry-side manifest copy)"
+          for i in $(seq 0 $((n - 1))); do
+            ref="$(jq -r ".[$i].ref"    <<<"$REUSE_IMAGES")"
+            src="$(jq -r ".[$i].source" <<<"$REUSE_IMAGES")"
+            img="$(jq -r ".[$i].image"  <<<"$REUSE_IMAGES")"
+            echo "--- $img: $src -> $ref:$SHA"
+            docker buildx imagetools create -t "$ref:$SHA" -t "$ref:main" "$src"
+            docker buildx imagetools inspect "$ref:$SHA" --format '{{.Manifest.Digest}}'
+          done
 
   # ---------------------------------------------------------------------------
   # Build static (edge) artifacts for vendors that consume them.
@@ -158,13 +256,20 @@ jobs:
   # bare `== 'success'`: on `action: destroy` the whole discover→build chain is
   # skipped, so `has_images` is empty and build-images reports 'skipped'. A bare
   # success check would silently disable destroy.
+  #
+  # Since FUT-466 the `<ref>:<sha>` tags this deploy pulls come from TWO lanes —
+  # build-images for the affected images, reuse-images for the retagged ones — and
+  # either can be empty on a given commit. Each is therefore gated with the same
+  # "if that lane had work, it must have SUCCEEDED" shape. A failed retag is
+  # exactly as fatal as a failed build: the tag would not exist.
   digitalocean:
     name: DigitalOcean
-    needs: [discover, build-images]
+    needs: [discover, build-images, reuse-images]
     if: >-
       !cancelled() &&
       vars.ENABLE_DEPLOY_DIGITALOCEAN == 'true' &&
-      (needs.discover.outputs.has_images != 'true' || needs.build-images.result == 'success') &&
+      (needs.discover.outputs.has_build_images != 'true' || needs.build-images.result == 'success') &&
+      (needs.discover.outputs.has_reuse_images != 'true' || needs.reuse-images.result == 'success') &&
       (needs.discover.outputs.has_images == 'true' || inputs.action == 'destroy') &&
       (github.event_name == 'push' ||
         inputs.target == 'all' || inputs.target == 'digitalocean')

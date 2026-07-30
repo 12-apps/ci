@@ -33,7 +33,7 @@ on:
 permissions:
   contents: read
   actions: write     # Cloudflare adapter dispatches post-cd
-  packages: write    # build-images pushes to GHCR
+  packages: write    # build-images pushes to GHCR; reuse-images retags in it
 
 jobs:
   cd:
@@ -42,6 +42,28 @@ jobs:
       target: ${{ inputs.target || 'all' }}
       action: ${{ inputs.action || 'deploy' }}
     secrets: inherit
+```
+
+### Image reuse on merge (nothing to configure)
+
+`cd.yml` rebuilds only the container images a commit actually affects and
+**retags** the rest from the previous commit's manifest, so the deploy still finds
+every `<ref>:<sha>` tag it pulls. Affectedness comes from `turbo ls --affected`
+between `github.event.before` and `github.sha`, mapped to images by the
+descriptor's *directory* — see `.github/deploy/README.md` for the details and the
+`turbo --affected`-on-push trap this deliberately avoids.
+
+On by default; it needs nothing from the consumer beyond what a turborepo already
+has. A repo with no `turbo.json`, no descriptors, or a range the planner cannot
+resolve just rebuilds everything — the planner fails open on every ambiguity and
+logs which path it took and why.
+
+To force a full rebuild of every image (re-seeding the registry, or ruling out a
+selection bug):
+
+```yaml
+    with:
+      reuse_unaffected_images: false
 ```
 
 ## 3. Per-app descriptor — `apps/<app>/deploy/config.json`
