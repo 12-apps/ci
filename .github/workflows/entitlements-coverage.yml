@@ -1,0 +1,227 @@
+name: Entitlement-Gate Coverage (reusable)
+
+# Reusable entitlement-gate coverage — the PLAN-tier sibling of rbac-coverage.yml.
+# Consuming repos add a small caller:
+#
+#   jobs:
+#     entitlements-coverage:
+#       needs: changes
+#       if: needs.changes.outputs.code == 'true'
+#       permissions:
+#         contents: read
+#       uses: 12-apps/ci/.github/workflows/entitlements-coverage.yml@v1
+#       with:
+#         package-dir: apps/admin   # where entitlements:coverage is defined
+#         install: false            # the script is plain node with no deps
+#       # NOTE: deliberately NO `secrets: inherit` — see the security note below.
+#
+# WHAT IT PROVES: every routed page the app ships either declares the plan
+# feature that gates it, or sits on a reviewed exceptions allowlist WITH a
+# reason. This is COMPLETENESS in the same sense as rbac-coverage, one layer up:
+# where that keeps the AUTHORIZATION surface complete (can this user do it), this
+# keeps the ENTITLEMENT surface complete (does this tenant's plan include it).
+#
+# The two fail differently and that is the point. An unguarded route is a
+# security hole and shows up in an audit. An UNGATED page is a revenue hole and
+# shows up nowhere: the page simply works, the tier that was supposed to unlock
+# it sells nothing, and the omission is indistinguishable from a decision. This
+# gate makes it a decision — ungated is spelled out in a file a reviewer reads.
+#
+# SECRETS: this gate needs NONE, and MUST NOT be given any. Every job runs
+# consumer-controlled code (dependency install, pre-command, and the coverage
+# script), so any inherited secret could be exfiltrated by a compromised
+# dependency or script. `permissions: contents: read` scopes only the
+# GITHUB_TOKEN — it does NOT protect env secrets; withholding `secrets: inherit`
+# is the separate, necessary control. Coverage is a STATIC analysis of the route
+# tree vs the feature catalog — no live DB or real credentials required.
+#
+# Runs in the CALLER's checkout, so it uses the consumer repo's own routes,
+# feature catalog, exceptions file, and `entitlements:coverage` package.json
+# script. The workflow only orchestrates — the app owns the coverage logic
+# behind ONE script:
+#
+#   entitlements:coverage — enumerate the routed pages, and FAIL (non-zero exit)
+#                           if any is neither gated by a declared feature nor
+#                           carried on the reviewed exceptions allowlist. The
+#                           consumer owns that file and its shrink policy.
+#
+# Rollout is non-breaking: the job probes for the script first and self-skips
+# (with a notice) when the consumer has not defined it yet, so shipping this via
+# the floating major tag `@v1` breaks no existing caller.
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node version for the gate.'
+        type: string
+        required: false
+        default: '24'
+      run-coverage:
+        description: >-
+          Run the entitlement-gate coverage gate (entitlements:coverage). On by
+          default, but the job self-skips (with a notice) when the consumer does
+          not define the script — so existing callers on the floating major tag
+          are unaffected until they adopt it. Set false to opt out explicitly.
+        type: boolean
+        required: false
+        default: true
+      install:
+        description: >-
+          Install dependencies before running the gate. Default true, matching
+          the RBAC sibling. Set FALSE when the coverage script is dependency-free
+          (plain node reading the route tree and the catalog as text) — the gate
+          then costs a checkout and a node, not a full monorepo install, which is
+          the difference between a ~20s lane and a multi-minute one. A consumer
+          that sets false and whose script does need deps fails loudly on the
+          missing import rather than silently skipping the gate.
+        type: boolean
+        required: false
+        default: true
+      pre-command:
+        description: 'Shell run before the gate (e.g. build a package). Empty to skip.'
+        type: string
+        required: false
+        default: ''
+      github-packages-scope:
+        description: >-
+          npm scope (e.g. @my-org) whose dependencies come from GitHub Packages.
+          When set, the job wires ~/.npmrc to install that scope from
+          npm.pkg.github.com using the job GITHUB_TOKEN (requires packages: read
+          on the caller). Empty (default) = no private-registry wiring; the token
+          is never used and public installs are unaffected. Ignored when
+          `install` is false — nothing is installed, so nothing needs auth.
+        type: string
+        required: false
+        default: ''
+      package-dir:
+        description: >-
+          Directory whose package.json defines the entitlements:coverage script
+          (default repo root). Monorepos that keep the script in a workspace
+          package (e.g. apps/admin) point this there; the probe and the script
+          run both resolve against it. Dependency install, when enabled, still
+          runs at the repo root.
+        type: string
+        required: false
+        default: '.'
+
+# Least-privilege, enforced at the source. The effective grant is the
+# INTERSECTION of these and the caller's job permissions, so a consumer that
+# grants more in a combined CI file (e.g. contents: write, actions: write) cannot
+# leak that privilege here. Both grants are READ-only.
+#
+# `packages: read` is the CEILING (not an auto-grant): consumers whose
+# `pnpm install` pulls PRIVATE GitHub Packages need it, so it must be allowed
+# here or the intersection would strip it and installs would 401/403. Public-only
+# consumers simply grant `contents: read` in their caller and packages access
+# never takes effect. It cannot enable writes.
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  # COVERAGE proves the entitlement surface is COMPLETE: every routed page is
+  # gated by a declared plan feature or carried on a reviewed allowlist. The
+  # script-existence probe keeps the job non-breaking for consumers that have not
+  # adopted entitlements:coverage yet — they see a skip notice, not a failure.
+  coverage:
+    name: Entitlement-Gate Coverage
+    if: ${{ inputs.run-coverage }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Probe FIRST, before any install/pre-command: a consumer that has not
+      # adopted entitlements:coverage must get the promised skip notice without
+      # paying for — or failing on — the heavy setup steps. Uses only the
+      # checkout and the runner's preinstalled node.
+      - name: Probe for entitlements:coverage script
+        id: probe
+        shell: bash
+        env:
+          PKG_DIR: ${{ inputs.package-dir }}
+        run: |
+          set -o pipefail
+          # THREE outcomes, so a broken manifest is a FAILURE, not a silent skip:
+          #   0 = script present            → run the gate
+          #   1 = valid manifest, no script → skip with a notice (unadopted)
+          #   2 = manifest missing/malformed → hard error (surface the misconfig)
+          # GitHub runs steps with errexit (-e); the probe's own non-zero exit
+          # (1 = unadopted skip, 2 = manifest error) would abort the step BEFORE
+          # rc is read — turning the documented skip into a failure. Drop -e just
+          # around the probe, then restore it before branching on rc.
+          set +e
+          node -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const manifest = path.join(process.env.PKG_DIR || ".", "package.json");
+            let pkg;
+            try {
+              pkg = JSON.parse(fs.readFileSync(manifest, "utf8"));
+            } catch (e) {
+              const why = e.code === "ENOENT" ? "not found" : "unreadable or malformed";
+              console.error(`::error::${manifest} is ${why}: ${e.message} — cannot evaluate the entitlement-gate coverage gate`);
+              process.exit(2);
+            }
+            const s = pkg.scripts || {};
+            process.exit(s["entitlements:coverage"] ? 0 : 1);
+          '
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          elif [ "$rc" -eq 1 ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::entitlements:coverage not defined in ${PKG_DIR%/}/package.json — skipping (see CONSUMING.md to adopt the entitlement-gate coverage gate)"
+          else
+            exit 1
+          fi
+      # pnpm is set up whenever the gate runs, install or not: `pnpm -C <dir> run`
+      # is how the script is invoked in both modes, so skipping this with
+      # `install: false` would break the run step rather than speed it up.
+      - uses: pnpm/action-setup@v4
+        if: ${{ steps.probe.outputs.present == 'true' }}
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        if: ${{ steps.probe.outputs.present == 'true' }}
+        with:
+          node-version: ${{ inputs.node-version }}
+          # The pnpm cache keys off a lockfile. With `install: false` nothing is
+          # restored or saved, and asking for the cache on a repo whose lockfile
+          # the job never reads just adds a warning, so it is tied to `install`.
+          cache: ${{ inputs.install && 'pnpm' || '' }}
+      # Wire ~/.npmrc for private GitHub Packages BEFORE install, using the job's
+      # own GITHUB_TOKEN (packages: read) — NOT an inherited user secret, so the
+      # no-secrets boundary holds. Skipped entirely unless a scope is given, so
+      # public-only consumers are unaffected and the token is never written.
+      - name: Configure GitHub Packages auth
+        if: ${{ steps.probe.outputs.present == 'true' && inputs.install && inputs.github-packages-scope != '' }}
+        shell: bash
+        env:
+          GH_PKG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          {
+            echo "${{ inputs.github-packages-scope }}:registry=https://npm.pkg.github.com"
+            echo "//npm.pkg.github.com/:_authToken=${GH_PKG_TOKEN}"
+          } >> "$HOME/.npmrc"
+      - name: Install dependencies
+        if: ${{ steps.probe.outputs.present == 'true' && inputs.install }}
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Pre-command
+        if: ${{ steps.probe.outputs.present == 'true' && inputs.pre-command != '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ${{ inputs.pre-command }} 2>&1 | tee pre-command.log
+      - name: Entitlement page-gate coverage
+        if: ${{ steps.probe.outputs.present == 'true' }}
+        shell: bash
+        env:
+          PKG_DIR: ${{ inputs.package-dir }}
+        run: |
+          set -o pipefail
+          pnpm -C "$PKG_DIR" run entitlements:coverage 2>&1 | tee entitlements-coverage.log
