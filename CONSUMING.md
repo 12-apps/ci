@@ -833,6 +833,88 @@ Plus the committed source-of-truth the script operates on: the **permission
 registry** (the app's declared permissions) and a **reviewed exclusions file**
 (e.g. `rbac-exclusions.json`) — the consumer owns this file and its shrink policy.
 
+# Consuming the entitlement-gate coverage gate
+
+The plan-tier sibling of the RBAC gate: a reusable gate
+(`entitlements-coverage.yml`) that keeps a repo's **entitlement** surface
+complete. It runs in the CALLER's checkout and only orchestrates — the app owns
+the coverage logic behind one script.
+
+The pattern it enforces: every routed page the app ships either declares the
+**plan feature** that gates it, or sits on a **reviewed exceptions allowlist**
+with a reason.
+
+Why it is worth a gate of its own, next to `rbac:coverage`: the two failures look
+nothing alike. An unguarded route is a security hole, and it turns up in an
+audit. An **ungated page** is a revenue hole and turns up nowhere — the page just
+works, the tier meant to unlock it sells nothing, and the omission is
+indistinguishable from a deliberate decision. This gate forces the distinction:
+"ungated" has to be written down where a reviewer sees it.
+
+## A. Caller job (add to your CI workflow)
+
+```yaml
+  entitlements-coverage:
+    needs: static             # optional: gate on the static tier's change-detector
+    if: needs.static.outputs.code == 'true'
+    # Least-privilege on two axes (see the MCP notes above): a read-only token,
+    # and NO inherited secrets.
+    permissions:
+      contents: read
+    uses: 12-apps/ci/.github/workflows/entitlements-coverage.yml@v1
+    with:
+      package-dir: apps/admin   # where entitlements:coverage is defined
+      install: false            # the script is plain node with no dependencies
+    # NOTE: intentionally no `secrets: inherit` — this gate needs no secrets.
+```
+
+**`install: false` is the interesting one.** Write the coverage script as plain
+node that reads the route tree and the feature catalog as text, and the gate
+costs a checkout plus a node — not a full monorepo install. That is the
+difference between a ~20s lane and a multi-minute one, on a check that runs on
+every PR. Leave `install` at its default `true` if the script imports anything;
+a script that needs deps and runs without them fails loudly on the missing
+import rather than silently passing.
+
+**Secrets — pass none.** Same rule and rationale as the MCP and RBAC gates: every
+job runs consumer-controlled code, so withhold `secrets: inherit`; `permissions`
+scopes only the `GITHUB_TOKEN`, not env secrets. `entitlements:coverage` is a
+**static** analysis of the route tree vs the feature catalog — design it to run
+offline (no live DB or real credentials).
+
+**Private packages.** Identical wiring to the MCP gate — grant `packages: read`
+and set `github-packages-scope: '@my-org'` (see that section above). Ignored when
+`install: false`, since nothing is installed. Public-only consumers set neither.
+
+Inputs (all optional): `node-version` (default `24`), `run-coverage` (default
+true — self-skips with a notice until the consumer defines the script; set
+`false` to opt out explicitly), `install` (default true), `pre-command`,
+`github-packages-scope` (default empty), `package-dir` (default `.` — the
+directory whose `package.json` holds the `entitlements:coverage` script; point it
+at a workspace package, e.g. `apps/admin`, if the script lives there).
+
+The self-skip is only for a **valid** manifest that hasn't adopted the script
+yet. A `package.json` that is **missing, unreadable, or malformed** at
+`package-dir` is a hard **failure** (not a silent skip), so a broken consumer
+config surfaces instead of quietly disabling the gate.
+
+## B. Required in the consumer repo
+
+`package.json` script:
+
+| Script | Purpose |
+|--------|---------|
+| `entitlements:coverage` | Enumerate the routed pages and **exit non-zero** if any is neither gated by a declared plan feature nor carried on the reviewed exceptions allowlist. On by default but only runs when the script exists (skips with a notice otherwise), so adoption is per-repo: define the script and the gate arms itself. |
+
+Plus the committed source-of-truth the script operates on: the **feature catalog**
+(the app's declared plan features) and a **reviewed exceptions file** (e.g.
+`entitlement-gate-exceptions.json`) — the consumer owns this file and its shrink
+policy. Worth cross-checking in the same pass, since each is a way for the gate
+to pass while the product is wrong: a gate naming a feature key the catalog does
+not declare (an unknown key typically resolves "not supported", which most
+implementations render UNLOCKED), and a navigation entry that advertises a
+feature no gated page actually owns.
+
 # Consuming the MCP test-coverage gate
 
 The third MCP sibling: a reusable gate (`mcp-test-coverage.yml`) that keeps a
