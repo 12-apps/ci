@@ -50,6 +50,16 @@ on:
         type: string
         required: false
         default: ''
+      build_args:
+        description: >-
+          Extra `--build-arg` lines (`KEY=value`, one per line) handed to every
+          image build. For NON-SECRET build-time inputs only — builds run with
+          `cache-to: mode=max`, which caches every stage, and a build-arg value
+          is retained in that cache. Anything genuinely secret belongs in a
+          BuildKit secret instead (see SENTRY_AUTH_TOKEN on the build step).
+        type: string
+        required: false
+        default: ''
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -158,6 +168,20 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # Source-map upload for browser bundles, when the consumer wants it.
+      #
+      # A BuildKit SECRET rather than a build arg, and the distinction is not
+      # cosmetic: `cache-to: mode=max` below caches every stage of every build,
+      # and a `--build-arg` value is retained in that cache. A secret is mounted
+      # only for the lifetime of the RUN that asks for it and never lands in a
+      # layer or in the cache.
+      #
+      # This is the one credential the engine knows by name, because uploading
+      # source maps can only happen while the bundle is being built — there is
+      # no later stage that still has them. It stays optional: consumers that
+      # set no such secret pass an empty string, BuildKit mounts an empty file,
+      # and every Dockerfile that does not ask for the secret ignores it
+      # entirely. Nothing about a particular consumer's app is encoded here.
       - name: Build & push
         uses: docker/build-push-action@v6
         with:
@@ -168,6 +192,9 @@ jobs:
           tags: |
             ${{ matrix.ref }}:${{ github.sha }}
             ${{ matrix.ref }}:main
+          build-args: ${{ inputs.build_args }}
+          secrets: |
+            sentry_auth_token=${{ secrets.SENTRY_AUTH_TOKEN }}
           cache-from: type=gha,scope=${{ matrix.cache }}
           cache-to: type=gha,mode=max,scope=${{ matrix.cache }}
 
