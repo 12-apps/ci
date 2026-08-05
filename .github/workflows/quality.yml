@@ -355,7 +355,16 @@ jobs:
           # listed path would never match and the gate would silently pass,
           # leaving the file grandfathered. Here we check BOTH sides of a rename
           # (old + new) and the path of a delete.
-          listed_now="$(grep -vE '^\s*(#|$)' .quality-exceptions | sed -E 's/[[:space:]]+$//')"
+          # `|| true` because grep exits 1 when it selects no lines, and a
+          # consumer that has BURNED THE LIST DOWN has exactly that: a file left
+          # holding only comments (or nothing). GitHub runs `shell: bash` as
+          # `bash -e -o pipefail`, so without this the assignment inherits grep's
+          # 1 and the step dies right here — before either check runs, and before
+          # either has emitted its ::error::, so the log shows only a bare
+          # "Process completed with exit code 1". Finishing the burn-down would
+          # look like a gate failure with no stated reason. Same guard as (A) and
+          # the offenders roll-up below, for the same reason.
+          listed_now="$(grep -vE '^\s*(#|$)' .quality-exceptions | sed -E 's/[[:space:]]+$//' || true)"
           offenders=""
           while IFS=$'\t' read -r status p1 p2; do
             [ -z "$status" ] && continue
