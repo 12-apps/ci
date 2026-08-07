@@ -1,0 +1,201 @@
+name: Commit messages (reusable)
+
+# Conventional-commit gate for a pull request. Consuming repos add a small caller:
+#
+#   name: Commit messages
+#   on:
+#     pull_request:
+#       types: [opened, edited, synchronize, reopened]
+#   permissions:
+#     contents: read
+#     pull-requests: read
+#   jobs:
+#     commitlint:
+#       uses: 12-apps/ci/.github/workflows/commitlint.yml@v1
+#
+# WHY BOTH the commits AND the PR title are linted: these repos are squash-only
+# with `squash_merge_commit_title: COMMIT_OR_PR_TITLE`, which means GitHub uses
+# the single commit's subject when a PR has exactly one commit and the PR TITLE
+# when it has several. Linting only one of the two leaves the other free to land
+# malformed on `main` — and on `main` the subject is machine-read: semantic-
+# release derives the version bump from it, and `release-major-tag.yml` decides
+# whether to advance the moving `v1` tag by looking for a `!` / `BREAKING CHANGE`.
+# A breaking change written without the marker moves `v1` across itself and every
+# consumer pinned to `@v1` silently inherits the break.
+#
+# `types: [edited]` in the caller matters: a PR title fixed after the first run
+# must re-trigger the check, or the fix never turns the check green.
+#
+# The rule set is the config written in the `Write config` step below — the
+# single source of truth. It is generated rather than read from the consumer so
+# a repo with no `package.json` (this one) can still be gated. A consumer that
+# needs different rules passes `config-path`.
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node version used to run commitlint.'
+        type: string
+        required: false
+        default: '24'
+      config-path:
+        description: >-
+          Path to the consumer's own commitlint config, relative to the repo
+          root. Empty (the default) uses the shared config written by this
+          workflow — the one documented in CONTRIBUTING.md.
+        type: string
+        required: false
+        default: ''
+      require-issue-ref:
+        description: >-
+          Require an issue reference (e.g. "(#123)") in every commit. OFF by
+          default: these repos are public, and demanding an issue number for a
+          drive-by typo fix turns a one-line contribution into a two-step chore.
+          Internal repos that track every change in a tracker turn it on.
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  commitlint:
+    name: Conventional commits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # commitlint walks base..head, so the range must actually be present.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Write config
+        if: inputs.config-path == ''
+        env:
+          REQUIRE_ISSUE_REF: ${{ inputs.require-issue-ref }}
+        run: |
+          cat > commitlint.generated.config.mjs <<'CONFIG'
+          /**
+           * The 12-apps commit contract. Mirrors the rules the internal commit
+           * guard enforces, so a message that passes locally passes here.
+           *
+           * Four of the nine rules have no equivalent in config-conventional
+           * and are implemented inline below rather than pulled from a plugin
+           * package: keeping them here means the gate has exactly two
+           * dependencies and no supply chain of its own.
+           */
+          const TYPES = [
+            'feat', 'fix', 'docs', 'style', 'refactor',
+            'test', 'chore', 'perf', 'ci', 'build',
+          ];
+
+          /**
+           * Imperative mood, conservatively. Only an unambiguous past tense or
+           * third person is rejected — a leading verb ending in "ed" or a single
+           * "s" — and base verbs that merely share those endings are exempt, so
+           * "process", "address", "embed" and "focus" are never flagged.
+           */
+          const IMPERATIVE_EXCEPTIONS = new Set([
+            'process', 'address', 'compress', 'express', 'focus', 'pass',
+            'bypass', 'dismiss', 'discuss', 'guess', 'press', 'access',
+            'cross', 'toss', 'miss', 'embed', 'feed', 'seed', 'speed',
+            'need', 'proceed', 'exceed', 'succeed', 'breed', 'bleed',
+            'shed', 'wed', 'spread', 'thread',
+          ]);
+
+          /**
+           * AI attribution, assembled from fragments so this file carries no
+           * contiguous tool-name literal to trip its own rule. Blocks the
+           * ATTRIBUTION, not the mention: "feat: add openai adapter" is fine,
+           * "Generated with <tool>" and a co-author trailer are not.
+           */
+          const AI = ['cl' + 'aude', 'chat' + 'gpt', 'cop' + 'ilot', 'co' + 'dex',
+                      'gem' + 'ini', 'anthro' + 'pic', 'ope' + 'nai', 'gp' + 't'].join('|');
+          const AI_ATTRIBUTION = new RegExp(
+            '(?:co-?authored-?by:[^\\n]*\\b(?:' + AI + ')\\b)' +
+            '|(?:\\b(?:generated|written|created|authored|produced)\\b[^\\n]*\\b(?:with|by)\\b[^\\n]*\\b(?:' + AI + ')\\b)',
+            'i',
+          );
+
+          const EMOJI = /\p{Extended_Pictographic}/u;
+          const requireIssueRef = process.env.REQUIRE_ISSUE_REF === 'true';
+
+          export default {
+            extends: ['@commitlint/config-conventional'],
+            plugins: [
+              {
+                rules: {
+                  'subject-imperative': ({ subject }) => {
+                    const first = (String(subject || '').match(/[a-zA-Z]+/) || [''])[0].toLowerCase();
+                    if (!first || IMPERATIVE_EXCEPTIONS.has(first)) return [true];
+                    if (/(ss|us)$/.test(first)) return [true];
+                    if (!/(ed|s)$/.test(first)) return [true];
+                    return [false, `subject "${first}" must be imperative — "add", not "added"/"adds"`];
+                  },
+                  'header-no-emoji': ({ header }) => [
+                    !EMOJI.test(String(header || '')),
+                    'header must not contain emoji',
+                  ],
+                  'no-ai-attribution': ({ raw }) => [
+                    !AI_ATTRIBUTION.test(String(raw || '')),
+                    'remove AI attribution (co-author trailer or "Generated with ...")',
+                  ],
+                  'issue-ref-present': ({ raw }) => [
+                    !requireIssueRef || /\(#\d+\)|\b[A-Z][A-Z0-9]+-\d+\b/.test(String(raw || '')),
+                    'reference the issue, e.g. "(#123)"',
+                  ],
+                },
+              },
+            ],
+            rules: {
+              'type-enum': [2, 'always', TYPES],
+              'header-max-length': [2, 'always', 72],
+              'subject-full-stop': [2, 'never', '.'],
+              'body-max-line-length': [2, 'always', 100],
+              'subject-imperative': [2, 'always'],
+              'header-no-emoji': [2, 'always'],
+              'no-ai-attribution': [2, 'always'],
+              'issue-ref-present': [2, 'always'],
+              // Off: a scope is useful but not every change has a meaningful one,
+              // and an empty-scope failure teaches contributors to invent noise.
+              'scope-empty': [0],
+            },
+          };
+          CONFIG
+
+      # Only the commits THIS pull request adds.
+      #
+      # The merge-base rather than `pull_request.base.sha`: that field is the
+      # base tip recorded when the event fired, so it goes stale as soon as the
+      # base branch moves, and `base.sha..HEAD` then reports a range that is not
+      # what the PR added. `merge-base` is computed against the live base and
+      # stays correct.
+      #
+      # It does NOT rescue a branch cut from a commit that never reached the
+      # base — a stale PR-branch tip, say, which in a squash-merge repo is every
+      # merged branch's original commit. Those really are in the range, and the
+      # honest fix is to rebase the branch, not to widen the gate.
+      - name: Lint the commits
+        env:
+          REQUIRE_ISSUE_REF: ${{ inputs.require-issue-ref }}
+          CONFIG: ${{ inputs.config-path || 'commitlint.generated.config.mjs' }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags --quiet origin "$BASE_REF"
+          BASE="$(git merge-base "origin/$BASE_REF" HEAD)"
+          echo "Linting $(git rev-list --count "$BASE"..HEAD) commit(s) added by this PR."
+          npx --yes --package @commitlint/cli --package @commitlint/config-conventional \
+            commitlint --config "$CONFIG" --from "$BASE" --to HEAD --verbose
+
+      # A multi-commit PR lands the PR TITLE, which is not in the commit range
+      # above and would otherwise never be checked.
+      - name: Lint the PR title
+        env:
+          REQUIRE_ISSUE_REF: ${{ inputs.require-issue-ref }}
+          CONFIG: ${{ inputs.config-path || 'commitlint.generated.config.mjs' }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          printf '%s\n' "$PR_TITLE" | npx --yes --package @commitlint/cli \
+            --package @commitlint/config-conventional commitlint --config "$CONFIG" --verbose

@@ -1065,6 +1065,57 @@ config surfaces instead of quietly disabling the gate.
 |--------|---------|
 | `prod:smoke` (or your `smoke-script` name) | Boot the production build (the `build-command` above produced it) against a throwaway DB, mint any auth cookie it needs, GET the key public + guarded endpoints/pages, and **exit non-zero** if any probe fails or the server logs a serialization/runtime error. Owns the endpoint list, seeding, and boot. Probed for existence; the job self-skips if absent. |
 
+---
+
+# Consuming the Commit-message gate
+
+Enforces [Conventional Commits](https://www.conventionalcommits.org/) on a pull
+request: the format, the allowed types, a 72-character header, imperative mood,
+no trailing period, no emoji, 100-character body lines, and no AI attribution.
+The full contract is in [CONTRIBUTING.md](./CONTRIBUTING.md).
+
+Needs **nothing** in the consumer repo — no `package.json`, no devDependency, no
+config file. The rule set is written by the workflow itself, so a repo that is
+only workflows and shell scripts can still be gated.
+
+## A. Caller workflow (consumer `.github/workflows/commitlint.yml`)
+
+```yaml
+name: Commit messages
+on:
+  pull_request:
+    # `edited` is load-bearing — a malformed PR title fixed after the first run
+    # must re-trigger the check, or the fix never turns it green.
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  commitlint:
+    uses: 12-apps/ci/.github/workflows/commitlint.yml@v1
+```
+
+## B. Both the commits and the PR title are linted
+
+Not redundancy. With `squash_merge_commit_title: COMMIT_OR_PR_TITLE` — the
+setting these repos use — GitHub takes the **single commit's subject** when a PR
+has one commit and the **PR title** when it has several. Either can be the
+subject that lands on `main`, so both are checked.
+
+That subject is machine-read once it lands: semantic-release derives the version
+bump from it, and this repo's `release-major-tag.yml` decides whether to advance
+`@v1` by looking for a `!` marker or a `BREAKING CHANGE:` footer.
+
+## C. Inputs
+
+| Input | Default | Purpose |
+|---|---|---|
+| `node-version` | `'24'` | Node used to run commitlint |
+| `config-path` | `''` | Path to the consumer's own commitlint config. Empty uses the shared rule set |
+| `require-issue-ref` | `false` | Require `(#123)` in every commit. Off by default — demanding an issue number for a one-line fix in a **public** repo turns a drive-by contribution into a two-step chore. Turn it on where every change is tracked |
+
 ## 6. First DigitalOcean provision
 
 Run the caller via **workflow_dispatch** with `action=provision`,

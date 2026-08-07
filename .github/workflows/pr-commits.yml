@@ -1,0 +1,27 @@
+name: Commit messages
+
+# This repo gating ITSELF with the workflow it publishes.
+#
+# It matters more here than in most repos: `release-major-tag.yml` decides
+# whether to advance the moving `v1` tag by parsing commit subjects for a
+# conventional `type!:` marker or a `BREAKING CHANGE:` footer. A breaking change
+# written without one is not just untidy — `v1` advances across it, and every
+# consumer pinned to `@v1` picks the break up on their next run.
+#
+# Referenced by LOCAL path rather than `@v1` on purpose: a change to
+# commitlint.yml must be gated by the version in the pull request, not by the
+# version already tagged.
+
+on:
+  pull_request:
+    # `edited` is load-bearing — a malformed PR title fixed after the first run
+    # has to re-trigger the check, or the fix never turns it green.
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  commitlint:
+    uses: ./.github/workflows/commitlint.yml
