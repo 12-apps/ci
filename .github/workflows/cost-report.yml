@@ -1,0 +1,328 @@
+name: Cost Report (reusable)
+
+# Posts (and keeps updating) a single PR comment estimating what the PR's CI has
+# cost in Actions runner minutes:
+#
+#   jobs:
+#     cost-report:
+#       if: always() && github.event_name == 'pull_request'
+#       needs: [lint, tests, e2e]          # run LAST, so it sees the whole run
+#       permissions:
+#         pull-requests: write
+#         actions: read
+#       uses: 12-apps/ci/.github/workflows/cost-report.yml@v2
+#       secrets: inherit
+#
+# The cost is recomputed from the API on every run — never parsed back out of
+# the previous comment — so a rerun, a force-push, or a cancelled run cannot
+# make the number drift.
+
+on:
+  workflow_call:
+    inputs:
+      runner-rates:
+        description: >-
+          JSON map of runner class -> USD per minute. Keys are matched
+          case-insensitively against the timing API's runner labels (UBUNTU,
+          MACOS, WINDOWS), with `linux` accepted as an alias for UBUNTU. Defaults
+          are GitHub's published public rates for 2-core runners; override for
+          larger runners, a different plan, or a non-GitHub-hosted fleet.
+        type: string
+        required: false
+        default: '{"linux":0.006,"linux_arm":0.005,"windows":0.01,"macos":0.062}'
+      comment-marker:
+        description: >-
+          Hidden HTML marker identifying this workflow's comment. The job
+          find-or-creates the ONE comment carrying it and edits that comment in
+          place forever after. Change it only if a repo needs two independent
+          cost comments on the same PR.
+        type: string
+        required: false
+        default: '<!-- ci-cost-report -->'
+      title:
+        description: 'Heading of the posted comment.'
+        type: string
+        required: false
+        default: 'CI cost estimate'
+      max-run-pages:
+        description: >-
+          Safety cap on how many pages of workflow runs (100 per page) are
+          scanned for this PR. A PR that exceeds it is reported as a partial
+          total, loudly, in the comment itself — never silently truncated.
+        type: number
+        required: false
+        default: 5
+    outputs:
+      billed-minutes:
+        description: 'Cumulative billed minutes across every workflow run on this PR.'
+        value: ${{ jobs.report.outputs.billed-minutes }}
+      cost:
+        description: 'Cumulative estimated USD across every workflow run on this PR.'
+        value: ${{ jobs.report.outputs.cost }}
+
+# Least-privilege, enforced at the source: read the run timings, write the one
+# comment. The effective grant is the intersection with the caller's, so the
+# CALLER must declare at least:
+#
+#   permissions:
+#     pull-requests: write   # find-or-create the comment
+#     actions: read          # GET .../actions/runs/{id}/timing
+#
+# Without those two the job fails with a 403 rather than posting a wrong number.
+permissions:
+  actions: read
+  pull-requests: write
+
+jobs:
+  report:
+    name: Cost Report
+    runs-on: ubuntu-latest
+    outputs:
+      billed-minutes: ${{ steps.report.outputs.billed-minutes }}
+      cost: ${{ steps.report.outputs.cost }}
+    steps:
+      - name: Compute and post the cost estimate
+        id: report
+        uses: actions/github-script@v7
+        env:
+          RUNNER_RATES: ${{ inputs.runner-rates }}
+          COMMENT_MARKER: ${{ inputs.comment-marker }}
+          REPORT_TITLE: ${{ inputs.title }}
+          MAX_RUN_PAGES: ${{ inputs.max-run-pages }}
+        with:
+          script: |
+            const marker = process.env.COMMENT_MARKER;
+            const title = process.env.REPORT_TITLE;
+            const maxPages = Number(process.env.MAX_RUN_PAGES) || 5;
+            const { owner, repo } = context.repo;
+
+            // ── PR context ────────────────────────────────────────────────────
+            // Reusable workflows run inside the CALLER's run, so context here is
+            // the caller's event. No PR means nothing to comment on.
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.notice(
+                `No pull_request in the ${context.eventName} payload — cost report skipped. ` +
+                  'Gate the caller job on `github.event_name == \'pull_request\'`.',
+              );
+              return;
+            }
+            const prNumber = pr.number;
+            const headRef = pr.head.ref;
+
+            let rates;
+            try {
+              rates = JSON.parse(process.env.RUNNER_RATES);
+            } catch (e) {
+              core.setFailed(`runner-rates is not valid JSON: ${e.message}`);
+              return;
+            }
+            // Case-insensitive lookup, plus the alias that makes the documented
+            // default readable: the timing API says UBUNTU, humans say linux.
+            const rateFor = (label) => {
+              const k = String(label).toLowerCase();
+              const aliases = { ubuntu: 'linux', ubuntu_arm: 'linux_arm' };
+              const table = Object.fromEntries(
+                Object.entries(rates).map(([n, v]) => [n.toLowerCase(), v]),
+              );
+              const v = table[k] ?? table[aliases[k]];
+              return typeof v === 'number' ? v : null;
+            };
+
+            // ── Every run tied to this PR ─────────────────────────────────────
+            // Cumulative cost is ALWAYS recomputed from the API rather than read
+            // back out of the last comment: an accumulator that parses its own
+            // previous output drifts the moment a run is re-run, cancelled, or
+            // the comment is edited by hand.
+            const runs = [];
+            let truncated = false;
+            for (let page = 1; page <= maxPages; page++) {
+              const { data } = await github.rest.actions.listWorkflowRunsForRepo({
+                owner,
+                repo,
+                branch: headRef,
+                per_page: 100,
+                page,
+              });
+              // `pull_requests` is populated for same-repo runs; for a fork the
+              // array is empty, so fall back to the head branch, which the API
+              // query already scoped us to.
+              for (const r of data.workflow_runs) {
+                const tied = Array.isArray(r.pull_requests) && r.pull_requests.length
+                  ? r.pull_requests.some((p) => p.number === prNumber)
+                  : r.head_branch === headRef;
+                if (tied) runs.push(r);
+              }
+              if (data.workflow_runs.length < 100) break;
+              if (page === maxPages) truncated = true;
+            }
+            // The triggering run is in progress, so it may not be listed yet.
+            if (!runs.some((r) => r.id === context.runId)) {
+              try {
+                const { data } = await github.rest.actions.getWorkflowRun({
+                  owner,
+                  repo,
+                  run_id: context.runId,
+                });
+                runs.push(data);
+              } catch (e) {
+                core.warning(`Could not read the triggering run: ${e.message}`);
+              }
+            }
+
+            // ── Timing per run ────────────────────────────────────────────────
+            // GitHub bills every JOB rounded up to the whole minute, so billed
+            // minutes are the sum of per-job ceilings — not a ceiling of the
+            // run's total. On a 26-job run that difference is the whole point:
+            // 26 jobs of 10s bill 26 minutes, not 5.
+            const perRun = [];
+            const totals = new Map(); // runner label -> { billed, raw }
+            let failed = 0;
+            for (const run of runs) {
+              let timing;
+              try {
+                ({ data: timing } = await github.rest.actions.getWorkflowRunUsage({
+                  owner,
+                  repo,
+                  run_id: run.id,
+                }));
+              } catch (e) {
+                failed++;
+                core.warning(`Timing unavailable for run ${run.id}: ${e.message}`);
+                continue;
+              }
+              const entry = { run, billed: 0, raw: 0, cost: 0, unpriced: new Set() };
+              for (const [label, usage] of Object.entries(timing.billable ?? {})) {
+                const jobs = usage.job_runs ?? [];
+                // Prefer per-job durations; fall back to the run total when the
+                // API omits job_runs (older runs), which under-reports rather
+                // than inventing jobs that were not there.
+                const billedMs = jobs.length
+                  ? jobs.reduce((a, j) => a + Math.ceil((j.duration_ms ?? 0) / 60000) * 60000, 0)
+                  : Math.ceil((usage.total_ms ?? 0) / 60000) * 60000;
+                const billedMin = billedMs / 60000;
+                const rawMin = (usage.total_ms ?? 0) / 60000;
+                const rate = rateFor(label);
+                if (rate === null) entry.unpriced.add(label);
+                entry.billed += billedMin;
+                entry.raw += rawMin;
+                entry.cost += billedMin * (rate ?? 0);
+                const t = totals.get(label) ?? { billed: 0, raw: 0, cost: 0, priced: rate !== null };
+                t.billed += billedMin;
+                t.raw += rawMin;
+                t.cost += billedMin * (rate ?? 0);
+                t.priced = rate !== null;
+                totals.set(label, t);
+              }
+              perRun.push(entry);
+            }
+
+            const sum = (f) => [...totals.values()].reduce((a, t) => a + f(t), 0);
+            const totalBilled = sum((t) => t.billed);
+            const totalRaw = sum((t) => t.raw);
+            const totalCost = sum((t) => t.cost);
+            const money = (n) => `$${n.toFixed(2)}`;
+            const mins = (n) => n.toFixed(1);
+
+            // ── Render ────────────────────────────────────────────────────────
+            const isPublic = context.payload.repository?.private === false;
+            const lines = [marker, `## ${title}`, ''];
+            if (isPublic) {
+              lines.push(
+                '> This repository is **public**, so these runs are **not billed** — ' +
+                  'GitHub-hosted Actions minutes are free on public repos. The figures ' +
+                  'below track **gross minutes** for visibility and trend, not spend.',
+                '',
+              );
+            }
+            lines.push(
+              `**${mins(totalBilled)} billed min** · **${money(totalCost)}** · ` +
+                `${runs.length} run${runs.length === 1 ? '' : 's'} on this PR`,
+              '',
+              '| Runner | Billed min | Wall-clock min | Est. cost |',
+              '|---|---:|---:|---:|',
+            );
+            for (const [label, t] of [...totals.entries()].sort()) {
+              lines.push(
+                `| ${label} | ${mins(t.billed)} | ${mins(t.raw)} | ` +
+                  `${t.priced ? money(t.cost) : '— _(no rate configured)_'} |`,
+              );
+            }
+            lines.push(
+              `| **Total** | **${mins(totalBilled)}** | **${mins(totalRaw)}** | **${money(totalCost)}** |`,
+              '',
+              '<details><summary>Per-run breakdown</summary>',
+              '',
+              '| Run | Event | Billed min | Est. cost |',
+              '|---|---|---:|---:|',
+            );
+            for (const e of perRun.sort((a, b) => a.run.id - b.run.id)) {
+              const name = `[${e.run.name} #${e.run.run_number}](${e.run.html_url})`;
+              const current = e.run.id === context.runId ? ' _(this run)_' : '';
+              lines.push(
+                `| ${name}${current} | ${e.run.event} | ${mins(e.billed)} | ${money(e.cost)} |`,
+              );
+            }
+            lines.push('', '</details>', '');
+
+            // Every caveat that would otherwise make this number quietly wrong.
+            const notes = [
+              'Billed minutes round **each job** up to the whole minute, which is how ' +
+                'GitHub bills; wall-clock is the unrounded sum.',
+              'The run posting this comment is still in progress, so its own last few ' +
+                'jobs — this one included — are not yet counted.',
+            ];
+            if (truncated) {
+              notes.push(
+                `**Partial total:** more than ${maxPages * 100} runs exist for this ` +
+                  'branch and only the most recent were scanned. Raise `max-run-pages`.',
+              );
+            }
+            if (failed) {
+              notes.push(
+                `Timing could not be read for **${failed}** run(s) — they are missing ` +
+                  'from the total (see the job log).',
+              );
+            }
+            const unpriced = [...totals.entries()].filter(([, t]) => !t.priced).map(([l]) => l);
+            if (unpriced.length) {
+              notes.push(
+                `No rate configured for **${unpriced.join(', ')}** — those minutes are ` +
+                  'counted but charged at $0. Add them to `runner-rates`.',
+              );
+            }
+            lines.push(...notes.map((n) => `- ${n}`));
+            const body = lines.join('\n');
+
+            // ── Find-or-create, then edit in place ────────────────────────────
+            const existing = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number: prNumber,
+              per_page: 100,
+            });
+            const mine = existing.find((c) => c.body?.includes(marker));
+            if (mine) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: mine.id,
+                body,
+              });
+              core.info(`Updated comment ${mine.id}.`);
+            } else {
+              const { data } = await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: prNumber,
+                body,
+              });
+              core.info(`Created comment ${data.id}.`);
+            }
+
+            core.setOutput('billed-minutes', totalBilled.toFixed(1));
+            core.setOutput('cost', totalCost.toFixed(2));
+            await core.summary
+              .addHeading(title, 3)
+              .addRaw(`${mins(totalBilled)} billed min · ${money(totalCost)} across ${runs.length} run(s).`)
+              .write();

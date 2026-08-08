@@ -1,0 +1,210 @@
+name: Detect Changes (reusable)
+
+# Generic path-based change detection. The caller declares its OWN categories —
+# this workflow knows nothing about any repo's layout:
+#
+#   jobs:
+#     changes:
+#       uses: 12-apps/ci/.github/workflows/detect-changes.yml@v2
+#       with:
+#         path-filters: |
+#           web:
+#             - 'apps/web/**'
+#           docs:
+#             - '**/*.md'
+#
+#     unit-tests:
+#       needs: changes
+#       if: fromJSON(needs.changes.outputs.changes).web
+#       ...
+#
+# BEFORE YOU ADD THIS JOB, read "When NOT to use this" in the README. If your
+# repo already calls `monorepo-static.yml`, declare the categories there via
+# `extra-filters` instead — that tier already runs a Detect Changes job, and a
+# second one costs a whole billed minute on every push for ~6s of work.
+
+on:
+  workflow_call:
+    inputs:
+      path-filters:
+        description: >-
+          REQUIRED. The filter spec, as YAML or JSON. Each top-level key is a
+          category name; its value is a list of globs. YAML top-level keys MUST
+          be UNINDENTED (at column 0) — that is how the category names are
+          discovered for the `changes` map and for `force-all`. An indented
+          block declares no names and fails the job loudly rather than silently
+          reporting every category false.
+        type: string
+        required: true
+      force-all:
+        description: >-
+          Report EVERY declared category as true without diffing. Wire this to
+          the events where selection must not apply — typically the post-merge
+          full-suite safety net: `force-all: ${{ github.event_name == 'push' }}`.
+          Incremental PR-time selection is only safe to trust when something
+          still runs the whole suite.
+        type: boolean
+        required: false
+        default: false
+      base:
+        description: >-
+          Git ref the diff is taken against. Empty (default) lets the filter pick:
+          the PR base for `pull_request`, the before-sha for `push`.
+        type: string
+        required: false
+        default: ''
+      fetch-depth:
+        description: >-
+          Checkout depth. 0 (full history) is only needed when `base` names a ref
+          that must be resolved locally; the default costs nothing on PRs, where
+          the filter uses the API rather than a local diff.
+        type: number
+        required: false
+        default: 1
+    outputs:
+      changes:
+        description: >-
+          JSON object mapping every DECLARED category to a JSON boolean, e.g.
+          {"web":true,"docs":false}. Use it directly in a job `if:` —
+          `if: fromJSON(needs.changes.outputs.changes).web` — with no string
+          comparison, since the values are real booleans.
+        value: ${{ jobs.detect.outputs.changes }}
+      matched:
+        description: >-
+          JSON array of the category names that matched, e.g. ["web"]. The same
+          information as `changes`, in the shape `contains()` wants:
+          `if: contains(fromJSON(needs.changes.outputs.matched), 'web')`.
+        value: ${{ jobs.detect.outputs.matched }}
+      any:
+        description: >-
+          'true' when at least one category matched. A cheap top-level guard for
+          "does this diff touch anything this pipeline cares about at all?".
+        value: ${{ jobs.detect.outputs.any }}
+
+# Least-privilege, enforced at the source. pull-requests: read is what
+# dorny/paths-filter uses to read a PR's file list without a local diff; the
+# effective grant is still the intersection with the caller's.
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  detect:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      changes: ${{ steps.assemble.outputs.changes }}
+      matched: ${{ steps.assemble.outputs.matched }}
+      any: ${{ steps.assemble.outputs.any }}
+    steps:
+      # The declared category NAMES are needed whether or not a diff is taken:
+      # `force-all` reports all of them, and `changes` must carry a key for every
+      # category (a caller's `if:` reading an absent key gets `null`, which is
+      # falsy — a silent skip instead of a loud failure). Parsed from the input
+      # itself so the caller declares its categories exactly once.
+      - name: Parse declared categories
+        id: names
+        shell: bash
+        env:
+          FILTERS: ${{ inputs.path-filters }}
+        run: |
+          set -euo pipefail
+          node <<'EOF' >> "$GITHUB_OUTPUT"
+          const raw = process.env.FILTERS ?? "";
+          if (!raw.trim()) {
+            console.error("::error::path-filters is empty — declare at least one category.");
+            process.exit(1);
+          }
+          let names;
+          if (raw.trimStart().startsWith("{")) {
+            // JSON spec: the keys are the categories, no ambiguity.
+            let parsed;
+            try {
+              parsed = JSON.parse(raw);
+            } catch (e) {
+              console.error(`::error::path-filters looks like JSON but does not parse: ${e.message}`);
+              process.exit(1);
+            }
+            if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+              console.error("::error::path-filters JSON must be an object of category -> globs.");
+              process.exit(1);
+            }
+            names = Object.keys(parsed);
+          } else {
+            // YAML spec: top-level keys are the ones at column 0. This is the
+            // same convention monorepo-static.yml's `extra-filters` uses, and it
+            // is why the input must be UNINDENTED — an indented block yields
+            // zero names and fails right here instead of quietly reporting
+            // every category false and skipping the whole pipeline.
+            names = raw
+              .split("\n")
+              .map((l) => l.replace(/\s+$/, ""))
+              .filter((l) => l && !/^\s/.test(l) && !l.startsWith("#"))
+              .map((l) => {
+                const m = /^([A-Za-z0-9_.\-]+)\s*:/.exec(l);
+                return m ? m[1] : null;
+              })
+              .filter(Boolean);
+          }
+          const unique = [...new Set(names)];
+          if (unique.length === 0) {
+            console.error(
+              "::error::path-filters declared no categories. In YAML every category name must sit at column 0 (UNINDENTED) — an indented block declares none.",
+            );
+            process.exit(1);
+          }
+          console.log(`names=${JSON.stringify(unique)}`);
+          console.error(`Declared categories: ${unique.join(", ")}`);
+          EOF
+
+      - name: Checkout
+        # A local checkout is only needed when the filter has to resolve a ref
+        # itself. On `pull_request` dorny reads the PR's file list from the API,
+        # so skipping the checkout there saves the clone on the most frequent
+        # event — but `force-all` skips the filter entirely, so nothing is
+        # needed then either.
+        if: ${{ !inputs.force-all && (github.event_name != 'pull_request' || inputs.base != '') }}
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ inputs.fetch-depth }}
+
+      - name: Filter changed paths
+        id: filter
+        if: ${{ !inputs.force-all }}
+        uses: dorny/paths-filter@v3
+        with:
+          filters: ${{ inputs.path-filters }}
+          base: ${{ inputs.base }}
+          # A JSON array of the filter names that matched — the one output whose
+          # shape does not depend on the caller's category names, so it is the
+          # only one a generic workflow can forward.
+          list-files: none
+
+      # `force-all` is resolved HERE rather than by skipping the job, so the
+      # outputs exist either way: a skipped job reports empty outputs, and every
+      # downstream `if:` would silently evaluate false — the opposite of what
+      # forcing means.
+      - name: Assemble outputs
+        id: assemble
+        shell: bash
+        env:
+          NAMES: ${{ steps.names.outputs.names }}
+          MATCHED: ${{ steps.filter.outputs.changes }}
+          FORCE_ALL: ${{ inputs.force-all }}
+        run: |
+          set -euo pipefail
+          node <<'EOF' >> "$GITHUB_OUTPUT"
+          const names = JSON.parse(process.env.NAMES);
+          const force = process.env.FORCE_ALL === "true";
+          // When the filter step is skipped its output is the empty string.
+          const matched = force ? names : JSON.parse(process.env.MATCHED || "[]");
+          const set = new Set(matched);
+          // Real JSON booleans, not "true"/"false" strings, so a caller writes
+          // `if: fromJSON(...).web` instead of `== 'true'`.
+          const changes = Object.fromEntries(names.map((n) => [n, set.has(n)]));
+          console.log(`changes=${JSON.stringify(changes)}`);
+          console.log(`matched=${JSON.stringify([...set])}`);
+          console.log(`any=${set.size > 0}`);
+          console.error(force ? "force-all: every declared category reported true." : "");
+          console.error(JSON.stringify(changes, null, 2));
+          EOF
