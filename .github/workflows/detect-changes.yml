@@ -43,9 +43,12 @@ on:
         description: >-
           Report EVERY declared category as true without diffing. Wire this to
           the events where selection must not apply — typically the post-merge
-          full-suite safety net: `force-all: ${{ github.event_name == 'push' }}`.
-          Incremental PR-time selection is only safe to trust when something
-          still runs the whole suite.
+          full-suite safety net, by passing an expression that is true on push
+          (see the README example; it cannot be spelled out here, because an
+          expression written in an input DESCRIPTION is evaluated at parse time
+          and invalidates the workflow for every caller). Incremental PR-time
+          selection is only safe to trust when something still runs the whole
+          suite.
         type: boolean
         required: false
         default: false
