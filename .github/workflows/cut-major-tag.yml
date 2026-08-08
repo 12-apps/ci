@@ -1,0 +1,112 @@
+name: Cut major tag
+
+# The MANUAL counterpart to release-major-tag.yml.
+#
+# That workflow auto-advances the CURRENT major tag (v1) for every compatible
+# push, and deliberately freezes rather than crossing a breaking change — the
+# README's instruction for that case is "cut v2 by hand". This is the hand.
+#
+# Why it is a workflow rather than a `git tag && git push`: a tag ref is not
+# always pushable from a developer's or an automation's credential, while the
+# in-Actions GITHUB_TOKEN with `contents: write` is exactly what already moves
+# v1 here. Doing it through the same mechanism means the capability lives with
+# the repo rather than with whoever happens to have the right token.
+#
+#   Actions -> Cut major tag -> Run workflow
+#     tag: v2
+#     ref: <sha or branch>   (default: the default branch's tip)
+#
+# Creating a NEW tag is the normal path. Moving an existing one is refused
+# unless `force` is set, because a consumer pinned to `@v2` gets whatever it
+# points at with no version bump to review.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Major tag to create, e.g. v2. Must match ^v[0-9]+$.'
+        type: string
+        required: true
+      ref:
+        description: 'Commit SHA or branch to tag. Empty uses the default branch tip.'
+        type: string
+        required: false
+        default: ''
+      force:
+        description: 'Move the tag if it already exists. Off by default — a moved major tag reaches every consumer with nothing to review.'
+        type: boolean
+        required: false
+        default: false
+
+# Least-privilege: writing the tag ref is this job's only side effect.
+permissions:
+  contents: write
+
+# Serialize tag writes against the auto-advance workflow's own group is not
+# possible (different group name is fine — they touch different tags), but two
+# concurrent runs of THIS workflow could race on the same tag.
+concurrency:
+  group: cut-major-tag-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  cut:
+    name: Cut ${{ inputs.tag }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history + tags: the target ref must be resolvable, and we have
+          # to know whether the tag already exists.
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Create the tag
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+          REF: ${{ inputs.ref }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          # A major tag only. Rejecting anything else keeps this from becoming a
+          # general-purpose "push any ref" button with contents: write behind it.
+          if ! printf '%s' "$TAG" | grep -qE '^v[0-9]+$'; then
+            echo "::error::tag must look like v2 (^v[0-9]+$), got: $TAG"
+            exit 1
+          fi
+
+          target="${REF:-}"
+          if [ -z "$target" ]; then
+            git fetch --no-tags --quiet origin "${GITHUB_REF_NAME}"
+            target="$(git rev-parse FETCH_HEAD)"
+          fi
+          # Fail loudly on an unresolvable ref rather than tagging something else.
+          sha="$(git rev-parse --verify "${target}^{commit}")" || {
+            echo "::error::could not resolve ref: $target"
+            exit 1
+          }
+
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            cur="$(git rev-parse "refs/tags/$TAG")"
+            if [ "$cur" = "$sha" ]; then
+              echo "$TAG already points at $sha — nothing to do."
+              exit 0
+            fi
+            if [ "$FORCE" != "true" ]; then
+              echo "::error::$TAG already exists (at $cur) and force is off."
+              echo "Re-run with force: true only if you intend every consumer"
+              echo "pinned to @$TAG to move to $sha with nothing to review."
+              exit 1
+            fi
+            echo "::warning::moving existing tag $TAG: $cur -> $sha"
+          fi
+
+          git tag -f "$TAG" "$sha"
+          git push -f origin "refs/tags/$TAG"
+          echo "✓ $TAG -> $sha"
+          {
+            echo "### Cut \`$TAG\`"
+            echo ""
+            echo "\`$TAG\` now points at \`$sha\`."
+          } >> "$GITHUB_STEP_SUMMARY"

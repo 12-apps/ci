@@ -238,6 +238,24 @@ Consumers pin the moving major tag `@v1`. Backwards-compatible changes move
 change-detection workflows above. Nothing in `v1` changed behaviour, so existing
 `@v1` consumers are unaffected and need not migrate.
 
+### Cutting a major tag by hand
+
+`release-major-tag.yml` advances `v1` automatically and freezes rather than
+crossing a breaking change. Cutting the next major is the manual step, and
+**Actions → Cut major tag → Run workflow** (`cut-major-tag.yml`) is how:
+
+| Input | |
+|---|---|
+| `tag` | the tag to create, e.g. `v2` (must match `^v[0-9]+$`) |
+| `ref` | commit or branch to tag; empty uses the default branch tip |
+| `force` | move an existing tag — off by default |
+
+It runs with `contents: write` inside Actions, which is the same capability that
+already moves `v1` — so cutting a tag needs no local credential that happens to
+be allowed to push tag refs. Moving an existing major is refused unless `force`
+is set: every consumer pinned to that tag would follow it with nothing to
+review.
+
 `v1` moves **automatically**: `.github/workflows/release-major-tag.yml` re-points
 it to every push on `main` — no manual force-push. Commits marked breaking
 (conventional `type!:` / `type(scope)!:` subject, or a `BREAKING CHANGE:` footer)
