@@ -175,12 +175,21 @@ jobs:
             // minutes are the sum of per-job ceilings — not a ceiling of the
             // run's total. On a 26-job run that difference is the whole point:
             // 26 jobs of 10s bill 26 minutes, not 5.
-            // The timing endpoint reports ZERO for a run that has not finished —
-            // and the run posting this comment never has. Reading it alone made
-            // the newest run always contribute 0, so the cumulative total
-            // silently lagged a full run behind. For an in-flight run we derive
-            // the same figure from the jobs API instead, which does report each
-            // finished job's start/end while the run is still going.
+            // Where the numbers come from, and why it is not the obvious place.
+            //
+            // The billing endpoint is the documented source, but it cannot be
+            // trusted as the only one. It reports ZERO for a run that has not
+            // finished — and the run posting this comment never has — and on
+            // some plans it returns per-job durations of 0 even for a COMPLETED
+            // run (observed: `jobs: 14`, every `duration_ms: 0`, while
+            // `run_duration_ms` was 62000). Either way the total silently reads
+            // as free, which is the one failure a cost report must not have.
+            //
+            // So durations are always derived from the jobs endpoint, which
+            // reports each finished job's start/end in both states, and the
+            // billing endpoint is used only when it actually returns non-zero
+            // time for a completed run — preferred there because it is the
+            // authoritative billed figure rather than a reconstruction.
             const RUNNER_LABEL = (labels) => {
               const l = (labels ?? []).join(' ').toLowerCase();
               if (/macos|mac-/.test(l)) return 'MACOS';
@@ -217,8 +226,13 @@ jobs:
                 // that as free.
                 billable[label].job_runs.push({ job_id: j.id, duration_ms: Math.max(ms, 1) });
               }
-              return { billable };
+              // Flagged so the comment can say which runs were reconstructed
+              // rather than read from the billing endpoint.
+              return { billable, derived: true };
             };
+
+            const totalMsOf = (t) =>
+              Object.values(t?.billable ?? {}).reduce((a, u) => a + (u.total_ms ?? 0), 0);
 
             const perRun = [];
             const totals = new Map(); // runner label -> { billed, raw }
@@ -228,16 +242,22 @@ jobs:
               const inFlight = run.status !== 'completed';
               let timing;
               try {
-                if (inFlight) {
-                  estimated++;
-                  timing = await usageFromJobs(run);
-                } else {
-                  ({ data: timing } = await github.rest.actions.getWorkflowRunUsage({
-                    owner,
-                    repo,
-                    run_id: run.id,
-                  }));
+                timing = await usageFromJobs(run);
+                if (!inFlight) {
+                  // Prefer the authoritative billed figure — but only if it has
+                  // one. An all-zero response means "not reported", not "free".
+                  try {
+                    const { data } = await github.rest.actions.getWorkflowRunUsage({
+                      owner,
+                      repo,
+                      run_id: run.id,
+                    });
+                    if (totalMsOf(data) > 0) timing = data;
+                  } catch (e) {
+                    core.warning(`Billing endpoint unavailable for run ${run.id}: ${e.message}`);
+                  }
                 }
+                if (timing.derived) estimated++;
               } catch (e) {
                 failed++;
                 core.warning(`Timing unavailable for run ${run.id}: ${e.message}`);
@@ -324,13 +344,15 @@ jobs:
               'Billed minutes round **each job** up to the whole minute, which is how ' +
                 'GitHub bills; wall-clock is the unrounded sum.',
               'The run posting this comment is still in progress, so jobs that had not ' +
-                'finished when it ran — this one included — are not yet counted. ' +
-                (estimated
-                  ? `${estimated} in-flight run(s) are measured from finished job ` +
-                    'durations rather than the billing endpoint, which reports nothing ' +
-                    'until a run completes; the next push recomputes them exactly.'
-                  : ''),
+                'finished when it ran — this one included — are not yet counted.',
             ];
+            if (estimated) {
+              notes.push(
+                `**${estimated}** run(s) measured from job start/end times rather than the ` +
+                  'billing endpoint — it reports nothing for a run still in flight, and on ' +
+                  'some plans reports no per-job time at all. Same rounding, one source down.',
+              );
+            }
             if (truncated) {
               notes.push(
                 `**Partial total:** more than ${maxPages * 100} runs exist for this ` +
