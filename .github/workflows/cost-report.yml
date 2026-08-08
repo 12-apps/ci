@@ -175,23 +175,75 @@ jobs:
             // minutes are the sum of per-job ceilings — not a ceiling of the
             // run's total. On a 26-job run that difference is the whole point:
             // 26 jobs of 10s bill 26 minutes, not 5.
+            // The timing endpoint reports ZERO for a run that has not finished —
+            // and the run posting this comment never has. Reading it alone made
+            // the newest run always contribute 0, so the cumulative total
+            // silently lagged a full run behind. For an in-flight run we derive
+            // the same figure from the jobs API instead, which does report each
+            // finished job's start/end while the run is still going.
+            const RUNNER_LABEL = (labels) => {
+              const l = (labels ?? []).join(' ').toLowerCase();
+              if (/macos|mac-/.test(l)) return 'MACOS';
+              if (/windows|win-/.test(l)) return 'WINDOWS';
+              if (/ubuntu|linux/.test(l)) return /arm/.test(l) ? 'UBUNTU_ARM' : 'UBUNTU';
+              // Anything else (a self-hosted or custom label) keeps its own name
+              // so it surfaces as "no rate configured" rather than being charged
+              // at some other platform's rate.
+              return (labels ?? []).join('+').toUpperCase() || 'UNKNOWN';
+            };
+            const usageFromJobs = async (run) => {
+              const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                owner,
+                repo,
+                run_id: run.id,
+                filter: 'latest',
+                per_page: 100,
+              });
+              const billable = {};
+              for (const j of jobs) {
+                // A skipped job never occupies a runner and is never billed.
+                // A job still running has no completed_at; counting a partial
+                // duration would report a number that changes under the reader,
+                // so it is left out and the comment says the run is in flight.
+                if (j.conclusion === 'skipped' || !j.started_at || !j.completed_at) continue;
+                const ms = Math.max(0, new Date(j.completed_at) - new Date(j.started_at));
+                const label = RUNNER_LABEL(j.labels);
+                billable[label] ??= { total_ms: 0, job_runs: [] };
+                billable[label].total_ms += ms;
+                // A job that RAN bills at least one minute, however briefly it
+                // ran — the floor is the whole point of counting jobs rather
+                // than seconds. Timestamps can also come back equal (or
+                // inverted) for a very short job, and a bare ceil() would score
+                // that as free.
+                billable[label].job_runs.push({ job_id: j.id, duration_ms: Math.max(ms, 1) });
+              }
+              return { billable };
+            };
+
             const perRun = [];
             const totals = new Map(); // runner label -> { billed, raw }
             let failed = 0;
+            let estimated = 0;
             for (const run of runs) {
+              const inFlight = run.status !== 'completed';
               let timing;
               try {
-                ({ data: timing } = await github.rest.actions.getWorkflowRunUsage({
-                  owner,
-                  repo,
-                  run_id: run.id,
-                }));
+                if (inFlight) {
+                  estimated++;
+                  timing = await usageFromJobs(run);
+                } else {
+                  ({ data: timing } = await github.rest.actions.getWorkflowRunUsage({
+                    owner,
+                    repo,
+                    run_id: run.id,
+                  }));
+                }
               } catch (e) {
                 failed++;
                 core.warning(`Timing unavailable for run ${run.id}: ${e.message}`);
                 continue;
               }
-              const entry = { run, billed: 0, raw: 0, cost: 0, unpriced: new Set() };
+              const entry = { run, billed: 0, raw: 0, cost: 0, inFlight, unpriced: new Set() };
               for (const [label, usage] of Object.entries(timing.billable ?? {})) {
                 const jobs = usage.job_runs ?? [];
                 // Prefer per-job durations; fall back to the run total when the
@@ -258,7 +310,9 @@ jobs:
             );
             for (const e of perRun.sort((a, b) => a.run.id - b.run.id)) {
               const name = `[${e.run.name} #${e.run.run_number}](${e.run.html_url})`;
-              const current = e.run.id === context.runId ? ' _(this run)_' : '';
+              const current = e.run.id === context.runId
+                ? ' _(this run)_'
+                : e.inFlight ? ' _(still running)_' : '';
               lines.push(
                 `| ${name}${current} | ${e.run.event} | ${mins(e.billed)} | ${money(e.cost)} |`,
               );
@@ -269,8 +323,13 @@ jobs:
             const notes = [
               'Billed minutes round **each job** up to the whole minute, which is how ' +
                 'GitHub bills; wall-clock is the unrounded sum.',
-              'The run posting this comment is still in progress, so its own last few ' +
-                'jobs — this one included — are not yet counted.',
+              'The run posting this comment is still in progress, so jobs that had not ' +
+                'finished when it ran — this one included — are not yet counted. ' +
+                (estimated
+                  ? `${estimated} in-flight run(s) are measured from finished job ` +
+                    'durations rather than the billing endpoint, which reports nothing ' +
+                    'until a run completes; the next push recomputes them exactly.'
+                  : ''),
             ];
             if (truncated) {
               notes.push(
