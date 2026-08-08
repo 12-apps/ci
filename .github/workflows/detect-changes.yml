@@ -5,6 +5,9 @@ name: Detect Changes (reusable)
 #
 #   jobs:
 #     changes:
+#       permissions:
+#         contents: read
+#         pull-requests: read     # REQUIRED — see the permissions note below
 #       uses: 12-apps/ci/.github/workflows/detect-changes.yml@v2
 #       with:
 #         path-filters: |
@@ -82,8 +85,18 @@ on:
         value: ${{ jobs.detect.outputs.any }}
 
 # Least-privilege, enforced at the source. pull-requests: read is what
-# dorny/paths-filter uses to read a PR's file list without a local diff; the
-# effective grant is still the intersection with the caller's.
+# dorny/paths-filter uses to read a PR's file list without a local diff.
+#
+# THE CALLER MUST GRANT BOTH. A called workflow may not request more than its
+# caller grants, so a caller job whose effective permissions are narrower than
+# this — including one that simply inherits a workflow-level `contents: read` —
+# does not fail gracefully: GitHub rejects the ENTIRE RUN at startup, with no
+# jobs, no logs and no annotation naming the missing scope. Declare it on the
+# calling job:
+#
+#   permissions:
+#     contents: read
+#     pull-requests: read
 permissions:
   contents: read
   pull-requests: read

@@ -84,6 +84,12 @@ repo's layout.
 
 ```yaml
   changes:
+    # REQUIRED. A called workflow may not request more than its caller grants,
+    # and this one declares `pull-requests: read` — omit it and the whole RUN is
+    # rejected at startup: no jobs, no logs, just a failed run.
+    permissions:
+      contents: read
+      pull-requests: read
     uses: 12-apps/ci/.github/workflows/detect-changes.yml@v2
     with:
       # YAML (top-level names UNINDENTED, at column 0) or JSON.
@@ -185,11 +191,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# The DEFAULT for jobs that declare no block of their own. A job-level block
+# REPLACES this rather than narrowing it, so a job calling a reusable workflow
+# that needs more (both jobs below) declares the full set it needs.
 permissions:
   contents: read
 
 jobs:
   changes:
+    permissions:
+      contents: read
+      pull-requests: read
     uses: 12-apps/ci/.github/workflows/detect-changes.yml@v2
     with:
       path-filters: |

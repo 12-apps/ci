@@ -1081,8 +1081,14 @@ Two things to read before wiring `detect-changes.yml` in:
   `extra-filters` input instead of adding a second detector job — see the
   FUT-468 note in the *Monorepo CI pipeline* section above, which is the same
   billed-minute regression.
-- `cost-report.yml` needs `pull-requests: write` and `actions: read` at the
-  caller, and `secrets: inherit` — no PAT.
+- **Both need an explicit `permissions:` block on the calling job.**
+  `detect-changes.yml` needs `contents: read` + `pull-requests: read`;
+  `cost-report.yml` needs `pull-requests: write` + `actions: read` and
+  `secrets: inherit` (no PAT). A called workflow may not request more than its
+  caller grants, and getting this wrong does **not** fail gracefully — GitHub
+  rejects the whole run at startup with no jobs, no logs, and no annotation
+  naming the missing scope. A job that inherits a workflow-level
+  `contents: read` is exactly that case.
 
 Both live on `@v2`; `v1` is unchanged.
 
