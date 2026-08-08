@@ -1067,6 +1067,25 @@ config surfaces instead of quietly disabling the gate.
 
 ---
 
+# Consuming the cost report & change detection
+
+Two reusable workflows — `cost-report.yml` (one always-current PR comment
+estimating the PR's runner-minute spend) and `detect-changes.yml` (caller-declared
+path categories → per-category booleans for job `if:`) — plus the concurrency
+snippet every caller should own. They are documented in full, with an end-to-end
+wiring example, in **[README.md](./README.md#cost--smart-execution)**.
+
+Two things to read before wiring `detect-changes.yml` in:
+
+- If your repo already calls `monorepo-static.yml`, put the categories in its
+  `extra-filters` input instead of adding a second detector job — see the
+  FUT-468 note in the *Monorepo CI pipeline* section above, which is the same
+  billed-minute regression.
+- `cost-report.yml` needs `pull-requests: write` and `actions: read` at the
+  caller, and `secrets: inherit` — no PAT.
+
+Both live on `@v2`; `v1` is unchanged.
+
 # Consuming the Commit-message gate
 
 Enforces [Conventional Commits](https://www.conventionalcommits.org/) on a pull
