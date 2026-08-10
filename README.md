@@ -307,3 +307,8 @@ workflow; only bare `vN` refs are.
 ## Use it
 
 See **[CONSUMING.md](./CONSUMING.md)**.
+
+Splitting work into a chain of dependent pull requests? See
+**[STACKED-PRS.md](./STACKED-PRS.md)** — every workflow runs on every pull
+request in a stack, which makes `detect-changes` select the wrong thing unless
+told about the stack, and multiplies the cost of preview deploys.
