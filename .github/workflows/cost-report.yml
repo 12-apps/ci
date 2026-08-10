@@ -311,6 +311,31 @@ jobs:
               `**${mins(totalBilled)} billed min** · **${money(totalCost)}** · ` +
                 `${runs.length} run${runs.length === 1 ? '' : 's'} on this PR`,
               '',
+            );
+
+            // A stacked pull request is one layer of a larger change, and every
+            // layer runs the same workflows. Reported alone, this figure reads as
+            // "what the change cost" when it is really "what this slice cost" —
+            // understating the true total by roughly the size of the stack, on the
+            // one comment whose entire job is to tell you what CI costs.
+            //
+            // The stack's member pull requests are not exposed in the event
+            // payload, so this qualifies the number rather than summing across the
+            // stack: a real total would mean guessing at which pull requests belong
+            // to it. `stack` is absent unless the pull request is in a stack, so
+            // nothing changes for everyone else.
+            const stack = pr.stack;
+            if (stack) {
+              lines.push(
+                `> **Layer ${stack.position} of ${stack.size}** in stack ` +
+                  `#${stack.number}. This covers **this pull request only** — the ` +
+                  'cost of the whole change is the sum across every layer, and each ' +
+                  'layer re-runs whenever the stack is restacked.',
+                '',
+              );
+            }
+
+            lines.push(
               '| Runner | Billed min | Wall-clock min | Est. cost |',
               '|---|---:|---:|---:|',
             );
