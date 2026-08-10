@@ -1,47 +1,58 @@
 name: Release major tag
 
-# Auto-advance the moving major tag (v1) so consumers pinned to `@v1` pick up
-# backwards-compatible changes with no manual force-push. Counterpart to the
-# README policy: "backwards-compatible changes move v1; a breaking change cuts v2".
+# Auto-advance EVERY live moving major tag (v1, v2, …) so consumers pinned to any
+# of them pick up backwards-compatible changes with no manual force-push.
+# Counterpart to the README policy: "backwards-compatible changes move the major;
+# a breaking change cuts the next one".
+#
+# This used to advance a hardcoded `v1`, which silently stranded every other
+# major. `v2` was cut for the additive cost/change-detection line and then never
+# moved again, so `@v2` — the pin the README tells consumers to use, and the one
+# both consumer repos adopted — froze while `@v1` kept tracking main. Every live
+# major now gets the same treatment.
 #
 # Each run is IDEMPOTENT and independent of which push triggered it: it reads
-# main's LIVE tip and the current v1, then advances v1 to the newest commit with
-# NO breaking change between the current v1 and it — i.e. it ships every
+# main's LIVE tip and each major's current commit, then advances that major to the
+# newest commit with NO breaking change between the two — i.e. it ships every
 # compatible commit up to, but never across, a breaking change. A breaking commit
 # (conventional `type!:` / `type(scope)!:` subject, or a `BREAKING CHANGE:`
-# footer) freezes v1 at the last compatible commit before it; cut v2 by hand to
-# go further.
+# footer) freezes the major at the last compatible commit before it; cut the next
+# major by hand (`cut-major-tag.yml`) to go further.
+#
+# Majors advance INDEPENDENTLY, each from wherever it currently sits, so a major
+# that fell behind catches up on its own without dragging the others along and
+# without this workflow needing to know why it lagged.
 #
 # Computing the target from the live tip (not the triggering commit) makes this
 # correct even when a burst of pushes causes GitHub's concurrency group to drop a
 # pending sibling run: whichever run survives still walks the full range and moves
-# v1 to the last compatible commit, so no compatible commit is ever stranded.
+# each major to its last compatible commit, so no compatible commit is stranded.
 
 on:
   push:
     branches: [main]
 
-# Least-privilege: this job's only side effect is writing the tag ref.
+# Least-privilege: this job's only side effect is writing tag refs.
 permissions:
   contents: write
 
 # Serialize tag moves. cancel-in-progress stays false so a running push always
-# finishes; correctness does not depend on it (each run recomputes the target).
+# finishes; correctness does not depend on it (each run recomputes every target).
 concurrency:
   group: release-major-tag
   cancel-in-progress: false
 
 jobs:
   move-major-tag:
-    name: Move v1
+    name: Move major tags
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          # Full history + tags so we can read v1 and walk the range it would ship.
+          # Full history + tags so we can read the majors and walk what they ship.
           fetch-depth: 0
           fetch-tags: true
-      - name: Advance v1 to the newest commit with no breaking change since v1
+      - name: Advance each major to its newest commit with no breaking change
         shell: bash
         run: |
           set -euo pipefail
@@ -56,21 +67,37 @@ jobs:
           breaking_re='^[a-z]+(\([^)]*\))?!:|^BREAKING CHANGE:'
           is_breaking() { git log -1 --format='%s%n%b' "$1" | grep -qE "$breaking_re"; }
 
-          if git rev-parse -q --verify refs/tags/v1 >/dev/null; then
-            cur="$(git rev-parse refs/tags/v1)"
-          else
-            cur=""
-          fi
+          # Only bare `vN` refs are moving majors. vX.Y.Z tags from
+          # release-version.yml are immutable by definition and must never move.
+          majors="$(git tag -l 'v[0-9]*' | grep -E '^v[0-9]+$' | sort -V || true)"
 
-          if [ -z "$cur" ]; then
+          if [ -z "$majors" ]; then
             # Bootstrap: create v1 at the tip unless the tip itself is breaking.
             if is_breaking "$tip"; then
-              echo "No v1 yet and the tip is a breaking change — not creating v1. Cut v2 manually."
+              echo "No major tag yet and the tip is a breaking change — not creating one."
+              echo "Cut the first major by hand with cut-major-tag.yml."
               exit 0
             fi
-            target="$tip"
-          else
-            # Walk (v1, tip] oldest -> newest; target = the last commit before the
+            git tag -f v1 "$tip"
+            git push -f origin refs/tags/v1
+            echo "✓ Bootstrapped v1 -> $tip"
+            exit 0
+          fi
+
+          moved=()
+          while read -r tag; do
+            [ -z "$tag" ] && continue
+
+            # Peel to the COMMIT. A major may be annotated (cut-major-tag.yml and
+            # hand-cut tags produce tag objects), in which case a bare rev-parse
+            # returns the tag object's sha, which would never equal the commit sha
+            # the walk produces — so the "already current" check below would never
+            # fire and the tag would be force-pushed on every single run. The old
+            # hardcoded-v1 version got away with a bare rev-parse only because v1
+            # happened to be lightweight; v2 is annotated.
+            cur="$(git rev-parse "refs/tags/${tag}^{commit}")"
+
+            # Walk (tag, tip] oldest -> newest; target = the last commit before the
             # first breaking one (or tip if none). Ships every compatible commit up
             # to, but never across, a breaking change — so nothing is stranded.
             target="$cur"
@@ -78,14 +105,24 @@ jobs:
               [ -z "$sha" ] && continue
               if is_breaking "$sha"; then break; fi
               target="$sha"
-            done < <(git rev-list --reverse "$cur..$tip")
-          fi
+            done < <(git rev-list --reverse "${cur}..${tip}")
 
-          if [ "$target" = "$cur" ]; then
-            echo "v1 already at the newest shippable commit, or frozen just before a"
-            echo "breaking change. No move — cut v2 manually to release past a break."
+            if [ "$target" = "$cur" ]; then
+              echo "· $tag is already at its newest shippable commit, or frozen just"
+              echo "  before a breaking change. Cut the next major to release past it."
+              continue
+            fi
+
+            git tag -f "$tag" "$target"
+            moved+=("refs/tags/$tag")
+            echo "✓ $tag -> $target"
+          done <<<"$majors"
+
+          if [ ${#moved[@]} -eq 0 ]; then
+            echo "No major tag moved."
             exit 0
           fi
-          git tag -f v1 "$target"
-          git push -f origin "refs/tags/v1"
-          echo "✓ Moved v1 -> $target"
+
+          # One push for every moved major: fewer round trips, and no window where
+          # some majors have advanced and others have not.
+          git push -f origin "${moved[@]}"
