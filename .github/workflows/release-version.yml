@@ -1,0 +1,207 @@
+name: Release version
+
+# Cut an immutable semver tag (vX.Y.Z) and a GitHub Release on every merge to
+# main that ships something releasable. Complements release-major-tag.yml rather
+# than replacing it: that workflow keeps the MOVING majors (@v1, @v2) advancing
+# for consumers who want fixes automatically, while this one gives anyone who
+# wants a pin that never moves under them something to pin to, plus a changelog.
+#
+# The two are independent — different refs, different concurrency groups — so
+# they can run in parallel on the same push without racing.
+#
+# Bump is derived from conventional commit subjects since the last semver tag,
+# using the same breaking-change grammar release-major-tag.yml already enforces:
+#
+#   type!: / type(scope)!: / BREAKING CHANGE: footer  -> major
+#   feat:                                             -> minor
+#   fix: / perf:                                      -> patch
+#   anything else (docs, chore, ci, refactor, test)   -> NO release
+#
+# That last line is deliberate and matches semantic-release, which the consumer
+# repos already use: a docs-only merge should not mint a version that says
+# nothing changed. To release on literally every merge instead, change the
+# `bump=none` default below to `patch`.
+#
+# No package.json, no node_modules, no lockfile — this repo is workflows, bash
+# and docs by design (see #39: "keeps the gate at two dependencies and no supply
+# chain of its own"), and versioning it should not be the thing that changes
+# that. `git` and `gh` are both already on the runner.
+
+on:
+  push:
+    branches: [main]
+
+# Least-privilege: writes a tag ref and a Release, nothing else.
+permissions:
+  contents: write
+
+# Serialize so two pushes cannot compute the same next version and race to claim
+# the tag. cancel-in-progress stays false — a cancelled run here means a merge
+# silently never gets a version.
+concurrency:
+  group: release-version
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Cut version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history + tags: the bump is computed by walking every commit
+          # since the last semver tag, and that tag has to be readable.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Compute the next version and tag it
+        id: version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # Recompute from main's LIVE tip rather than the triggering commit: a
+          # sibling push may be newer, and the concurrency group means whichever
+          # run survives must ship everything, not just its own commit. Read
+          # FETCH_HEAD, not origin/main — `git fetch origin main` updates
+          # FETCH_HEAD but can leave the tracking ref stale, which would strand
+          # a commit. Same reasoning as release-major-tag.yml.
+          git fetch --no-tags --quiet origin main
+          tip="$(git rev-parse FETCH_HEAD)"
+
+          semver_re='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          breaking_re='^[a-z]+(\([^)]*\))?!:|^BREAKING CHANGE:'
+
+          # Newest existing semver tag, by version order (NOT commit date — a tag
+          # can be cut on an older commit).
+          last="$(git tag -l 'v*.*.*' | grep -E "$semver_re" | sort -V | tail -1 || true)"
+
+          if [ -z "$last" ]; then
+            # Bootstrap. Start the semver series at the highest moving major that
+            # already exists so vX.Y.Z and @vX agree about which major this is —
+            # cutting v1.0.0 while consumers follow @v2 would be actively
+            # misleading. No release notes on the bootstrap: there is no previous
+            # tag to diff against, and "everything since the repo began" is not a
+            # changelog anyone reads.
+            major="$(git tag -l 'v[0-9]*' | grep -E '^v[0-9]+$' | sed 's/^v//' | sort -n | tail -1 || true)"
+            [ -z "$major" ] && major=1
+            next="v${major}.0.0"
+            echo "No semver tag yet — bootstrapping the series at $next on the current tip."
+            if git rev-parse -q --verify "refs/tags/$next" >/dev/null; then
+              echo "$next already exists. Nothing to do."
+              echo "released=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            git tag -a "$next" -m "$next" "$tip"
+            git push origin "refs/tags/$next"
+            echo "✓ Created $next at $tip"
+            echo "version=$next" >> "$GITHUB_OUTPUT"
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "bootstrap=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$(git rev-parse "refs/tags/$last^{commit}")" = "$tip" ]; then
+            echo "$last already points at the tip. Nothing to release."
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Walk (last, tip] and take the strongest bump any commit calls for.
+          bump=none
+          while read -r sha; do
+            [ -z "$sha" ] && continue
+            subject="$(git log -1 --format='%s%n%b' "$sha")"
+            if printf '%s' "$subject" | grep -qE "$breaking_re"; then
+              bump=major
+              break                     # nothing outranks major; stop looking
+            elif printf '%s' "$subject" | grep -qE '^feat(\([^)]*\))?:'; then
+              bump=minor
+            elif printf '%s' "$subject" | grep -qE '^(fix|perf)(\([^)]*\))?:' && [ "$bump" = none ]; then
+              bump=patch
+            fi
+          done < <(git rev-list --reverse "${last}..${tip}")
+
+          if [ "$bump" = none ]; then
+            echo "No releasable commit since $last (docs/chore/ci only). No version cut."
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          IFS=. read -r cur_major cur_minor cur_patch <<<"${last#v}"
+          case "$bump" in
+            major) next="v$((cur_major + 1)).0.0" ;;
+            minor) next="v${cur_major}.$((cur_minor + 1)).0" ;;
+            patch) next="v${cur_major}.${cur_minor}.$((cur_patch + 1))" ;;
+          esac
+
+          # Idempotent: a re-run of an already-shipped push must not fail the job.
+          if git rev-parse -q --verify "refs/tags/$next" >/dev/null; then
+            echo "$next already exists — another run shipped this. Nothing to do."
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git tag -a "$next" -m "$next" "$tip"
+          git push origin "refs/tags/$next"
+          echo "✓ $last -> $next ($bump) at $tip"
+
+          {
+            echo "version=$next"
+            echo "previous=$last"
+            echo "bump=$bump"
+            echo "released=true"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Write the release notes
+        if: steps.version.outputs.released == 'true' && steps.version.outputs.bootstrap != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT: ${{ steps.version.outputs.version }}
+          PREVIOUS: ${{ steps.version.outputs.previous }}
+          BUMP: ${{ steps.version.outputs.bump }}
+        run: |
+          set -euo pipefail
+
+          notes="$(mktemp)"
+          range="${PREVIOUS}..${NEXT}"
+
+          section() {
+            # $1 = heading, $2 = grep -E pattern over the subject
+            local body
+            body="$(git log --reverse --format='%s (%h)' "$range" | grep -E "$2" || true)"
+            [ -z "$body" ] && return 0
+            printf '## %s\n\n' "$1" >>"$notes"
+            printf '%s\n' "$body" | sed 's/^/- /' >>"$notes"
+            printf '\n' >>"$notes"
+          }
+
+          # Breaking first — it is the one a reader must not miss.
+          breaking="$(git log --reverse --format='%H %s' "$range" | while read -r sha rest; do
+            git log -1 --format='%s%n%b' "$sha" \
+              | grep -qE '^[a-z]+(\([^)]*\))?!:|^BREAKING CHANGE:' && echo "$rest ($(git rev-parse --short "$sha"))"
+          done || true)"
+          if [ -n "$breaking" ]; then
+            printf '## ⚠️ Breaking changes\n\n' >>"$notes"
+            printf '%s\n' "$breaking" | sed 's/^/- /' >>"$notes"
+            printf '\nConsumers pinned to the previous moving major stay where they are — `release-major-tag.yml` freezes rather than advancing across a break.\n\n' >>"$notes"
+          fi
+
+          section 'Features' '^feat(\([^)]*\))?!?:'
+          section 'Fixes'    '^(fix|perf)(\([^)]*\))?!?:'
+          section 'Other'    '^(docs|chore|ci|refactor|test|style|build)(\([^)]*\))?!?:'
+
+          major="${NEXT%%.*}"           # v1.4.2 -> v1
+          {
+            printf '**Full changelog**: https://github.com/%s/compare/%s...%s\n\n' \
+              "$GITHUB_REPOSITORY" "$PREVIOUS" "$NEXT"
+            printf -- '---\n\n'
+            printf 'Pin `@%s` for a ref that never moves under you. `@%s` keeps following compatible releases.\n' \
+              "$NEXT" "$major"
+          } >>"$notes"
+
+          gh release create "$NEXT" --title "$NEXT" --notes-file "$notes"
+          echo "✓ Published the $NEXT release"

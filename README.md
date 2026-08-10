@@ -238,6 +238,38 @@ Consumers pin the moving major tag `@v1`. Backwards-compatible changes move
 change-detection workflows above. Nothing in `v1` changed behaviour, so existing
 `@v1` consumers are unaffected and need not migrate.
 
+### Two kinds of tag, and which to pin
+
+Every merge to `main` that ships something releasable also cuts an **immutable
+semver tag** (`release-version.yml`), so there are two things you can pin and
+they answer different questions:
+
+| Pin | Moves? | Pin it when |
+|---|---|---|
+| `@v2` | yes — follows compatible releases | you want fixes without doing anything |
+| `@v2.3.1` | never | you need a ref that cannot change under you |
+
+Both are cut from the same commit; the semver tag is additive and changes
+nothing for existing `@v1` / `@v2` consumers.
+
+The bump comes from conventional commit subjects since the previous semver tag,
+using the same grammar the moving-major workflow already enforces:
+
+| Commit | Bump |
+|---|---|
+| `type!:` / `type(scope)!:` / `BREAKING CHANGE:` footer | major |
+| `feat:` | minor |
+| `fix:` / `perf:` | patch |
+| `docs:`, `chore:`, `ci:`, `refactor:`, `test:`, `style:`, `build:` | **none** |
+
+A docs-only merge deliberately cuts no version — it would mint a release whose
+notes say nothing changed. This matches semantic-release, which the consumer
+repos already run.
+
+Each release carries generated notes grouped into breaking / features / fixes,
+plus a compare link. Breaking changes are called out first, with a reminder that
+`@v1` and `@v2` freeze rather than advancing across one.
+
 ### Cutting a major tag by hand
 
 `release-major-tag.yml` advances `v1` automatically and freezes rather than
