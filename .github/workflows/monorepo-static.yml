@@ -92,6 +92,32 @@ on:
         type: string
         required: false
         default: ''
+      stack-aware:
+        description: >-
+          On a STACKED pull request, treat the STACK's base as the diff base for
+          both selection mechanisms in this tier. Off by default.
+
+          Mid-stack, a pull request's base is the branch BELOW it, so both the
+          path filter and `turbo --affected` see one layer only. A layer that
+          changes package B on top of a layer that changed package A selects
+          only B, and A's lint/type-check never run even though the merged
+          result contains both. This fails OPEN — the tier goes green having
+          skipped work it should have done.
+
+          BOTH selectors are told, because they answer different halves of the
+          question and both are stack-blind by default: the path filter bounds
+          WHETHER this tier runs (its `base` becomes the stack base), and
+          `turbo --affected` bounds WHICH packages it runs for (its
+          `TURBO_SCM_BASE` becomes the stack base). Fixing one and not the other
+          would leave the tier selecting correctly at one level and wrongly at
+          the other, which is harder to spot than fixing neither.
+
+          Off by default because GitHub ships stacked pull requests as a PUBLIC
+          PREVIEW "subject to change", and this repo hands workflows to
+          consumers on a moving major tag. No effect off a stack.
+        type: boolean
+        required: false
+        default: false
       probe-scripts:
         description: >-
           Optional newline-separated list of root `package.json` script names
@@ -169,9 +195,39 @@ jobs:
       workflows: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.workflows }}
       matched: ${{ (github.event_name != 'pull_request' && steps.spec.outputs.names || steps.filter.outputs.changes) || '[]' }}
       scripts: ${{ steps.probe.outputs.scripts || '[]' }}
+      # Empty off a stack. Exposed as a job output because the turbo lanes below
+      # are separate JOBS — a `steps.` context does not cross a job boundary, so
+      # they read it through `needs.changes.outputs.stack-base`.
+      stack-base: ${{ steps.stackbase.outputs.value }}
     steps:
+      # Resolved before the checkout, because the checkout's depth depends on
+      # the answer. Empty unless the caller opted in AND this pull request is
+      # actually in a stack — `stack` is absent on an unstacked pull request and
+      # on every non-pull_request event, so everything below collapses to the
+      # previous behaviour in all of those cases.
+      - name: Resolve the stack base
+        id: stackbase
+        shell: bash
+        env:
+          STACK_BASE: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.sha || '' }}
+        run: |
+          set -euo pipefail
+          echo "value=$STACK_BASE" >> "$GITHUB_OUTPUT"
+          if [ -n "$STACK_BASE" ]; then
+            echo "Stacked pull request — selecting against the stack base: $STACK_BASE"
+          else
+            echo "Not a stacked pull request (or stack-aware is off) — default selection."
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # A stack base is a raw sha that only local history can resolve, so
+          # those runs need the full clone. Quoted '0' deliberately: GitHub
+          # expressions treat bare 0 as falsy, so `cond && 0 || 1` would always
+          # yield 1 and the filter would fail on a shallow clone with a "bad
+          # object" error nothing here would explain.
+          fetch-depth: ${{ steps.stackbase.outputs.value != '' && '0' || '1' }}
 
       # dorny/paths-filter takes its filter spec as a YAML string; build it
       # from the newline-list input so consumers pass plain globs, not YAML.
@@ -281,6 +337,9 @@ jobs:
         if: github.event_name == 'pull_request'
         with:
           filters: ${{ steps.spec.outputs.yaml }}
+          # Empty off a stack, which is what dorny already defaults to (the PR
+          # base), so this is a no-op for every unstacked run.
+          base: ${{ steps.stackbase.outputs.value }}
 
   lint:
     name: Lint
@@ -320,6 +379,21 @@ jobs:
           key: turbo-lint-${{ github.sha }}
           restore-keys: |
             turbo-lint-
+
+      # `turbo --affected` derives base...head from GITHUB_BASE_REF, which
+      # mid-stack is the branch BELOW this pull request — so it would select
+      # only this layer's packages and silently skip every package the layers
+      # underneath touched. TURBO_SCM_BASE overrides that base.
+      #
+      # Written to GITHUB_ENV from a CONDITIONAL step rather than declared as a
+      # job-level `env:` that resolves to '' off a stack: turbo documents
+      # TURBO_SCM_BASE as "base used by --affected" but does NOT document how it
+      # treats an empty value, and an unset variable is the only behaviour we
+      # can be sure of. Skipped step -> variable never set -> turbo's default.
+      - name: Point turbo --affected at the stack base
+        if: needs.changes.outputs.stack-base != ''
+        shell: bash
+        run: echo "TURBO_SCM_BASE=${{ needs.changes.outputs.stack-base }}" >> "$GITHUB_ENV"
 
       - name: Lint
         shell: bash
@@ -380,6 +454,14 @@ jobs:
           key: turbo-typecheck-${{ github.sha }}
           restore-keys: |
             turbo-typecheck-
+
+      # Same reasoning as the lint lane: mid-stack, turbo's default base is the
+      # layer below, so type-check would skip the packages the lower layers
+      # touched. See the note there for why this is a conditional step.
+      - name: Point turbo --affected at the stack base
+        if: needs.changes.outputs.stack-base != ''
+        shell: bash
+        run: echo "TURBO_SCM_BASE=${{ needs.changes.outputs.stack-base }}" >> "$GITHUB_ENV"
 
       - name: Type check
         shell: bash
