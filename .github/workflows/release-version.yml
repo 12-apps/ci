@@ -62,6 +62,17 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Release tags here are ANNOTATED (git tag -a), unlike the lightweight
+          # moving majors that release-major-tag.yml force-pushes. Annotated tags
+          # carry a tagger date and are what `git describe --tags` prefers, which
+          # is worth having on an immutable version — but they are objects with
+          # an author, so they need a committer identity the runner does not set
+          # by default. Without this the tag command fails with "empty ident
+          # name"; the lightweight `git tag -f` in the sibling workflows never
+          # needs it, which is why only this workflow has to configure it.
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
           # Recompute from main's LIVE tip rather than the triggering commit: a
           # sibling push may be newer, and the concurrency group means whichever
           # run survives must ship everything, not just its own commit. Read
