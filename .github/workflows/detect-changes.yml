@@ -55,10 +55,35 @@ on:
       base:
         description: >-
           Git ref the diff is taken against. Empty (default) lets the filter pick:
-          the PR base for `pull_request`, the before-sha for `push`.
+          the PR base for `pull_request`, the before-sha for `push`. Takes
+          precedence over `stack-aware`.
         type: string
         required: false
         default: ''
+      stack-aware:
+        description: >-
+          On a STACKED pull request, diff against the stack's base instead of
+          this pull request's immediate base. Off by default.
+
+          Mid-stack, a pull request's base is the branch BELOW it, so the default
+          diff sees only that one layer. A layer that changes package B on top of
+          a layer that changed package A reports only B — and A's suites get
+          skipped even though the merged result contains both. Diffing against
+          the stack base reports what the whole stack touches, which is what
+          "should this suite run" actually depends on.
+
+          Costs a full-history checkout on stacked pull requests (the filter has
+          to resolve a sha locally rather than reading the PR's file list from the
+          API), so `fetch-depth` is forced to 0 for those runs.
+
+          No effect when the pull request is not in a stack, or on other events —
+          the metadata this reads only exists on stacked pull requests, so the
+          behaviour is unchanged everywhere else. Off by default because GitHub
+          ships stacked pull requests as a PUBLIC PREVIEW "subject to change",
+          and this repo hands workflows to consumers on a moving major tag.
+        type: boolean
+        required: false
+        default: false
       fetch-depth:
         description: >-
           Checkout depth. 0 (full history) is only needed when `base` names a ref
@@ -173,16 +198,51 @@ jobs:
           console.error(`Declared categories: ${unique.join(", ")}`);
           EOF
 
+      # Resolve the diff base BEFORE the checkout, since the checkout's own
+      # condition and depth depend on the answer. Explicit `base` always wins;
+      # the stack base is only consulted when the caller opted in AND the pull
+      # request is actually in a stack. `stack` is absent on an unstacked pull
+      # request and on every non-pull_request event, so this collapses to the
+      # previous behaviour in all of those cases.
+      - name: Resolve the diff base
+        id: base
+        if: ${{ !inputs.force-all }}
+        shell: bash
+        env:
+          EXPLICIT: ${{ inputs.base }}
+          STACK_BASE: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.sha || '' }}
+        run: |
+          set -euo pipefail
+          if [ -n "$EXPLICIT" ]; then
+            echo "value=$EXPLICIT"   >> "$GITHUB_OUTPUT"
+            echo "from-stack=false"  >> "$GITHUB_OUTPUT"
+            echo "Diffing against the caller's explicit base: $EXPLICIT"
+          elif [ -n "$STACK_BASE" ]; then
+            echo "value=$STACK_BASE" >> "$GITHUB_OUTPUT"
+            echo "from-stack=true"   >> "$GITHUB_OUTPUT"
+            echo "Stacked pull request — diffing against the stack base: $STACK_BASE"
+          else
+            echo "value="            >> "$GITHUB_OUTPUT"
+            echo "from-stack=false"  >> "$GITHUB_OUTPUT"
+            echo "Letting the filter pick the base (PR base, or the push before-sha)."
+          fi
+
       - name: Checkout
         # A local checkout is only needed when the filter has to resolve a ref
         # itself. On `pull_request` dorny reads the PR's file list from the API,
         # so skipping the checkout there saves the clone on the most frequent
         # event — but `force-all` skips the filter entirely, so nothing is
         # needed then either.
-        if: ${{ !inputs.force-all && (github.event_name != 'pull_request' || inputs.base != '') }}
+        if: ${{ !inputs.force-all && (github.event_name != 'pull_request' || steps.base.outputs.value != '') }}
         uses: actions/checkout@v4
         with:
-          fetch-depth: ${{ inputs.fetch-depth }}
+          # A stack base is a raw sha that only a local history can resolve, so
+          # those runs need the full clone regardless of what the caller asked
+          # for. Quoted '0' deliberately: GitHub expressions treat bare 0 as
+          # falsy, so `... && 0 || inputs.fetch-depth` would silently always
+          # yield the caller's depth and the resolve would fail on a shallow
+          # clone — with a "bad object" error nothing here would explain.
+          fetch-depth: ${{ steps.base.outputs.from-stack == 'true' && '0' || inputs.fetch-depth }}
 
       - name: Filter changed paths
         id: filter
@@ -190,7 +250,7 @@ jobs:
         uses: dorny/paths-filter@v3
         with:
           filters: ${{ inputs.path-filters }}
-          base: ${{ inputs.base }}
+          base: ${{ steps.base.outputs.value }}
           # A JSON array of the filter names that matched — the one output whose
           # shape does not depend on the caller's category names, so it is the
           # only one a generic workflow can forward.
