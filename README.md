@@ -231,8 +231,9 @@ jobs:
 
 ## Versioning
 
-Consumers pin the moving major tag `@v1`. Backwards-compatible changes move
-`v1`; a breaking change cuts `v2`.
+Consumers pin a moving major tag — `@v2` is current. Backwards-compatible changes
+move **every** live major; a breaking change freezes them all and the next major
+is cut by hand.
 
 `v2` is an **additive** line: it carries everything `v1` has plus the cost and
 change-detection workflows above. Nothing in `v1` changed behaviour, so existing
@@ -272,7 +273,7 @@ plus a compare link. Breaking changes are called out first, with a reminder that
 
 ### Cutting a major tag by hand
 
-`release-major-tag.yml` advances `v1` automatically and freezes rather than
+`release-major-tag.yml` advances the majors automatically and freezes rather than
 crossing a breaking change. Cutting the next major is the manual step, and
 **Actions → Cut major tag → Run workflow** (`cut-major-tag.yml`) is how:
 
@@ -283,16 +284,25 @@ crossing a breaking change. Cutting the next major is the manual step, and
 | `force` | move an existing tag — off by default |
 
 It runs with `contents: write` inside Actions, which is the same capability that
-already moves `v1` — so cutting a tag needs no local credential that happens to
-be allowed to push tag refs. Moving an existing major is refused unless `force`
-is set: every consumer pinned to that tag would follow it with nothing to
-review.
+already moves the majors — so cutting a tag needs no local credential that
+happens to be allowed to push tag refs. Moving an existing major is refused
+unless `force` is set: every consumer pinned to that tag would follow it with
+nothing to review.
 
-`v1` moves **automatically**: `.github/workflows/release-major-tag.yml` re-points
-it to every push on `main` — no manual force-push. Commits marked breaking
-(conventional `type!:` / `type(scope)!:` subject, or a `BREAKING CHANGE:` footer)
-are skipped, so a breaking change never auto-ships to `@v1`; cut `v2` by hand for
-those.
+### How the majors move
+
+`.github/workflows/release-major-tag.yml` re-points **every** live `vN` tag on
+each push to `main` — no manual force-push. Commits marked breaking (conventional
+`type!:` / `type(scope)!:` subject, or a `BREAKING CHANGE:` footer) are never
+crossed, so a breaking change auto-ships to no major; cut the next one by hand
+for those.
+
+Each major advances **independently, from wherever it currently sits**, so a
+major that fell behind catches up on its own. That matters because it didn't use
+to: the workflow advanced a hardcoded `v1`, which left `v2` frozen at the commit
+it was cut on while `@v1` kept tracking `main` — the opposite of what this
+section told you to pin. Immutable `vX.Y.Z` tags are never moved by this
+workflow; only bare `vN` refs are.
 
 ## Use it
 
