@@ -73,6 +73,31 @@ on:
         type: string
         required: false
         default: 'main'
+      stack-aware:
+        description: >-
+          On a STACKED pull request, select against the STACK's base rather than
+          this pull request's immediate base. Off by default.
+
+          Mid-stack, a pull request's base is the branch BELOW it, so every
+          selector in this tier sees one layer only and skips whatever the lower
+          layers touched — the tier goes green having tested less. Three things
+          are redirected, and they are not independent:
+
+            * `turbo --affected` in the unit and build lanes, via
+              TURBO_SCM_BASE.
+            * the base branch fetched by the unit lane, so FETCH_HEAD points at
+              the stack base. That one also fixes CONSUMER selectors: a caller
+              passing `unit-test-command: CI_AFFECTED_BASE=FETCH_HEAD ...` gets
+              the corrected base with no change on its side.
+            * the build lane's base, which has no fetch of its own and would
+              otherwise have no local commit to diff against.
+
+          Off by default because GitHub ships stacked pull requests as a PUBLIC
+          PREVIEW "subject to change", and this repo hands workflows to
+          consumers on a moving major tag. No effect off a stack.
+        type: boolean
+        required: false
+        default: false
       run-build:
         description: 'Run the turbo build lane.'
         type: boolean
@@ -189,10 +214,28 @@ jobs:
           UNIT_CMD: ${{ inputs.unit-test-command }}
           UNIT_FULL_CMD: ${{ inputs.unit-full-command }}
           DEFAULT_BRANCH: ${{ inputs.default-branch }}
+          # Empty unless the caller opted in AND this pull request is in a stack.
+          STACK_BASE_REF: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
+          STACK_BASE_SHA: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.sha || '' }}
         run: |
           set -o pipefail
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF:-$DEFAULT_BRANCH}"
+            if [ -n "$STACK_BASE_SHA" ]; then
+              # Mid-stack, GITHUB_BASE_REF is the branch BELOW this pull request.
+              # Fetching the STACK's base instead fixes both selectors at once:
+              # FETCH_HEAD (which consumer commands diff against, e.g.
+              # `CI_AFFECTED_BASE=FETCH_HEAD`) and turbo's own --affected base,
+              # so a caller gets the corrected base without changing its command.
+              #
+              # TURBO_SCM_BASE is exported only on this branch rather than set to
+              # '' otherwise: turbo documents the variable but not how it treats
+              # an empty value, and unset is the only behaviour to rely on.
+              git fetch --no-tags --depth=1 origin "$STACK_BASE_REF"
+              export TURBO_SCM_BASE="$STACK_BASE_SHA"
+              echo "Stacked pull request — selecting against $STACK_BASE_REF ($STACK_BASE_SHA)"
+            else
+              git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF:-$DEFAULT_BRANCH}"
+            fi
             bash -c "$UNIT_CMD" 2>&1 | tee unit.log
           else
             bash -c "$UNIT_FULL_CMD" 2>&1 | tee unit.log
@@ -251,6 +294,24 @@ jobs:
           key: turbo-build-${{ github.sha }}
           restore-keys: |
             turbo-build-
+
+      # Unlike the unit lane, this one has no base fetch of its own — it relies
+      # on turbo deriving the base from GITHUB_BASE_REF, which mid-stack is the
+      # layer below. Pointing turbo at the stack base therefore also means
+      # fetching it: the sha has to exist locally or turbo cannot diff against
+      # it. Conditional step, so off a stack nothing is fetched and nothing is
+      # set, exactly as before.
+      - name: Point turbo --affected at the stack base
+        if: ${{ inputs.stack-aware && github.event.pull_request.stack != null }}
+        shell: bash
+        env:
+          STACK_BASE_REF: ${{ github.event.pull_request.stack.base.ref }}
+          STACK_BASE_SHA: ${{ github.event.pull_request.stack.base.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$STACK_BASE_REF"
+          echo "TURBO_SCM_BASE=$STACK_BASE_SHA" >> "$GITHUB_ENV"
+          echo "Stacked pull request — build --affected diffs against $STACK_BASE_REF ($STACK_BASE_SHA)"
 
       - name: Build
         shell: bash
