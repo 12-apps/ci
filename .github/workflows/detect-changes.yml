@@ -244,9 +244,94 @@ jobs:
           # clone — with a "bad object" error nothing here would explain.
           fetch-depth: ${{ steps.base.outputs.from-stack == 'true' && '0' || inputs.fetch-depth }}
 
+      # ── Stacked pull requests take a different path, because dorny cannot ────
+      # dorny/paths-filter honours `base` ONLY on push/workflow_dispatch. On a
+      # pull_request it ignores the input entirely and reads the PR's file list
+      # from the API, announcing it as:
+      #
+      #   'base' input parameter is ignored when action is triggered by pull
+      #    request event
+      #
+      # That list is the pull request's OWN diff — mid-stack, the top layer
+      # alone. So passing the stack base to dorny looks correct, logs correct,
+      # and changes nothing. This was verified the hard way on a real stacked
+      # pull request: the right sha went in and one layer's files came out.
+      #
+      # git does the globbing here instead of dorny. The categories' globs become
+      # `:(glob)` pathspecs and git reports whether the stack-base..head diff
+      # touches any of them. That needs no new dependency, which matters in a
+      # repo that deliberately has none — and `:(glob)` handles `**` the way
+      # these specs assume. It relies on the specs being POSITIVE globs only,
+      # which is already a documented rule for both this input and
+      # monorepo-static's (no `!` negations under predicate-quantifier: some).
+      - name: Filter changed paths against the stack base
+        id: stackfilter
+        if: ${{ !inputs.force-all && steps.base.outputs.from-stack == 'true' }}
+        shell: bash
+        env:
+          FILTERS: ${{ inputs.path-filters }}
+          BASE: ${{ steps.base.outputs.value }}
+        run: |
+          set -euo pipefail
+
+          # Spec -> one line per category: "name<TAB>glob<TAB>glob...". Same two
+          # accepted shapes as the names step: JSON object, or YAML whose
+          # top-level keys sit at column 0.
+          spec="$(node <<'EOF'
+          const raw = process.env.FILTERS ?? "";
+          const out = [];
+          if (raw.trimStart().startsWith("{")) {
+            for (const [name, globs] of Object.entries(JSON.parse(raw))) {
+              out.push([name, ...[].concat(globs)].join("\t"));
+            }
+          } else {
+            let cur = null, globs = [];
+            const flush = () => { if (cur) out.push([cur, ...globs].join("\t")); };
+            for (const line of raw.split("\n")) {
+              if (!line.trim() || line.trimStart().startsWith("#")) continue;
+              const top = line.match(/^([A-Za-z0-9_.-]+):\s*(.*)$/);
+              if (top) {
+                flush();
+                cur = top[1]; globs = [];
+                const inline = top[2].trim();
+                // Flow style on the same line: web: ['apps/web/**']
+                if (inline.startsWith("[")) {
+                  globs = JSON.parse(inline.replace(/'/g, '"'));
+                }
+                continue;
+              }
+              const item = line.match(/^\s*-\s*(.+?)\s*$/);
+              if (item && cur) globs.push(item[1].replace(/^['"]|['"]$/g, ""));
+            }
+            flush();
+          }
+          console.log(out.join("\n"));
+          EOF
+          )"
+
+          matched=()
+          while IFS=$'\t' read -r -a row; do
+            [ "${#row[@]}" -gt 1 ] || continue
+            name="${row[0]}"
+            pathspecs=()
+            for g in "${row[@]:1}"; do pathspecs+=(":(glob)$g"); done
+            # Three-dot: changes since the merge-base, which is what a reviewer
+            # means by "what this stack changes" and what dorny uses too.
+            if [ -n "$(git diff --name-only "${BASE}...HEAD" -- "${pathspecs[@]}")" ]; then
+              matched+=("$name")
+              echo "· $name matched"
+            fi
+          done <<<"$spec"
+
+          printf '%s\n' "${matched[@]+"${matched[@]}"}" \
+            | node -e "const l=require('fs').readFileSync(0,'utf8').split('\n').filter(Boolean);console.log('changes='+JSON.stringify(l))" \
+            >> "$GITHUB_OUTPUT"
+
       - name: Filter changed paths
         id: filter
-        if: ${{ !inputs.force-all }}
+        # Skipped on a stacked pull request — the step above did it with a base
+        # dorny would have ignored.
+        if: ${{ !inputs.force-all && steps.base.outputs.from-stack != 'true' }}
         uses: dorny/paths-filter@v3
         with:
           filters: ${{ inputs.path-filters }}
@@ -265,7 +350,10 @@ jobs:
         shell: bash
         env:
           NAMES: ${{ steps.names.outputs.names }}
-          MATCHED: ${{ steps.filter.outputs.changes }}
+          # Exactly one of these two ran (or neither, under force-all): the
+          # stacked path when dorny could not be told the right base, the dorny
+          # path otherwise. Both emit the same JSON-array-of-names shape.
+          MATCHED: ${{ steps.stackfilter.outputs.changes || steps.filter.outputs.changes }}
           FORCE_ALL: ${{ inputs.force-all }}
         run: |
           set -euo pipefail
