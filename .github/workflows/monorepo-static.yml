@@ -191,9 +191,13 @@ jobs:
     # reads them through `fromJSON`, and `fromJSON('')` is a hard expression
     # error, so they must never resolve empty.
     outputs:
-      code: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.code }}
-      workflows: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.workflows }}
-      matched: ${{ (github.event_name != 'pull_request' && steps.spec.outputs.names || steps.filter.outputs.changes) || '[]' }}
+      # Exactly one of `stackfilter` / `filter` runs on a pull_request — the
+      # stacked path when dorny could not be told the right base, dorny
+      # otherwise. A skipped step's outputs are empty, so `||` picks the one that
+      # ran. Both emit the same shapes: '<name>=true|false' and a JSON `changes`.
+      code: ${{ github.event_name != 'pull_request' && 'true' || steps.stackfilter.outputs.code || steps.filter.outputs.code }}
+      workflows: ${{ github.event_name != 'pull_request' && 'true' || steps.stackfilter.outputs.workflows || steps.filter.outputs.workflows }}
+      matched: ${{ (github.event_name != 'pull_request' && steps.spec.outputs.names || steps.stackfilter.outputs.changes || steps.filter.outputs.changes) || '[]' }}
       scripts: ${{ steps.probe.outputs.scripts || '[]' }}
       # Empty off a stack. Exposed as a job output because the turbo lanes below
       # are separate JOBS — a `steps.` context does not cross a job boundary, so
@@ -331,15 +335,68 @@ jobs:
             | node -e "const l=require('fs').readFileSync(0,'utf8').split('\n').filter(Boolean);console.log('scripts='+JSON.stringify(l))" \
             >> "$GITHUB_OUTPUT"
 
+      # ── Stacked pull requests cannot go through dorny ────────────────────────
+      # dorny/paths-filter honours `base` only on push/workflow_dispatch. On a
+      # pull_request it ignores it and reads the PR's own file list from the API
+      # — mid-stack, the top layer alone. Passing the stack base therefore looked
+      # right and did nothing, which a real stacked pull request proved: the
+      # correct sha went in, one layer's files came out.
+      #
+      # git does the globbing instead. Each category's globs become `:(glob)`
+      # pathspecs and git reports whether the stack-base..head diff touches any
+      # of them — no new dependency, and `:(glob)` handles `**` the way these
+      # specs assume. Relies on the positive-globs-only rule already documented
+      # for `code-paths` and `extra-filters`.
+      - name: Check for code changes against the stack base
+        id: stackfilter
+        if: ${{ github.event_name == 'pull_request' && steps.stackbase.outputs.value != '' }}
+        shell: bash
+        env:
+          SPEC: ${{ steps.spec.outputs.yaml }}
+          BASE: ${{ steps.stackbase.outputs.value }}
+        run: |
+          set -euo pipefail
+          # The generated spec is always block-style YAML with names at column 0.
+          parsed="$(node <<'EOF'
+          const raw = process.env.SPEC ?? "";
+          const out = []; let cur = null, globs = [];
+          const flush = () => { if (cur) out.push([cur, ...globs].join("\t")); };
+          for (const line of raw.split("\n")) {
+            if (!line.trim() || line.trimStart().startsWith("#")) continue;
+            const top = line.match(/^([A-Za-z0-9_.-]+):\s*$/);
+            if (top) { flush(); cur = top[1]; globs = []; continue; }
+            const item = line.match(/^\s*-\s*(.+?)\s*$/);
+            if (item && cur) globs.push(item[1].replace(/^['"]|['"]$/g, ""));
+          }
+          flush();
+          console.log(out.join("\n"));
+          EOF
+          )"
+
+          matched=()
+          while IFS=$'\t' read -r -a row; do
+            [ "${#row[@]}" -gt 1 ] || continue
+            name="${row[0]}"; pathspecs=()
+            for g in "${row[@]:1}"; do pathspecs+=(":(glob)$g"); done
+            if [ -n "$(git diff --name-only "${BASE}...HEAD" -- "${pathspecs[@]}")" ]; then
+              matched+=("$name"); echo "$name=true" >> "$GITHUB_OUTPUT"; echo "· $name matched"
+            else
+              echo "$name=false" >> "$GITHUB_OUTPUT"
+            fi
+          done <<<"$parsed"
+
+          printf '%s\n' "${matched[@]+"${matched[@]}"}" \
+            | node -e "const l=require('fs').readFileSync(0,'utf8').split('\n').filter(Boolean);console.log('changes='+JSON.stringify(l))" \
+            >> "$GITHUB_OUTPUT"
+
       - name: Check for code changes
         uses: dorny/paths-filter@v3
         id: filter
-        if: github.event_name == 'pull_request'
+        # Skipped on a stacked pull request — the step above did it with a base
+        # dorny would have ignored.
+        if: ${{ github.event_name == 'pull_request' && steps.stackbase.outputs.value == '' }}
         with:
           filters: ${{ steps.spec.outputs.yaml }}
-          # Empty off a stack, which is what dorny already defaults to (the PR
-          # base), so this is a no-op for every unstacked run.
-          base: ${{ steps.stackbase.outputs.value }}
 
   lint:
     name: Lint
