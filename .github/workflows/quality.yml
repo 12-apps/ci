@@ -1126,11 +1126,17 @@ jobs:
         run: echo "hash=$PRE_HASH" >> "$GITHUB_OUTPUT"
       # Runs only the specs the diff affects; full suite on shared/unmapped
       # changes; nothing on docs-only. Self-skips (exit 0) when nothing is affected.
+      # `--depth=1` here grafted the `fetch-depth: 0` checkout into a shallow
+      # repository, which is the one thing the affected selector cannot work
+      # without: its three-dot diff against FETCH_HEAD then fails and the
+      # selection widens (or, where the failure is swallowed, empties).
+      - name: Fetch the base for affected selection
+        uses: 12-apps/ci/.github/actions/fetch-base@v1
+
       - name: Run affected e2e specs
         shell: bash
         run: |
           set -o pipefail
-          git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF:-main}"
           pnpm test:e2e:affected 2>&1 | tee e2e-affected.log
       # Save even when the run FAILS — the failures are what the next run's
       # failed-first phase re-hits (actions/cache's built-in post step skips
@@ -1171,6 +1177,9 @@ jobs:
       # then costs a checkout instead of a full setup. The pattern is a
       # SUPERSET of the consumer's own filter (see e2e-spec-pattern) — a false
       # positive only pays the setup, the script still decides precisely.
+      - name: Fetch the base for the changed-spec probe
+        uses: 12-apps/ci/.github/actions/fetch-base@v1
+
       - name: Detect changed e2e specs
         id: changed-specs
         shell: bash
@@ -1178,8 +1187,23 @@ jobs:
           SPEC_PATTERN: ${{ inputs.e2e-spec-pattern }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF:-main}"
-          changed=$(git diff --name-only --diff-filter=d "FETCH_HEAD...HEAD" | grep -E "$SPEC_PATTERN" || true)
+          # This probe FAILS SILENTLY in the dangerous direction. `|| true`
+          # covers the grep finding nothing, but it also swallowed the diff
+          # itself dying — and after the old `--depth=1` fetch grafted this
+          # checkout, `FETCH_HEAD...HEAD` died with "no merge base" on every
+          # run whose base had advanced. `changed` came back empty, `any=false`,
+          # and the reliability gate skipped itself while reporting success.
+          # The fetch above keeps the merge base resolvable; this guard makes a
+          # future breakage loud instead of a silent pass.
+          if ! git rev-parse --verify --quiet FETCH_HEAD >/dev/null; then
+            echo "::error::no FETCH_HEAD — cannot tell which e2e specs changed"
+            exit 1
+          fi
+          if ! diff_out=$(git diff --name-only --diff-filter=d "FETCH_HEAD...HEAD"); then
+            echo "::error::three-dot diff against FETCH_HEAD failed — refusing to report 'no specs changed'"
+            exit 1
+          fi
+          changed=$(printf '%s\n' "$diff_out" | grep -E "$SPEC_PATTERN" || true)
           if [ -n "$changed" ]; then
             echo "any=true" >> "$GITHUB_OUTPUT"
             echo "changed e2e specs:"
@@ -1237,5 +1261,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF:-main}"
+          # No base fetch here: the probe step above already fetched it in this
+          # same job, and repeating it with `--depth=1` re-grafted the checkout
+          # shallow immediately before handing it to the script that diffs.
           pnpm test:e2e:reliability 2>&1 | tee e2e-reliability.log

@@ -1092,6 +1092,66 @@ Two things to read before wiring `detect-changes.yml` in:
 
 Both live on `@v2`; `v1` is unchanged.
 
+# Fetching a PR base you can actually diff against
+
+The reusable workflows here already do this for their own lanes. This section is
+for a repo that runs **its own** `turbo --affected` job, or any gate that diffs
+against the base.
+
+**Never `git fetch --depth=<n> origin <base>` for that.** A depth-limited fetch
+does not simply fetch less: on a complete checkout it *grafts the repository
+shallow* (git writes `.git/shallow`), and merge-base traversals across the graft
+point then fail outright. Measured on a scratch repo pair:
+
+```
+is-shallow after a full clone:       false
+merge-base BEFORE the depth-1 fetch: 9f1a52c…   ← the branch point was right there
+is-shallow AFTER the depth-1 fetch:  true
+merge-base AFTER the depth-1 fetch:  fatal: no merge base
+```
+
+The repository *had* the answer and the fetch threw it away. Both directions of
+the fallout are green, which is what makes it expensive to notice:
+
+- `turbo --affected` prints `unable to detect git range, assuming all files have
+  changed` and runs **every** package — a full run wearing the word "affected";
+- a gate that greps a three-dot diff and swallows errors (`|| true`) sees an
+  empty file list and **skips itself**, reporting success.
+
+A bigger number is not the fix — `--depth=50` only moves the cliff to the branch
+that diverged 51 commits ago, and it fails the same silent way. Use the action:
+
+```yaml
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # or leave it shallow; the action deepens as needed
+
+      - name: Fetch the base
+        id: base
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/fetch-base@v1
+
+      - name: Build
+        run: pnpm turbo run build --affected
+        env:
+          # Pin turbo to a SHA that exists locally. Left alone it resolves
+          # GITHUB_BASE_REF by NAME, and a pull request checkout has no local
+          # `main` branch — the same "assume everything changed" full run,
+          # reached by another route. turbo honours the PAIR, not
+          # TURBO_SCM_BASE alone.
+          TURBO_SCM_BASE: ${{ steps.base.outputs.base-sha }}
+          TURBO_SCM_HEAD: HEAD
+```
+
+It leaves `FETCH_HEAD` at the base tip (so an existing three-dot diff keeps
+working unchanged), deepens only when the checkout was genuinely shallow, and
+outputs `merge-base` and `base-sha`.
+
+**Treat an empty output as "run everything", never as "nothing changed".** Both
+outputs are empty only when the histories are unrelated — precisely the case
+where narrowing would be a silent skip. Needs `node` on the runner (every
+GitHub-hosted runner has it).
+
 # Consuming the Commit-message gate
 
 Enforces [Conventional Commits](https://www.conventionalcommits.org/) on a pull

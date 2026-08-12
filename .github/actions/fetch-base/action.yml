@@ -1,0 +1,44 @@
+name: 'Fetch PR base (merge-base safe)'
+description: >-
+  Fetch a pull request's base ref so `git merge-base <base> HEAD`, three-dot
+  diffs and `turbo --affected` all work. Replaces `git fetch --depth=1 origin
+  <base>`, which GRAFTS a complete checkout into a shallow one and breaks every
+  one of those — silently, by making selectors either run everything or skip
+  everything. Leaves FETCH_HEAD at the base tip and reports the merge base.
+
+inputs:
+  base-ref:
+    description: >-
+      Base branch to fetch (e.g. the PR base, or a stack's base ref). Defaults
+      to GITHUB_BASE_REF, falling back to main on a non-PR event.
+    required: false
+    default: ''
+  fallback-branch:
+    description: 'Branch used when base-ref and GITHUB_BASE_REF are both empty.'
+    required: false
+    default: 'main'
+
+outputs:
+  merge-base:
+    description: >-
+      SHA of the merge base with HEAD, or empty when the histories are
+      unrelated — callers must treat empty as "widen to a full run", never as
+      "nothing changed".
+    value: ${{ steps.resolve.outputs.merge-base }}
+  base-sha:
+    description: 'SHA of the fetched base tip (also available as FETCH_HEAD).'
+    value: ${{ steps.resolve.outputs.base-sha }}
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch base and resolve merge base
+      id: resolve
+      shell: bash
+      env:
+        BASE_REF: ${{ inputs.base-ref }}
+        FALLBACK: ${{ inputs.fallback-branch }}
+      run: |
+        set -euo pipefail
+        ref="${BASE_REF:-${GITHUB_BASE_REF:-$FALLBACK}}"
+        node "$GITHUB_ACTION_PATH/fetch-base.mjs" "$ref"

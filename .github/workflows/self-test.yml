@@ -1,0 +1,42 @@
+# Self-tests for the scripts this repo ships INSIDE composite actions.
+#
+# Everything else here is a reusable workflow, which is only ever exercised by
+# a consumer's run. The action scripts are different: they are ordinary Node
+# modules, they encode assumptions about how git behaves, and a regression in
+# one is invisible until a consumer's selection silently widens (a full run
+# wearing the word "affected") or silently narrows (a gate that skips itself
+# and reports success). Both failure modes are green, so they need a test that
+# is not.
+name: Self Tests
+
+on:
+  pull_request:
+    paths:
+      - '.github/actions/**'
+      - '.github/workflows/self-test.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/actions/**'
+      - '.github/workflows/self-test.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  action-scripts:
+    name: Action script tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # node builtins only — no install step, by design: these scripts run in
+      # consumer jobs before any dependency is available.
+      - name: fetch-base
+        shell: bash
+        run: node --test .github/actions/fetch-base/__tests__/fetch-base.test.mjs
