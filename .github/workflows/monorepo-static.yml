@@ -442,15 +442,46 @@ jobs:
       # only this layer's packages and silently skip every package the layers
       # underneath touched. TURBO_SCM_BASE overrides that base.
       #
-      # Written to GITHUB_ENV from a CONDITIONAL step rather than declared as a
-      # job-level `env:` that resolves to '' off a stack: turbo documents
+      # Off a stack this used to set NOTHING, leaving turbo to resolve
+      # GITHUB_BASE_REF by NAME — and a pull request checkout has no local
+      # `main` branch. Turbo printed "Failed to resolve base ref 'main' …
+      # unknown revision", then "unable to detect git range, assuming all files
+      # have changed", and ran EVERY package while still reporting success
+      # (measured: all 26 packages for a three-file diff). So the ordinary pull
+      # request — not the stacked edge case — was the one silently paying for a
+      # full run. Fetching the base and pinning turbo to its SHA is what makes
+      # `--affected` mean anything here.
+      #
+      # Still written to GITHUB_ENV from a CONDITIONAL branch rather than a
+      # job-level `env:` that can resolve to '': turbo documents
       # TURBO_SCM_BASE as "base used by --affected" but does NOT document how it
       # treats an empty value, and an unset variable is the only behaviour we
-      # can be sure of. Skipped step -> variable never set -> turbo's default.
-      - name: Point turbo --affected at the stack base
-        if: needs.changes.outputs.stack-base != ''
+      # can be sure of.
+      # No `with:` — the step only runs on a pull request, where the action's
+      # default (GITHUB_BASE_REF) is exactly the ref wanted.
+      - name: Fetch the base for turbo --affected
+        id: base
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/fetch-base@v1
+
+      - name: Point turbo --affected at the base
+        if: ${{ github.event_name == 'pull_request' }}
         shell: bash
-        run: echo "TURBO_SCM_BASE=${{ needs.changes.outputs.stack-base }}" >> "$GITHUB_ENV"
+        env:
+          STACK_BASE: ${{ needs.changes.outputs.stack-base }}
+          BASE_SHA: ${{ steps.base.outputs.base-sha }}
+        run: |
+          set -euo pipefail
+          # Both empty means unrelated histories: set nothing and let turbo run
+          # everything, which is the safe direction to fail in.
+          base="${STACK_BASE:-$BASE_SHA}"
+          if [ -n "$base" ]; then
+            {
+              echo "TURBO_SCM_BASE=$base"
+              echo "TURBO_SCM_HEAD=HEAD"
+            } >> "$GITHUB_ENV"
+            echo "--affected diffs against $base"
+          fi
 
       - name: Lint
         shell: bash

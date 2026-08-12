@@ -204,6 +204,25 @@ jobs:
             vitest-results-${{ github.ref }}-
             vitest-results-refs/heads/${{ inputs.default-branch }}-
 
+      # Make FETCH_HEAD — and with it every three-dot diff and turbo's
+      # --affected range — actually resolvable. This used to be a
+      # `git fetch --depth=1` inside the step below, which GRAFTS the
+      # `fetch-depth: 0` checkout above into a shallow repository and destroys
+      # the merge base it already had; see the action for the measurements.
+      #
+      # Mid-stack, GITHUB_BASE_REF is the branch BELOW this pull request, so
+      # the STACK's base is fetched instead — that fixes both consumers at
+      # once (FETCH_HEAD, which commands diff against via e.g.
+      # `CI_AFFECTED_BASE=FETCH_HEAD`, and turbo's own base) with no change to
+      # the caller's command.
+      - name: Fetch the base for affected selection
+        id: base
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/fetch-base@v1
+        with:
+          base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
+          fallback-branch: ${{ inputs.default-branch }}
+
       - name: Run unit tests
         id: unit
         shell: bash
@@ -213,28 +232,29 @@ jobs:
         env:
           UNIT_CMD: ${{ inputs.unit-test-command }}
           UNIT_FULL_CMD: ${{ inputs.unit-full-command }}
-          DEFAULT_BRANCH: ${{ inputs.default-branch }}
           # Empty unless the caller opted in AND this pull request is in a stack.
-          STACK_BASE_REF: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
           STACK_BASE_SHA: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.sha || '' }}
+          # The base tip the step above actually fetched. Empty only when the
+          # histories are unrelated, which must widen to a full run rather than
+          # narrow on a bogus empty diff.
+          BASE_SHA: ${{ steps.base.outputs.base-sha }}
         run: |
           set -o pipefail
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            # Pin turbo's --affected base to a SHA that exists locally. Left to
+            # itself turbo resolves GITHUB_BASE_REF by NAME, and a pull request
+            # checkout has no local `main` branch — it printed "Failed to
+            # resolve base ref 'main'" followed by "assuming all files have
+            # changed" and ran every package, green, for a three-file diff.
+            # A stacked pull request pins the stack's base for the same reason
+            # the ref above is fetched: GITHUB_BASE_REF is only the layer below.
+            # TURBO_SCM_HEAD is pinned alongside it because turbo honours the
+            # pair, not TURBO_SCM_BASE alone.
             if [ -n "$STACK_BASE_SHA" ]; then
-              # Mid-stack, GITHUB_BASE_REF is the branch BELOW this pull request.
-              # Fetching the STACK's base instead fixes both selectors at once:
-              # FETCH_HEAD (which consumer commands diff against, e.g.
-              # `CI_AFFECTED_BASE=FETCH_HEAD`) and turbo's own --affected base,
-              # so a caller gets the corrected base without changing its command.
-              #
-              # TURBO_SCM_BASE is exported only on this branch rather than set to
-              # '' otherwise: turbo documents the variable but not how it treats
-              # an empty value, and unset is the only behaviour to rely on.
-              git fetch --no-tags --depth=1 origin "$STACK_BASE_REF"
-              export TURBO_SCM_BASE="$STACK_BASE_SHA"
-              echo "Stacked pull request — selecting against $STACK_BASE_REF ($STACK_BASE_SHA)"
-            else
-              git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF:-$DEFAULT_BRANCH}"
+              export TURBO_SCM_BASE="$STACK_BASE_SHA" TURBO_SCM_HEAD=HEAD
+              echo "Stacked pull request — selecting against $STACK_BASE_SHA"
+            elif [ -n "$BASE_SHA" ]; then
+              export TURBO_SCM_BASE="$BASE_SHA" TURBO_SCM_HEAD=HEAD
             fi
             bash -c "$UNIT_CMD" 2>&1 | tee unit.log
           else
@@ -295,23 +315,41 @@ jobs:
           restore-keys: |
             turbo-build-
 
-      # Unlike the unit lane, this one has no base fetch of its own — it relies
-      # on turbo deriving the base from GITHUB_BASE_REF, which mid-stack is the
-      # layer below. Pointing turbo at the stack base therefore also means
-      # fetching it: the sha has to exist locally or turbo cannot diff against
-      # it. Conditional step, so off a stack nothing is fetched and nothing is
-      # set, exactly as before.
-      - name: Point turbo --affected at the stack base
-        if: ${{ inputs.stack-aware && github.event.pull_request.stack != null }}
+      # This lane used to fetch a base only for a STACKED pull request and let
+      # every other one rely on turbo deriving the base from GITHUB_BASE_REF.
+      # Turbo resolves that by NAME, and a pull request checkout has no local
+      # `main` branch, so the ordinary case printed "Failed to resolve base ref"
+      # and then "assuming all files have changed" — a full build of every
+      # package, reported as an affected one. Both cases now fetch a real base
+      # and pin turbo to a SHA that exists locally.
+      - name: Fetch the base for turbo --affected
+        id: base
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/fetch-base@v1
+        with:
+          # Mid-stack, GITHUB_BASE_REF is only the layer below, so --affected
+          # would skip everything the lower layers touched.
+          base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
+          fallback-branch: ${{ inputs.default-branch }}
+
+      - name: Point turbo --affected at the base
+        if: ${{ github.event_name == 'pull_request' }}
         shell: bash
         env:
-          STACK_BASE_REF: ${{ github.event.pull_request.stack.base.ref }}
-          STACK_BASE_SHA: ${{ github.event.pull_request.stack.base.sha }}
+          STACK_BASE_SHA: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.sha || '' }}
+          BASE_SHA: ${{ steps.base.outputs.base-sha }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin "$STACK_BASE_REF"
-          echo "TURBO_SCM_BASE=$STACK_BASE_SHA" >> "$GITHUB_ENV"
-          echo "Stacked pull request — build --affected diffs against $STACK_BASE_REF ($STACK_BASE_SHA)"
+          # Unrelated histories leave both empty: export nothing and let turbo
+          # fall back to building everything, which is the safe direction.
+          base="${STACK_BASE_SHA:-$BASE_SHA}"
+          if [ -n "$base" ]; then
+            {
+              echo "TURBO_SCM_BASE=$base"
+              echo "TURBO_SCM_HEAD=HEAD"
+            } >> "$GITHUB_ENV"
+            echo "build --affected diffs against $base"
+          fi
 
       - name: Build
         shell: bash
@@ -369,6 +407,21 @@ jobs:
           restore-keys: |
             vitest-int-results-${{ github.ref }}-
             vitest-int-results-refs/heads/${{ inputs.default-branch }}-
+
+      # This lane's checkout is deliberately left shallow — the action deepens
+      # only as far as the merge base needs, which is cheaper than
+      # `fetch-depth: 0` on a large repo. Without it a consumer command that
+      # selects affected integration suites has no resolvable base at all: its
+      # own `--depth=1` self-fetch grafts the checkout, the three-dot diff
+      # dies, and the lane either runs its whole suite or (worse, when the
+      # diff failure is swallowed) selects nothing.
+      - name: Fetch the base for affected selection
+        id: base
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/fetch-base@v1
+        with:
+          base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
+          fallback-branch: ${{ inputs.default-branch }}
 
       - name: Run integration tests
         id: integration
