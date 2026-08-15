@@ -60,6 +60,15 @@ name: MCP Test Coverage (reusable)
 
 on:
   workflow_call:
+    secrets:
+      NPM_TOKEN:
+        description: >-
+          npm token for consumers whose installs resolve RESTRICTED packages
+          (e.g. a private @12-apps package). Optional and backward-compatible:
+          absent, NODE_AUTH_TOKEN resolves empty and installs stay anonymous,
+          exactly as before. Takes effect only when the consumer's committed
+          .npmrc reads ${NODE_AUTH_TOKEN}.
+        required: false
     inputs:
       node-version:
         description: 'Node version for the gate.'
@@ -122,6 +131,14 @@ on:
 permissions:
   contents: read
   packages: read
+
+# Authenticate npm installs for consumers with RESTRICTED packages. Workflow-
+# level so every `pnpm install` in this file sees it; the consumer's .npmrc is
+# what turns the variable into a registry credential (see the NPM_TOKEN secret
+# declaration above). Empty when the secret is not passed — anonymous installs,
+# the pre-existing behavior.
+env:
+  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
 jobs:
   # COVERAGE proves the served tool surface is TESTED: every tool has a test or a

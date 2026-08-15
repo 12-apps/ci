@@ -18,6 +18,17 @@ name: CD (reusable)
 
 on:
   workflow_call:
+    secrets:
+      NPM_TOKEN:
+        description: >-
+          npm token for image builds whose `pnpm install` resolves RESTRICTED
+          packages (e.g. a private @12-apps package). Optional and
+          backward-compatible: absent, BuildKit mounts an empty npm_token file
+          and a Dockerfile that guards on its presence installs anonymously,
+          exactly as before. Reaches the build as a BuildKit secret, never a
+          build arg, for the same cache-retention reason as
+          SENTRY_AUTH_TOKEN below.
+        required: false
     inputs:
       target:
         description: 'Which target(s) to act on: all | digitalocean | cloudflare'
@@ -195,6 +206,7 @@ jobs:
           build-args: ${{ inputs.build_args }}
           secrets: |
             sentry_auth_token=${{ secrets.SENTRY_AUTH_TOKEN }}
+            npm_token=${{ secrets.NPM_TOKEN }}
           cache-from: type=gha,scope=${{ matrix.cache }}
           cache-to: type=gha,mode=max,scope=${{ matrix.cache }}
 
