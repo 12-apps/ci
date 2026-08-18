@@ -1091,26 +1091,13 @@ jobs:
         run: |
           set -o pipefail
           ${{ inputs.pre-e2e-command }} 2>&1 | tee pre-e2e.log
-      - name: Resolve Playwright version
-        id: playwright-version
+      # Cache + install behind one action so the apt stall is fixed in ONE place
+      # for every lane and every consumer. A bare `playwright install-deps`
+      # hangs forever on a mirror that goes quiet — see the action's
+      # install-playwright.mjs for the measured failure.
+      - name: Set up Playwright
         if: ${{ inputs.install-playwright }}
-        shell: bash
-        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
-      - name: Cache Playwright browsers
-        id: playwright-cache
-        if: ${{ inputs.install-playwright }}
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright-version.outputs.version }}
-      - name: Install Playwright
-        if: ${{ inputs.install-playwright && steps.playwright-cache.outputs.cache-hit != 'true' }}
-        run: pnpm exec playwright install --with-deps chromium
-      # A cache hit restores the browser binaries but NOT the apt system deps
-      # (they live outside ~/.cache/ms-playwright), so install those alone.
-      - name: Install Playwright system deps
-        if: ${{ inputs.install-playwright && steps.playwright-cache.outputs.cache-hit == 'true' }}
-        run: pnpm exec playwright install-deps chromium
+        uses: 12-apps/ci/.github/actions/setup-playwright@v1
       # ── Failed-first ordering (test prioritization) ───────────────────────
       # Playwright records each run's outcome in test-results/.last-run.json
       # (including the IDs of failed tests). Persisting it across runs lets the
@@ -1250,26 +1237,10 @@ jobs:
         run: |
           set -o pipefail
           ${{ inputs.pre-e2e-command }} 2>&1 | tee pre-e2e.log
-      - name: Resolve Playwright version
-        id: playwright-version
+      # Same action as the reliability lane above — one place to fix the stall.
+      - name: Set up Playwright
         if: ${{ steps.changed-specs.outputs.any == 'true' && inputs.install-playwright }}
-        shell: bash
-        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
-      - name: Cache Playwright browsers
-        id: playwright-cache
-        if: ${{ steps.changed-specs.outputs.any == 'true' && inputs.install-playwright }}
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright-version.outputs.version }}
-      - name: Install Playwright
-        if: ${{ steps.changed-specs.outputs.any == 'true' && inputs.install-playwright && steps.playwright-cache.outputs.cache-hit != 'true' }}
-        run: pnpm exec playwright install --with-deps chromium
-      # A cache hit restores the browser binaries but NOT the apt system deps
-      # (they live outside ~/.cache/ms-playwright), so install those alone.
-      - name: Install Playwright system deps
-        if: ${{ steps.changed-specs.outputs.any == 'true' && inputs.install-playwright && steps.playwright-cache.outputs.cache-hit == 'true' }}
-        run: pnpm exec playwright install-deps chromium
+        uses: 12-apps/ci/.github/actions/setup-playwright@v1
       # Self-skips (exit 0) when no e2e specs changed vs the base branch — the
       # authoritative, consumer-side decision (the early exit above is only a
       # coarse superset).
