@@ -1,0 +1,56 @@
+name: 'Set up Playwright (cached, stall-proof)'
+description: >-
+  Resolve the Playwright version, restore the browser cache, and install the
+  browser plus its apt system dependencies under a hard deadline with retries.
+  Replaces a bare `pnpm exec playwright install-deps`, which hangs indefinitely
+  when an Ubuntu mirror accepts the connection and then stops sending — apt has
+  no timeout for that, and a hang cannot be retried the way a failure can. See
+  `install-playwright.mjs` for the measured failure this prevents.
+
+inputs:
+  browser:
+    description: 'Playwright browser to install.'
+    required: false
+    default: 'chromium'
+  attempts:
+    description: 'Times to retry a failed or stalled install before giving up.'
+    required: false
+    default: '3'
+  timeout-seconds:
+    description: >-
+      Hard deadline for ONE install attempt. Not a performance budget — the line
+      past which the install is stuck rather than slow. A cache-hit install
+      normally costs seconds.
+    required: false
+    default: '360'
+
+outputs:
+  cache-hit:
+    description: 'Whether the browser cache was restored.'
+    value: ${{ steps.playwright-cache.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve Playwright version
+      id: playwright-version
+      shell: bash
+      run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+    # The browser download (~150 MB) dominates setup; cache it keyed on the
+    # Playwright version so only a version bump re-downloads.
+    - name: Cache Playwright browser
+      id: playwright-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/ms-playwright
+        key: playwright-${{ inputs.browser }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright-version.outputs.version }}
+
+    - name: Install Playwright
+      shell: bash
+      env:
+        PW_BROWSER: ${{ inputs.browser }}
+        PW_ATTEMPTS: ${{ inputs.attempts }}
+        PW_TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+        PW_CACHE_HIT: ${{ steps.playwright-cache.outputs.cache-hit }}
+      run: node "$GITHUB_ACTION_PATH/main.mjs"

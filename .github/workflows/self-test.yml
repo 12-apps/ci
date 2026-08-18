@@ -40,3 +40,7 @@ jobs:
       - name: fetch-base
         shell: bash
         run: node --test .github/actions/fetch-base/__tests__/fetch-base.test.mjs
+
+      - name: setup-playwright
+        shell: bash
+        run: node --test .github/actions/setup-playwright/__tests__/install-playwright.test.mjs
