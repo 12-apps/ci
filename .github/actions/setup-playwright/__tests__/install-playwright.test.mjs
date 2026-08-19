@@ -17,7 +17,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { APT_CONF, installWithRetry, runBounded } from '../install-playwright.mjs';
+import {
+  APT_CONF,
+  APT_LOCKS,
+  installWithRetry,
+  releaseAptLocks,
+  runBounded,
+} from '../install-playwright.mjs';
 
 /** A runner that fails the first `failures` attempts, then succeeds. */
 const flaky = (failures, { timedOut = false } = {}) => {
@@ -219,4 +225,78 @@ test('a process that is simply already gone is not reported as a problem', async
   await probe.run();
   assert.deepEqual(probe.escalations, [], 'ESRCH should not reach for sudo');
   assert.deepEqual(probe.logged, [], 'ESRCH is the ordinary answer and should be silent');
+});
+
+test('a stale apt lock is released BEFORE the retry, not after the last attempt', async () => {
+  // The ordering is the whole point. Attempt 2 starting while attempt 1's apt
+  // still holds the lock dies in ~10s on `E: Could not get lock`, so the lane
+  // reports three failures having really tried once. Observed exactly that in
+  // a consumer, twice, with two different (wrong) fixes in place.
+  const order = [];
+  await assert.rejects(() =>
+    installWithRetry({
+      args: ['install-deps', 'chromium'],
+      attempts: 3,
+      run: async () => {
+        order.push('attempt');
+        return { ok: false, timedOut: true, code: null };
+      },
+      releaseLocks: () => order.push('release'),
+      log: () => {},
+      sleep: async () => {},
+    }),
+  );
+  assert.deepEqual(order, ['attempt', 'release', 'attempt', 'release', 'attempt']);
+});
+
+test('the lock sweep asks the kernel who holds the FILE, not who is whose child', () => {
+  // `sudo use_pty` puts the sudo'd apt in its own SESSION, so no amount of
+  // process-group signalling reaches it. Naming the lock files is what makes
+  // this independent of the tree.
+  const calls = [];
+  const released = releaseAptLocks({
+    runFn: (cmd, argv) => {
+      calls.push({ cmd, argv });
+      return { status: 0 };
+    },
+    log: () => {},
+  });
+  assert.equal(released, true);
+  assert.equal(calls[0].cmd, 'sudo');
+  for (const lock of APT_LOCKS) {
+    assert.ok(calls[0].argv.includes(lock), `the sweep never mentioned ${lock}`);
+  }
+});
+
+test('the lock sweep falls back to pkill when fuser is not on the image', () => {
+  const tried = [];
+  releaseAptLocks({
+    runFn: (_cmd, argv) => {
+      const tool = argv[1];
+      tried.push(tool);
+      // 127 is what a missing binary answers.
+      return { status: tool === 'fuser' ? 127 : 0 };
+    },
+    log: () => {},
+  });
+  assert.deepEqual(tried, ['fuser', 'pkill']);
+});
+
+test('nothing holding the lock is a quiet, ordinary answer', () => {
+  const logged = [];
+  const released = releaseAptLocks({
+    runFn: () => ({ status: 1 }),
+    log: (line) => logged.push(line),
+  });
+  assert.equal(released, false);
+  assert.deepEqual(logged, [], 'an unheld lock should not warn about anything');
+});
+
+test('a sweep that cannot run at all SAYS so rather than looking clean', () => {
+  const logged = [];
+  releaseAptLocks({ runFn: () => ({ status: 127 }), log: (line) => logged.push(line) });
+  assert.ok(
+    logged.some((line) => line.includes('stale lock')),
+    `an unusable sweep was not reported; logged: ${JSON.stringify(logged)}`,
+  );
 });
