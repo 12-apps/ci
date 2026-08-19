@@ -12,6 +12,9 @@
  * Node builtins only — this runs before any install.
  */
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { APT_CONF, installWithRetry, runBounded } from '../install-playwright.mjs';
@@ -89,6 +92,50 @@ test('runBounded kills a child that ignores SIGTERM, and reports the timeout', a
 test('runBounded lets a fast command through untouched', async () => {
   const result = await runBounded('node', ['-e', 'process.exit(0)'], { timeoutMs: 10_000 });
   assert.deepEqual({ ok: result.ok, timedOut: result.timedOut, code: result.code }, { ok: true, timedOut: false, code: 0 });
+});
+
+test('runBounded kills the whole TREE, not just the process it spawned', async () => {
+  // The case the first version of this action got wrong, and the one its tests
+  // could not see: `pnpm exec playwright install-deps` is three processes deep,
+  // and the one holding /var/lib/apt/lists/lock is the `apt-get` at the bottom.
+  // Signalling only the direct child leaves that apt-get alive, so every retry
+  // after a timeout dies instantly on `E: Could not get lock` — a retry loop
+  // spinning against a lock its own previous attempt still holds.
+  //
+  // So this spawns a PARENT that spawns a GRANDCHILD which ignores SIGTERM, and
+  // asserts the grandchild is gone afterwards. With `child.kill()` in place of
+  // the group kill, the grandchild survives and this fails.
+  const pidFile = join(mkdtempSync(join(tmpdir(), 'pw-tree-')), 'grandchild.pid');
+  const grandchild = `
+    process.on('SIGTERM', () => {});
+    require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+    setInterval(() => {}, 1000);
+  `;
+  const parent = `
+    require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'ignore' });
+    setInterval(() => {}, 1000);
+  `;
+
+  const result = await runBounded(process.execPath, ['-e', parent], { timeoutMs: 1500, graceMs: 500 });
+  assert.equal(result.timedOut, true);
+
+  const pid = Number(readFileSync(pidFile, 'utf-8'));
+  assert.ok(Number.isInteger(pid) && pid > 0, 'the grandchild never recorded its pid');
+
+  // `kill(pid, 0)` throws ESRCH once the process is gone. Poll briefly: the
+  // group signal and the OS reaping it are not the same instant.
+  const gone = async () => {
+    for (let i = 0; i < 40; i += 1) {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return false;
+  };
+  assert.ok(await gone(), `the grandchild (pid ${pid}) outlived the bound — the kill did not reach the tree`);
 });
 
 test('the apt config declares the bounds apt lacks by default', () => {

@@ -58,13 +58,37 @@ export const APT_CONF_PATH = '/etc/apt/apt.conf.d/99-ci-network-timeouts';
  */
 export function runBounded(command, args, { timeoutMs, graceMs = 30_000, spawnFn = spawn } = {}) {
   return new Promise((resolve) => {
-    const child = spawnFn(command, args, { stdio: 'inherit' });
+    // `detached` puts the child in its OWN process group, which is what makes
+    // the kills below reach its descendants.
+    //
+    // Signalling the child alone is not enough and the failure is silent-ish:
+    // `pnpm exec playwright install-deps` is three processes deep, and the one
+    // that matters is the `apt-get` at the bottom. Killing the wrapper leaves
+    // that apt-get running and HOLDING /var/lib/apt/lists/lock, so every retry
+    // after it dies on `E: Could not get lock` — the retry loop spins against a
+    // lock the previous attempt is still holding. Observed in a consumer:
+    // attempt 1 timed out, attempts 2 and 3 failed instantly on the orphan's
+    // lock, and the lane reported "failed 3 times" having really tried once.
+    const child = spawnFn(command, args, { stdio: 'inherit', detached: true });
     let timedOut = false;
 
-    const hardKill = setTimeout(() => child.kill('SIGKILL'), timeoutMs + graceMs);
+    /** Signal the whole group; ESRCH just means it is already gone. */
+    const killGroup = (signal) => {
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        try {
+          child.kill(signal);
+        } catch {
+          /* already reaped */
+        }
+      }
+    };
+
+    const hardKill = setTimeout(() => killGroup('SIGKILL'), timeoutMs + graceMs);
     const softKill = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGTERM');
+      killGroup('SIGTERM');
     }, timeoutMs);
 
     child.on('error', () => {
@@ -75,6 +99,12 @@ export function runBounded(command, args, { timeoutMs, graceMs = 30_000, spawnFn
     child.on('close', (code) => {
       clearTimeout(softKill);
       clearTimeout(hardKill);
+      // The spawned process closing does NOT mean the tree is gone. The wrapper
+      // dies on SIGTERM while the `apt-get` beneath it ignores it and keeps the
+      // lock — and cancelling the pending SIGKILL here is what used to let that
+      // orphan survive, because `close` arrives before the hard kill was due.
+      // Sweep the group once more on the way out; ESRCH is the normal answer.
+      if (timedOut) killGroup('SIGKILL');
       resolve({ ok: code === 0 && !timedOut, timedOut, code });
     });
   });
