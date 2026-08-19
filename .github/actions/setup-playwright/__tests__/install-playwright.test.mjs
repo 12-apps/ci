@@ -145,3 +145,78 @@ test('the apt config declares the bounds apt lacks by default', () => {
     assert.ok(APT_CONF.includes(directive), `missing ${directive}`);
   }
 });
+
+/**
+ * A `runBounded` whose signalling is entirely injected, so the EPERM path can
+ * be driven without a root-owned process to kill.
+ *
+ * The real bug lived exactly here and the suite above could not see it: those
+ * tests spawn a grandchild owned by the SAME user, which is always killable.
+ * Playwright's apt runs under sudo, so the process holding the lock is root's
+ * and answers EPERM — a case no same-user test can reach.
+ */
+function killProbe({ killCode, escalateStatus = 0 }) {
+  const escalations = [];
+  const logged = [];
+  const child = {
+    pid: 4242,
+    kill: () => {},
+    on(event, handler) {
+      // Close immediately after the bound fires, the way a wrapper dies on
+      // SIGTERM while the root-owned process beneath it lives on.
+      if (event === 'close') setTimeout(() => handler(0), 60);
+    },
+  };
+  return {
+    escalations,
+    logged,
+    run: () =>
+      runBounded('irrelevant', [], {
+        timeoutMs: 10,
+        graceMs: 5,
+        spawnFn: () => child,
+        killFn: () => {
+          const error = new Error(killCode);
+          error.code = killCode;
+          throw error;
+        },
+        escalateFn: (pid, signal) => {
+          escalations.push({ pid, signal });
+          return { status: escalateStatus };
+        },
+        log: (line) => logged.push(line),
+      }),
+  };
+}
+
+test('an unkillable root-owned group is escalated to sudo, by process GROUP', async () => {
+  const probe = killProbe({ killCode: 'EPERM' });
+  await probe.run();
+  // Negative pid: the whole group, not just the wrapper — the apt-get is two
+  // levels below the process we spawned.
+  assert.deepEqual(
+    probe.escalations.map((e) => e.pid),
+    probe.escalations.map(() => -4242),
+  );
+  assert.ok(probe.escalations.length > 0, 'EPERM did not escalate to sudo at all');
+  assert.ok(
+    probe.escalations.some((e) => e.signal === 'SIGKILL'),
+    'the group was never SIGKILLed with sudo',
+  );
+});
+
+test('a sudo escalation that fails SAYS so instead of looking clean', async () => {
+  const probe = killProbe({ killCode: 'EPERM', escalateStatus: 1 });
+  await probe.run();
+  assert.ok(
+    probe.logged.some((line) => line.includes('sudo') && line.includes('apt lock')),
+    `an unreachable process was not reported; logged: ${JSON.stringify(probe.logged)}`,
+  );
+});
+
+test('a process that is simply already gone is not reported as a problem', async () => {
+  const probe = killProbe({ killCode: 'ESRCH' });
+  await probe.run();
+  assert.deepEqual(probe.escalations, [], 'ESRCH should not reach for sudo');
+  assert.deepEqual(probe.logged, [], 'ESRCH is the ordinary answer and should be silent');
+});
