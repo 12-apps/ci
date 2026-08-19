@@ -36,7 +36,7 @@
  * would have to remember to bound the whole job, which is both coarser and
  * exactly the kind of thing that gets forgotten.
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 /** apt's missing network bounds. Written before any install runs. */
 export const APT_CONF = [
@@ -56,32 +56,68 @@ export const APT_CONF_PATH = '/etc/apt/apt.conf.d/99-ci-network-timeouts';
  * loop needs to tell "failed" from "timed out" to say which in the log, and an
  * exception would flatten the two.
  */
-export function runBounded(command, args, { timeoutMs, graceMs = 30_000, spawnFn = spawn } = {}) {
+export function runBounded(
+  command,
+  args,
+  {
+    timeoutMs,
+    graceMs = 30_000,
+    spawnFn = spawn,
+    killFn = (pid, signal) => process.kill(pid, signal),
+    escalateFn = (pid, signal) =>
+      spawnSync('sudo', ['-n', 'kill', '-s', signal.replace(/^SIG/, ''), '--', String(pid)], {
+        stdio: ['ignore', 'ignore', 'inherit'],
+      }),
+    log = console.log,
+  } = {},
+) {
   return new Promise((resolve) => {
-    // `detached` puts the child in its OWN process group, which is what makes
-    // the kills below reach its descendants.
+    // `detached` puts the child in its OWN process group, which is what lets a
+    // single signal reach its descendants.
     //
-    // Signalling the child alone is not enough and the failure is silent-ish:
-    // `pnpm exec playwright install-deps` is three processes deep, and the one
-    // that matters is the `apt-get` at the bottom. Killing the wrapper leaves
-    // that apt-get running and HOLDING /var/lib/apt/lists/lock, so every retry
-    // after it dies on `E: Could not get lock` — the retry loop spins against a
-    // lock the previous attempt is still holding. Observed in a consumer:
-    // attempt 1 timed out, attempts 2 and 3 failed instantly on the orphan's
-    // lock, and the lane reported "failed 3 times" having really tried once.
+    // Signalling the child alone is not enough: `pnpm exec playwright
+    // install-deps` is three processes deep, and the one that matters is the
+    // `apt-get` at the bottom. Killing the wrapper leaves that apt-get running
+    // and HOLDING /var/lib/apt/lists/lock, so every retry after it dies on
+    // `E: Could not get lock` — a retry loop spinning against a lock its own
+    // previous attempt still holds.
     const child = spawnFn(command, args, { stdio: 'inherit', detached: true });
     let timedOut = false;
 
-    /** Signal the whole group; ESRCH just means it is already gone. */
+    /**
+     * Signal the whole process group, escalating to `sudo` when it holds
+     * root-owned processes.
+     *
+     * The escalation is the load-bearing part, and it was missing. Playwright
+     * announces `Switching to root user to install dependencies...` and runs
+     * apt under sudo, so the process actually holding the apt lock is owned by
+     * ROOT while this runs as the unprivileged runner user. `process.kill`
+     * answers EPERM, not ESRCH — the orphan is alive and simply out of reach.
+     *
+     * The first version of this swallowed every error as "already reaped",
+     * which is why the bug survived a fix that looked correct: the log showed a
+     * clean kill, the lock stayed held, and the two facts never met. Nothing is
+     * swallowed here now — an unreachable process gets SAID.
+     */
     const killGroup = (signal) => {
       try {
-        process.kill(-child.pid, signal);
-      } catch {
-        try {
-          child.kill(signal);
-        } catch {
-          /* already reaped */
+        killFn(-child.pid, signal);
+        return;
+      } catch (error) {
+        // Already gone is the ordinary answer, and not worth a line of log.
+        if (error?.code === 'ESRCH') return;
+        if (error?.code !== 'EPERM') {
+          log(`could not ${signal} the install process group: ${error?.message ?? error}`);
+          return;
         }
+      }
+      // EPERM: something in the group is root's (apt, via playwright's sudo).
+      const escalated = escalateFn(-child.pid, signal);
+      if (escalated?.status !== 0) {
+        log(
+          `could not ${signal} the root-owned install process group even with sudo ` +
+            `(exit ${escalated?.status ?? 'n/a'}) — a stale apt lock may fail the retries below`,
+        );
       }
     };
 
