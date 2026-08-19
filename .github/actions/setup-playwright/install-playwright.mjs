@@ -147,6 +147,62 @@ export function runBounded(
 }
 
 /**
+ * The locks an interrupted apt run leaves behind.
+ *
+ * All four, not just the one the log names: which is held depends on how far
+ * the run got, and a retry blocked on any of them fails the same way.
+ */
+export const APT_LOCKS = [
+  '/var/lib/apt/lists/lock',
+  '/var/lib/dpkg/lock',
+  '/var/lib/dpkg/lock-frontend',
+  '/var/cache/apt/archives/lock',
+];
+
+/**
+ * Kill whatever still holds apt's locks, by FILE rather than by process tree.
+ *
+ * This is the third shape of this fix and the first that does not depend on
+ * process topology, because the previous two both did and both were wrong.
+ *
+ * `sudo` on Ubuntu runs with `Defaults use_pty` (the default since sudo 1.9),
+ * which gives the command its own pty and therefore its own SESSION. Playwright
+ * announces `Switching to root user...` and sudos apt, so the `apt-get` holding
+ * the lock is in a session of its own — not in the process group we spawned,
+ * and not reachable by signalling that group however carefully.
+ *
+ * The evidence, from a consumer run where the group kill was already in place:
+ * attempt 1 was killed, no escalation path ran (so `process.kill` had
+ * SUCCEEDED — it killed the wrapper), and attempts 2 and 3 still reported
+ * `held by process 2460 (apt-get)`. A kill that lands on the wrong group looks
+ * exactly like a kill that worked.
+ *
+ * So: ask the kernel who has the lock FILE open and kill that, which is true
+ * regardless of who is whose parent. `fuser` is the direct question; `pkill` is
+ * the fallback for an image without psmisc. Both are best-effort by design —
+ * this runs between retries, and a cleanup that throws would fail a lane that
+ * still had attempts left.
+ */
+export function releaseAptLocks({ runFn = spawnSync, log = console.log } = {}) {
+  const attempts = [
+    { what: 'fuser', argv: ['-n', 'fuser', '-k', '-KILL', ...APT_LOCKS] },
+    { what: 'pkill', argv: ['-n', 'pkill', '-KILL', '-x', 'apt-get|apt|dpkg'] },
+  ];
+  for (const { what, argv } of attempts) {
+    const result = runFn('sudo', argv, { stdio: ['ignore', 'ignore', 'ignore'] });
+    // 0 = killed something, 1 = nothing was holding it (both fine and quiet).
+    // Anything else means the tool is missing or refused, so try the next one.
+    if (result?.status === 0) {
+      log(`released a stale apt lock with ${what} before retrying`);
+      return true;
+    }
+    if (result?.status === 1) return false;
+  }
+  log('could not release apt locks with either fuser or pkill — a retry may hit a stale lock');
+  return false;
+}
+
+/**
  * Install, retrying a stall or a failure up to `attempts` times.
  *
  * Returns the number of attempts used; throws only when every one is spent, so
@@ -158,6 +214,7 @@ export async function installWithRetry({
   timeoutMs = 6 * 60_000,
   run = runBounded,
   log = console.log,
+  releaseLocks = releaseAptLocks,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
 } = {}) {
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -168,7 +225,14 @@ export async function installWithRetry({
       ? `stalled past ${Math.round(timeoutMs / 1000)}s and was killed`
       : `exited ${result.code}`;
     log(`::warning::playwright ${args.join(' ')} ${why} (attempt ${attempt}/${attempts})`);
-    if (attempt < attempts) await sleep(10_000);
+    if (attempt < attempts) {
+      // BEFORE the next attempt, not after the last: a retry that starts while
+      // the previous one's apt is still holding the lock is not a retry at all.
+      // It fails in about ten seconds, and the lane then reports three
+      // failures having genuinely tried once.
+      releaseLocks({ log });
+      await sleep(10_000);
+    }
   }
   throw new Error(`playwright ${args.join(' ')} failed ${attempts} times`);
 }
