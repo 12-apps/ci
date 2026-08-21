@@ -308,6 +308,9 @@ jobs:
       # File-level affected selection (optional — default is turbo-affected):
       unit-test-command: CI_AFFECTED_BASE=FETCH_HEAD node scripts/ci-affected-tests.mjs
       unit-full-command: CI_FULL_SUITE=1 node scripts/ci-affected-tests.mjs
+      # Optional: skip the lane when this exact tree has already passed it
+      # (see "Skipping a unit run whose answer is already known" below):
+      unit-fingerprint-command: node scripts/ci-test-fingerprint.mjs
       vitest-cache-paths: |
         apps/web/node_modules/.vite/vitest
         packages/ui/node_modules/.vite/vitest
@@ -339,6 +342,72 @@ jobs:
           if printf '%s' "$RESULTS" | grep -qwE 'failure|cancelled'; then exit 1; fi
 ```
 
+### Skipping a unit run whose answer is already known (opt-in)
+
+PR-time selection is **cumulative**: every lane diffs against the pull request's
+merge base, not against the previous push. That is not an oversight to be tuned
+away. Only the LATEST run gates the merge button, so a run that covered just the
+newest commit would let a pull request merge green having never tested what its
+first commit broke.
+
+The cost is that the affected set only grows. Push a README as the third commit
+of a three-commit pull request and the first two commits' suites run again, to
+repeat an answer they have already given twice.
+
+`unit-fingerprint-command` addresses that without touching selection. Point it at
+a command that prints a hash of the tree minus the paths that cannot change a
+test outcome — the same ignore rule your file-level selector already applies to
+the diff:
+
+```yaml
+    with:
+      unit-fingerprint-command: node scripts/ci-test-fingerprint.mjs
+```
+
+A pull-request run that PASSES records its fingerprint. A later pull-request run
+whose fingerprint matches skips the lane entirely — install, pre-test setup and
+suite alike — and reports the recorded verdict. Empty (the default) disables the
+mechanism, so callers that do not set it are unaffected.
+
+**What makes the skip sound.** The failure direction here is a green lane that
+ran nothing, so the claim a hit makes is deliberately narrow: *this exact
+test-relevant tree has passed this exact lane before*. Three things hold it up,
+and the first is the consumer's responsibility:
+
+- **Hash the TREE, not a diff.** On `pull_request` the checkout is the MERGE
+  commit, so the base branch's tip is already inside it. If `main` advances with
+  anything the hash counts — including a change that breaks a suite this pull
+  request never touched — the fingerprint moves and the lane runs. A "did this
+  push change anything?" check cannot see that, and would skip a suite the base
+  branch had just broken. Hash file MODES alongside contents too: `chmod +x`
+  changes behaviour without changing a byte of content.
+- **Only a passing run records.** A failed run stores nothing — and neither does
+  a cancelled one, which matters more than it sounds: the caller recommended
+  above sets `cancel-in-progress: true` for pull requests, so two pushes a minute
+  apart routinely cancel the first run mid-suite. Anything keyed on "nothing
+  changed since the last push" would skip on that run's behalf, and the pull
+  request would go green having tested neither push.
+- **The lane's own commands are in the KEY.** `node-version`, `pre-test-command`
+  and `unit-test-command` are folded into the cache key beside the hash. They
+  live in a workflow file, which any sane "can this change a test outcome?" rule
+  ignores, so without this, editing `unit-test-command` would inherit the
+  previous command's verdict.
+
+Never active on `push` — the post-merge safety net exists to skip nothing.
+
+The command must be dependency-free: it runs on the runner's system Node, before
+pnpm and before the install, because skipping the suite while still paying to
+prepare for it gives back only a fraction of what the repeat costs. If it fails
+or prints anything that is not a hex digest, the step warns and the lane runs.
+
+`future-pay`'s implementation (`scripts/ci-test-fingerprint.mjs`, ~40 lines plus
+its reasoning) is copyable; the one thing worth preserving verbatim is that it
+imports its ignore rule from the same module the selector imports it from, rather
+than keeping a second copy. The two uses are one claim read in both directions —
+"this path cannot change a verdict" and "two trees differing only here share a
+verdict" — so a drift between copies would not make the lane slow, it would make
+it skip.
+
 ## B. Required in the consumer repo
 
 - **Per-package turbo `outputs`** — the cross-run `.turbo` cache restores only
@@ -350,6 +419,9 @@ jobs:
   turbo outputs — regenerate them via the `pre-*-command` inputs.
 - Optional file-level unit selection: copy `scripts/ci-affected-tests.mjs`
   from `future-pay` (supports `CI_AFFECTED_BASE`, `CI_FULL_SUITE`, `CI_BAIL`).
+- Optional verdict fingerprint: copy `scripts/ci-test-fingerprint.mjs` from
+  `future-pay` alongside it — it shares the selector's ignore rule, so the two
+  are adopted together or not at all.
 - Pass repo-specific filters (e.g. an `integration` or `mcp` paths filter)
   through `extra-filters` — **do not** add a consumer-side `changes` job. Two
   Detect Changes jobs back to back is the exact regression FUT-468 removed: the
