@@ -63,6 +63,53 @@ on:
         type: string
         required: false
         default: 'pnpm turbo run test'
+      unit-fingerprint-command:
+        description: >-
+          OPT-IN. A command printing a stable hash (to stdout, alone) of
+          everything the unit lane's verdict depends on — typically the tree
+          minus docs and other paths that cannot change a test outcome. Consumers
+          with a file-level selector already own that ignore rule; point this at
+          the same one (future-pay:
+          `node scripts/ci-test-fingerprint.mjs`). Empty (default) disables the
+          whole mechanism, so existing callers are unaffected.
+
+          When set, a PR run that PASSES records its fingerprint, and a later PR
+          run whose fingerprint matches skips this lane outright — install,
+          pre-test setup and the suite alike — reporting the recorded verdict
+          instead of recomputing it.
+
+          The point is the PR that grows a commit at a time. Selection is
+          cumulative by design (it diffs against the PR's merge base, not the
+          previous push, because only the LATEST run gates the merge button), so
+          a third commit touching nothing testable still re-runs the first two
+          commits' suites. This recognises the repeat.
+
+          Three properties make the skip safe rather than merely fast, and a
+          consumer's hash command has to preserve the first:
+
+            * It is a hash of the TREE, not of a diff. On `pull_request` the
+              checkout is the MERGE commit, so the base branch's tip is already
+              inside it: if `main` advances with anything the hash counts, the
+              fingerprint moves and the lane runs. A "did this push change
+              anything?" check cannot see that, and would skip a suite the base
+              branch had just broken.
+            * Only a PASSING run records one. A failed run stores nothing, and
+              neither does a cancelled one — which matters more than it sounds,
+              because the recommended caller sets `cancel-in-progress: true` for
+              PRs, so two quick pushes routinely cancel the first run. "Nothing
+              changed since the last push" would happily skip on the strength of
+              a run that tested nothing.
+            * The lane's own commands are in the KEY, not the hash. The hash
+              covers the repo; `node-version`, `pre-test-command` and
+              `unit-test-command` are folded in beside it, so changing HOW the
+              suite runs invalidates every stored verdict even though those
+              values live in a workflow file the hash ignores.
+
+          Never active on `push`: the post-merge safety net exists to skip
+          nothing.
+        type: string
+        required: false
+        default: ''
       vitest-cache-paths:
         description: >-
           Newline-separated paths of the packages' vitest results caches
@@ -170,16 +217,87 @@ jobs:
         with:
           fetch-depth: 0
 
+      # ── Has this exact tree already passed? (opt-in, see the input) ────────
+      # Deliberately the FIRST thing after the checkout, ahead of pnpm, Node and
+      # the install: skipping the suite while still paying ~90s to prepare for it
+      # would give back a fraction of what the repeat costs. The consumer's
+      # command is dependency-free by contract and runs on the runner's system
+      # Node, which is what detect-changes.yml already does before its own
+      # setup-node.
+      - name: Fingerprint the test-relevant tree
+        id: fingerprint
+        # PR-only. The push run is the post-merge safety net; it skips nothing,
+        # by definition, and must never consult a recorded verdict.
+        if: ${{ inputs.unit-fingerprint-command != '' && github.event_name == 'pull_request' }}
+        shell: bash
+        env:
+          FP_CMD: ${{ inputs.unit-fingerprint-command }}
+          # Folded into the KEY rather than the hash. These decide what the lane
+          # RUNS and they live in a workflow file, which a sane "can this change
+          # a test outcome?" rule ignores — so without them, editing
+          # unit-test-command would inherit the previous command's verdict.
+          LANE_NODE: ${{ inputs.node-version }}
+          LANE_PRE: ${{ inputs.pre-test-command }}
+          LANE_UNIT: ${{ inputs.unit-test-command }}
+        run: |
+          set -o pipefail
+          # NOT `set -e`: every failure here must fall through to an empty
+          # fingerprint, which disables the lookup and runs the tests. The whole
+          # mechanism is an optimisation, and an optimisation that cannot answer
+          # must answer "run it".
+          fp="$(bash -c "$FP_CMD")" || fp=""
+          fp="$(printf '%s' "$fp" | tr -d '[:space:]')"
+          if ! printf '%s' "$fp" | grep -Eq '^[0-9a-f]{32,128}$'; then
+            echo "::warning::unit-fingerprint-command produced no usable hash — running the lane."
+            echo "value=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          lane="$(printf '%s\0%s\0%s\0%s' \
+            "$LANE_NODE" "$LANE_PRE" "$LANE_UNIT" "$FP_CMD" \
+            | sha256sum | cut -c1-16)"
+          echo "value=${lane}-${fp}" >> "$GITHUB_OUTPUT"
+          echo "unit verdict key: ${lane}-${fp}"
+
+      # `lookup-only` — the entry's EXISTENCE is the whole message, so nothing is
+      # downloaded. No `restore-keys`: a prefix match would answer for a
+      # DIFFERENT tree, which is the one mistake this must not make.
+      - name: Look up a recorded verdict for this tree
+        id: verdict
+        if: ${{ steps.fingerprint.outputs.value != '' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: .unit-verdict
+          key: unit-verdict-${{ steps.fingerprint.outputs.value }}
+          lookup-only: true
+
+      - name: Report the reused verdict
+        if: ${{ steps.verdict.outputs.cache-hit == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "This tree is byte-identical, in every path that can affect a test,"
+          echo "to one an earlier PASSING run of this lane already covered."
+          echo "Nothing to recompute — change any counted file and the lane runs again."
+          {
+            echo "### Unit Tests — reused an earlier verdict"
+            echo
+            echo "No counted file differs from a tree this lane has already passed on,"
+            echo "so the suite was not re-run."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: pnpm/action-setup@v4
+        if: ${{ steps.verdict.outputs.cache-hit != 'true' }}
         with:
           run_install: false
 
       - uses: actions/setup-node@v4
+        if: ${{ steps.verdict.outputs.cache-hit != 'true' }}
         with:
           node-version: ${{ inputs.node-version }}
           cache: 'pnpm'
 
       - name: Install dependencies
+        if: ${{ steps.verdict.outputs.cache-hit != 'true' }}
         shell: bash
         run: |
           set -o pipefail
@@ -190,7 +308,7 @@ jobs:
       # template-expanded into the run block (Actions hardening guidance).
       # Same pattern for every command input in this workflow.
       - name: Pre-test setup
-        if: ${{ inputs.pre-test-command != '' }}
+        if: ${{ inputs.pre-test-command != '' && steps.verdict.outputs.cache-hit != 'true' }}
         shell: bash
         env:
           PRE_CMD: ${{ inputs.pre-test-command }}
@@ -199,6 +317,7 @@ jobs:
           bash -c "$PRE_CMD" 2>&1 | tee pre-test.log
 
       - name: Restore turbo cache
+        if: ${{ steps.verdict.outputs.cache-hit != 'true' }}
         uses: actions/cache@v4
         with:
           path: .turbo
@@ -212,7 +331,7 @@ jobs:
       # a PR), else the default branch's (its push safety-net runs cover every
       # test file, and base-branch caches are restorable from PRs).
       - name: Restore vitest results cache (test prioritization)
-        if: ${{ inputs.vitest-cache-paths != '' }}
+        if: ${{ inputs.vitest-cache-paths != '' && steps.verdict.outputs.cache-hit != 'true' }}
         uses: actions/cache/restore@v4
         with:
           path: ${{ inputs.vitest-cache-paths }}
@@ -234,7 +353,7 @@ jobs:
       # the caller's command.
       - name: Fetch the base for affected selection
         id: base
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ github.event_name == 'pull_request' && steps.verdict.outputs.cache-hit != 'true' }}
         uses: 12-apps/ci/.github/actions/fetch-base@v1
         with:
           base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
@@ -242,6 +361,7 @@ jobs:
 
       - name: Run unit tests
         id: unit
+        if: ${{ steps.verdict.outputs.cache-hit != 'true' }}
         shell: bash
         # PR: incremental command against the fetched base tip (FETCH_HEAD).
         # Push: the full suite — a diff against the branch's own tip would be
@@ -288,6 +408,44 @@ jobs:
         with:
           path: ${{ inputs.vitest-cache-paths }}
           key: vitest-results-${{ github.ref }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # ── Record the verdict, and ONLY a passing one ─────────────────────────
+      # `steps.unit.outcome == 'success'` is the entire safety argument, so it is
+      # asserted directly on the step that ran the tests rather than inferred
+      # from the job. A failed run leaves no record. Neither does a CANCELLED
+      # one, which is the case that actually bites: the recommended caller sets
+      # `cancel-in-progress: true` for PRs, so pushing twice in a minute kills
+      # the first run mid-suite — and a mechanism keyed on "did anything change
+      # since that push?" would cheerfully skip on its behalf.
+      #
+      # A hit skips `Run unit tests`, leaving its outcome 'skipped', so a reused
+      # verdict never re-records itself and the key is written exactly once.
+      - name: Record this tree as passing
+        id: record
+        if: ${{ steps.unit.outcome == 'success' && steps.fingerprint.outputs.value != '' }}
+        shell: bash
+        # Through env rather than interpolated into the run block, per the
+        # convention stated on `Pre-test setup` above — this value is validated
+        # hex, but the rule is what keeps that from having to be re-checked.
+        env:
+          VERDICT_KEY: unit-verdict-${{ steps.fingerprint.outputs.value }}
+        run: |
+          set -euo pipefail
+          mkdir -p .unit-verdict
+          # Content is diagnostic only — the KEY carries the meaning, and
+          # `lookup-only` means no reader ever downloads this.
+          {
+            echo "commit=$GITHUB_SHA"
+            echo "run=$GITHUB_RUN_ID attempt=$GITHUB_RUN_ATTEMPT"
+            echo "key=$VERDICT_KEY"
+          } > .unit-verdict/passed
+
+      - name: Save the recorded verdict
+        if: ${{ steps.record.outcome == 'success' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .unit-verdict
+          key: unit-verdict-${{ steps.fingerprint.outputs.value }}
 
   build:
     name: Build
