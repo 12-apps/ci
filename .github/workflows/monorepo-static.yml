@@ -192,6 +192,15 @@ on:
 # the pre-existing behavior.
 env:
   NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+  # pnpm 10+ stopped expanding env vars in credentials that come from a
+  # PROJECT .npmrc (a committed file could redirect the expanded secret to an
+  # attacker-controlled registry), so a consumer's ${NODE_AUTH_TOKEN} line is
+  # silently ignored there and a restricted install 404s. This is pnpm's
+  # documented opt-back-in: it names the checked-out .npmrc as the user-level
+  # auth file, restoring the expansion. Env-only by design (pnpm ignores it
+  # when committed); a no-op for consumers still on pnpm 9 (no such setting)
+  # and for repos whose .npmrc carries no auth line.
+  PNPM_CONFIG_NPMRC_AUTH_FILE: .npmrc
 
 jobs:
   changes:
