@@ -227,21 +227,37 @@ on:
       integration-junit-reports:
         description: >-
           OPT-IN. As `unit-junit-reports`, for the integration lane.
+
+          Currently mutually exclusive with `integration-shards > 1`, and the
+          workflow enforces that rather than leaving it to the caller: a shard
+          sees only its own slice, and an empty slice is ordinary arithmetic
+          when a narrow selection is split across runners. That exclusion is an
+          artifact of this workflow having no merge step — guarding a MERGED
+          report (`vitest --merge-reports` in a job after the matrix) makes the
+          two fully compatible, because no slice is ever inspected. Read it as
+          scaffolding, not as a property of the guard.
         type: string
         required: false
         default: ''
-      full-tests-label:
+      allow-zero-tests-label:
         description: >-
           PR label that skips the zero-test guards. For a genuinely test-free PR
           (workflow YAML, docs, a regenerated baseline) the guard is correct to
           fire and wrong to block, so the bypass is a deliberate, visible act on
           the PR rather than a silent condition.
 
+          Deliberately NOT named `ci:full-tests`. A sibling repo already uses
+          that label to WIDEN selection to the full suite, and reusing it here —
+          where it only disarms a guard and changes selection not at all — sets
+          up the one confusion that fails unsafely: someone applies it expecting
+          broader coverage and gets narrower coverage plus a disabled gate. The
+          default says what it actually permits.
+
           Applies ONLY to the guards: it does not widen selection or force a full
           suite, so it costs no extra CI time.
         type: string
         required: false
-        default: 'ci:full-tests'
+        default: 'ci:allow-zero-tests'
       integration-shards:
         description: >-
           Fan the integration lane out over this many runners. 1 (default) keeps
@@ -491,11 +507,12 @@ jobs:
         if: >-
           ${{ github.event_name == 'pull_request'
               && inputs.unit-junit-reports != ''
-              && !contains(github.event.pull_request.labels.*.name, inputs.full-tests-label) }}
+              && !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label) }}
         uses: 12-apps/ci/.github/actions/vitest-signal-guard@v1
         with:
           reports: ${{ inputs.unit-junit-reports }}
           lane: unit
+          bypass-label: ${{ inputs.allow-zero-tests-label }}
 
       # Save even when tests FAIL — the failure entries are what makes the next
       # run's ordering useful (actions/cache's built-in post step skips saving
@@ -782,21 +799,24 @@ jobs:
       # that into a red build, which is worse than the hole it closes: a guard
       # that cries wolf gets bypassed, and then it guards nothing.
       #
-      # Sharded lanes need the check against a MERGED report (one job, after the
-      # matrix, over `vitest --merge-reports`), which this workflow does not
-      # produce today. Until it does, sharding and this guard are mutually
-      # exclusive on the integration lane, and this condition is what makes that
-      # explicit instead of intermittent.
+      # The exclusion is an ARTIFACT of this workflow, not of the idea. Guarding
+      # a MERGED report — one job after the matrix, over `vitest
+      # --merge-reports` — makes sharding and the guard fully compatible,
+      # because you never inspect a slice. A sibling repo already merges shard
+      # blobs into a single junit exactly that way; it simply has no guard on
+      # top of it yet. So the fix here is a merge step, and this condition is
+      # scaffolding until one exists — not a permanent either/or.
       - name: Verify the integration lane executed at least one test
         if: >-
           ${{ github.event_name == 'pull_request'
               && inputs.integration-junit-reports != ''
               && inputs.integration-shards == 1
-              && !contains(github.event.pull_request.labels.*.name, inputs.full-tests-label) }}
+              && !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label) }}
         uses: 12-apps/ci/.github/actions/vitest-signal-guard@v1
         with:
           reports: ${{ inputs.integration-junit-reports }}
           lane: integration
+          bypass-label: ${{ inputs.allow-zero-tests-label }}
 
       # Save even on failure — failures drive the next run's ordering (see
       # unit-tests).

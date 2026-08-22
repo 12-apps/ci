@@ -19,7 +19,11 @@
  *   workspace package produces one report per package, not one merged report.
  *
  * Env:
- *   LANE_LABEL  name used in log/annotation text (default "test").
+ *   LANE_LABEL    name used in log/annotation text (default "test").
+ *   BYPASS_LABEL  PR label that skips this guard, named in the failure message.
+ *                 Passed in rather than hardcoded: telling a blocked author to
+ *                 apply a label the caller never configured is worse than
+ *                 saying nothing.
  *
  * Node builtins only, by design: this runs inside a consumer's job, which may
  * have no dependencies installed at the point the guard fires.
@@ -29,6 +33,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const LANE = process.env.LANE_LABEL || 'test';
+const BYPASS_LABEL = process.env.BYPASS_LABEL || 'ci:allow-zero-tests';
 
 /**
  * Parses the top-level `tests="N"` attribute from a JUnit XML report. Vitest's
@@ -103,7 +108,8 @@ function reportZeroSignal(count) {
       'This usually means one of:',
       '  1. The change is not covered by this lane. Add or extend a test that exercises it.',
       '  2. The PR is genuinely test-free (workflow YAML, docs, a baseline artifact).',
-      '     Label the PR `ci:full-tests` to skip this guard deliberately and on the record.',
+      `     Label the PR \`${BYPASS_LABEL}\` to skip this guard deliberately and on the record.`,
+      '     That label ONLY disarms this check — it does not widen selection.',
       '  3. The change-impact graph is stale and missed the link between the changed file',
       '     and its test. Reproduce the selector locally; if it returns zero, that is a bug',
       '     in the selector, not a reason to bypass this gate.',

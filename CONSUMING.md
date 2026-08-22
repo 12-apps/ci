@@ -446,17 +446,30 @@ signal), and it is deliberately **not** gated on whether the tests passed — a
 failing lane already reports red; a lane that *passed having run nothing* is the
 entire point.
 
-`full-tests-label` (default `ci:full-tests`) skips the guard for a genuinely
-test-free PR — workflow YAML, docs, a regenerated baseline — so the bypass is a
-visible act on the PR rather than a silent condition. It only skips the guard:
-it does not widen selection or force a full suite, so it costs no CI time.
+`allow-zero-tests-label` (default `ci:allow-zero-tests`) skips the guard for a
+genuinely test-free PR — workflow YAML, docs, a regenerated baseline — so the
+bypass is a visible act on the PR rather than a silent condition. It only skips
+the guard: it does not widen selection or force a full suite, so it costs no CI
+time.
 
-**Not compatible with `integration-shards > 1`**, and the workflow enforces that
-rather than leaving it to you. A shard only sees its own slice, and an empty
-slice is normal arithmetic when a narrow selection is split across runners —
-checked per-shard the guard would fail builds that are fine, and a guard that
-cries wolf gets bypassed until it guards nothing. A sharded lane needs the check
-against a merged report, which this workflow does not produce yet.
+> **Do not rename this to `ci:full-tests`.** That label already means *widen
+> selection to the full suite* in a sibling repo. One label with two meanings
+> across repos fails in the dangerous direction: someone applies it expecting
+> broader coverage and gets unchanged (narrow) coverage plus a disarmed guard.
+> The default name says exactly what it permits, and the failure message quotes
+> whichever label you actually configured.
+
+**Currently not compatible with `integration-shards > 1`**, and the workflow
+enforces that rather than leaving it to you. A shard only sees its own slice,
+and an empty slice is normal arithmetic when a narrow selection is split across
+runners — checked per-shard the guard would fail builds that are fine, and a
+guard that cries wolf gets bypassed until it guards nothing.
+
+That exclusion is an **artifact of this workflow, not of the guard**. Point the
+check at a *merged* report — one job after the matrix running `vitest
+--merge-reports --outputFile.junit=…` — and the two become fully compatible,
+because no slice is ever inspected. Adding that merge step is the fix; until it
+exists, pick one per lane.
 
 ### Sharding the integration lane (opt-in)
 

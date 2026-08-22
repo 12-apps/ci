@@ -21,6 +21,14 @@ inputs:
     description: 'Consumer checkout root the report paths are relative to.'
     required: false
     default: '.'
+  bypass-label:
+    description: >-
+      The PR label that skips this guard, named in the failure message. Passed
+      in rather than hardcoded so the remediation cannot tell someone to apply a
+      label the caller did not configure — advice that sends a blocked author
+      to a label that does nothing is worse than no advice.
+    required: false
+    default: 'ci:allow-zero-tests'
 
 runs:
   using: composite
@@ -30,6 +38,7 @@ runs:
       working-directory: ${{ inputs.working-directory }}
       env:
         LANE_LABEL: ${{ inputs.lane }}
+        BYPASS_LABEL: ${{ inputs.bypass-label }}
         REPORTS: ${{ inputs.reports }}
       run: |
         set -euo pipefail
