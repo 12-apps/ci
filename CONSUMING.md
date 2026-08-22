@@ -316,6 +316,9 @@ jobs:
         packages/ui/node_modules/.vite/vitest
       run-integration: ${{ contains(fromJSON(needs.static.outputs.matched), 'integration') }}
       integration-cache-path: node_modules/.vite/vitest
+      # Optional: fan the integration lane out over N runners (default 1 — the
+      # single-job shape). See "Sharding the integration lane" below.
+      integration-shards: 4
 
   # Repo-specific jobs gate on the static tier the same way `tests` does, and
   # read their own filters out of `matched`:
@@ -407,6 +410,42 @@ than keeping a second copy. The two uses are one claim read in both directions �
 "this path cannot change a verdict" and "two trees differing only here share a
 verdict" — so a drift between copies would not make the lane slow, it would make
 it skip.
+
+### Sharding the integration lane (opt-in)
+
+`integration-shards: N` fans the integration lane out over N runners. The default
+is `1`, which is byte-for-byte the single-job shape — same check name, same
+command line — so no existing caller is affected.
+
+Reach for it when the integration lane is the longest job in the run AND its
+runtime is dominated by the suite rather than by setup. The distinction matters
+because every leg pays the full checkout, install and `pre-integration-command`
+again: at 40s of setup and a 12-minute suite, four shards is most of a 4x; at 40s
+of setup and a 90-second suite, four shards is slower than one.
+
+It exists because an integration suite that provisions a database per test file
+saturates a single runner from *inside* one job. Such suites cap their worker
+pool for RAM (`poolOptions.forks.maxForks`), so the pool — not the core count —
+is the ceiling, and raising `--maxWorkers` trades an out-of-memory failure for a
+slow one. More machines is the only direction that helps.
+
+Each leg appends `--shard=<index>/<total>` to the integration command. vitest
+applies that to the file set that survives *your* selection, so an affected-only
+selector still narrows first and the shard splits only what it chose. Your
+command has to forward extra CLI args through to vitest — the default
+(`pnpm run test:integration -- …`) does, and so does a custom selector that ends
+with `process.argv.slice(2)`.
+
+Two things to know before raising it:
+
+- **Sizing is measurement, not taste.** Shard until the slowest leg approaches
+  the setup floor, then stop. A single slow *file* is a hard floor no shard count
+  can cross: vitest parallelises across files, never within one, so a suite whose
+  longest file runs 6 minutes cannot finish faster than 6 minutes on any number
+  of runners. Split that file instead.
+- **`fail-fast` is off** for the matrix, deliberately. One shard's failure must
+  not cancel the others, or the post-merge safety net reports a partial
+  inventory of what actually broke.
 
 ## B. Required in the consumer repo
 
