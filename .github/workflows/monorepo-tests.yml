@@ -197,6 +197,92 @@ on:
         type: string
         required: false
         default: ''
+      unit-junit-reports:
+        description: >-
+          OPT-IN. Space-separated JUnit XML paths (files or directories) the unit
+          lane writes. When set, a PR run asserts the lane executed at least one
+          test case and fails if it did not.
+
+          The mode it closes: affected selection is paired with
+          `--passWithNoTests`, which is correct per-invocation — a changed file
+          with no importing test legitimately runs nothing — but at the JOB level
+          it is indistinguishable from "the selector resolved nothing at all". A
+          stale impact map, an unresolvable diff base or a mis-classified path
+          all land on exit 0, every check green, and no test signal whatsoever.
+          More machinery between "PR opened" and "tests chosen" means more ways
+          to select nothing, not fewer; the selectors already fail SAFE, and this
+          is the assertion that the fail-safe actually held.
+
+          The consumer's `unit-test-command` must emit the reports
+          (`--reporter=junit --outputFile.junit=<path>`); a workflow cannot
+          inject reporter flags into an opaque command string. Directories are
+          scanned recursively and summed, so a lane running vitest per workspace
+          package can point at one folder.
+
+          Empty (default) disables the mechanism — existing callers are
+          unaffected.
+        type: string
+        required: false
+        default: ''
+      integration-junit-reports:
+        description: >-
+          OPT-IN. As `unit-junit-reports`, for the integration lane.
+
+          Currently mutually exclusive with `integration-shards > 1`, and the
+          workflow enforces that rather than leaving it to the caller: a shard
+          sees only its own slice, and an empty slice is ordinary arithmetic
+          when a narrow selection is split across runners. That exclusion is an
+          artifact of this workflow having no merge step — guarding a MERGED
+          report (`vitest --merge-reports` in a job after the matrix) makes the
+          two fully compatible, because no slice is ever inspected. Read it as
+          scaffolding, not as a property of the guard.
+        type: string
+        required: false
+        default: ''
+      allow-zero-tests-label:
+        description: >-
+          PR label that skips the zero-test guards. For a genuinely test-free PR
+          (workflow YAML, docs, a regenerated baseline) the guard is correct to
+          fire and wrong to block, so the bypass is a deliberate, visible act on
+          the PR rather than a silent condition.
+
+          Deliberately NOT named `ci:full-tests`. A sibling repo already uses
+          that label to WIDEN selection to the full suite, and reusing it here —
+          where it only disarms a guard and changes selection not at all — sets
+          up the one confusion that fails unsafely: someone applies it expecting
+          broader coverage and gets narrower coverage plus a disabled gate. The
+          default says what it actually permits.
+
+          Applies ONLY to the guards: it does not widen selection or force a full
+          suite, so it costs no extra CI time.
+        type: string
+        required: false
+        default: 'ci:allow-zero-tests'
+      integration-shards:
+        description: >-
+          Fan the integration lane out over this many runners. 1 (default) keeps
+          the single-job shape every existing caller has today.
+
+          Scale OUT, not up. An integration suite that provisions a database per
+          test file saturates one runner from inside a single job — its worker
+          pool is capped by RAM, not by cores — so the way to spend less
+          wall-clock is more machines, not a bigger `--maxWorkers`.
+
+          Each leg appends `--shard=<index>/<total>` to the integration command,
+          which vitest applies to the file set AFTER the caller's own selection.
+          That composes with an affected-only selector: the shard splits
+          whatever the selector chose. It relies on the caller's command
+          forwarding extra CLI args through to vitest (future-pay's
+          `ci-integration-affected.mjs` does; the default command does too, via
+          `pnpm run test:integration -- …`).
+
+          Sizing is the caller's call, and more is not better: every leg pays
+          the full checkout + install + pre-integration setup, so shards past
+          the point where setup dominates buy nothing. Measure before raising
+          it.
+        type: number
+        required: false
+        default: 1
 
 # Authenticate npm installs for consumers with RESTRICTED packages. Workflow-
 # level so every `pnpm install` in this file sees it; the consumer's .npmrc is
@@ -408,6 +494,26 @@ jobs:
             bash -c "$UNIT_FULL_CMD" 2>&1 | tee unit.log
           fi
 
+      # ── Zero-test-signal guard ─────────────────────────────────────────────
+      # PR-only: on push the FULL command runs, so a zero total means something
+      # else is already broken and the lane's own failure is the better signal.
+      #
+      # Deliberately NOT gated on the test step's outcome. A lane that FAILED
+      # already reports red; a lane that PASSED having run nothing is the entire
+      # point of this step. Gated only on event, opt-in, and the label — and
+      # carrying no `continue-on-error`, because a guard that cannot fail is
+      # decoration.
+      - name: Verify the unit lane executed at least one test
+        if: >-
+          ${{ github.event_name == 'pull_request'
+              && inputs.unit-junit-reports != ''
+              && !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label) }}
+        uses: 12-apps/ci/.github/actions/vitest-signal-guard@v1
+        with:
+          reports: ${{ inputs.unit-junit-reports }}
+          lane: unit
+          bypass-label: ${{ inputs.allow-zero-tests-label }}
+
       # Save even when tests FAIL — the failure entries are what makes the next
       # run's ordering useful (actions/cache's built-in post step skips saving
       # on job failure, hence the explicit restore/save split). run_id and
@@ -549,10 +655,51 @@ jobs:
             pnpm turbo run build 2>&1 | tee build.log
           fi
 
-  integration-tests:
-    name: Integration Tests
+  # Sizes the integration matrix before any expensive setup. It is its own job
+  # because `strategy.matrix` cannot be built from an input expression — a
+  # matrix reads a JSON array, and a job output is the only place a reusable
+  # workflow can produce one. It installs nothing, so the cost is a runner
+  # start; the matrix it sizes is what waits.
+  integration-plan:
+    name: Integration Plan
     runs-on: ubuntu-latest
     if: ${{ inputs.run-integration }}
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - name: Compute the shard list
+        id: plan
+        shell: bash
+        env:
+          SHARDS: ${{ inputs.integration-shards }}
+        run: |
+          set -euo pipefail
+          # Clamp rather than trust. A zero or negative count emits an EMPTY
+          # matrix, and an empty matrix skips the lane while reporting success —
+          # a silent green with no tests run, which is the one outcome a test
+          # lane must never produce by accident.
+          if ! [[ "$SHARDS" =~ ^[0-9]+$ ]] || [ "$SHARDS" -lt 1 ]; then
+            echo "::warning::integration-shards='$SHARDS' is not a positive integer; falling back to a single shard."
+            SHARDS=1
+          fi
+          echo "shards=$(seq "$SHARDS" | jq -cRn '[inputs | tonumber]')" >> "$GITHUB_OUTPUT"
+
+  integration-tests:
+    # An explicit name suppresses the "(1)" suffix GitHub would otherwise append
+    # for a matrix job. That matters beyond looks: the unsharded name has to stay
+    # byte-identical or every consumer requiring `Tests / Integration Tests` in a
+    # branch ruleset starts waiting on a context that no longer reports.
+    name: ${{ inputs.integration-shards > 1 && format('Integration Tests · shard {0}/{1}', matrix.shard, inputs.integration-shards) || 'Integration Tests' }}
+    runs-on: ubuntu-latest
+    needs: integration-plan
+    if: ${{ inputs.run-integration }}
+    strategy:
+      # One shard's failure must not cancel the others: a partial matrix reports
+      # a partial inventory, and the point of the push safety net is a complete
+      # one.
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.integration-plan.outputs.shards) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -583,15 +730,20 @@ jobs:
 
       # Failed-first ordering for what is usually the longest lane (see
       # unit-tests). Distinct key space from the unit caches.
+      # The shard index is part of the key space. Without it every leg of the
+      # matrix writes the same cache entry, so the legs race and the survivor's
+      # timings describe one shard's slice of the suite while being restored by
+      # all of them — failed-first ordering would then be seeded from files the
+      # restoring shard does not even run.
       - name: Restore vitest results cache (test prioritization)
         if: ${{ inputs.integration-cache-path != '' }}
         uses: actions/cache/restore@v4
         with:
           path: ${{ inputs.integration-cache-path }}
-          key: vitest-int-results-${{ github.ref }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: vitest-int-results-${{ github.ref }}-s${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            vitest-int-results-${{ github.ref }}-
-            vitest-int-results-refs/heads/${{ inputs.default-branch }}-
+            vitest-int-results-${{ github.ref }}-s${{ matrix.shard }}-
+            vitest-int-results-refs/heads/${{ inputs.default-branch }}-s${{ matrix.shard }}-
 
       # This lane's checkout is deliberately left shallow — the action deepens
       # only as far as the merge base needs, which is cheaper than
@@ -616,13 +768,55 @@ jobs:
         env:
           INT_CMD: ${{ inputs.integration-command }}
           INT_FULL_CMD: ${{ inputs.integration-full-command }}
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: ${{ inputs.integration-shards }}
         run: |
           set -o pipefail
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            bash -c "$INT_CMD" 2>&1 | tee integration.log
-          else
-            bash -c "$INT_FULL_CMD" 2>&1 | tee integration.log
+          # Appended, not injected: vitest applies `--shard` to the file set that
+          # survives the caller's own selection, so an affected-only run splits
+          # what it selected rather than re-widening to the whole suite. Omitted
+          # entirely at one shard so an unsharded caller's command line is
+          # byte-identical to what it was before this input existed.
+          SHARD_ARG=""
+          if [ "$SHARD_TOTAL" -gt 1 ]; then
+            SHARD_ARG=" --shard=${SHARD_INDEX}/${SHARD_TOTAL}"
+            echo "▶️  shard ${SHARD_INDEX}/${SHARD_TOTAL}"
           fi
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            bash -c "${INT_CMD}${SHARD_ARG}" 2>&1 | tee integration.log
+          else
+            bash -c "${INT_FULL_CMD}${SHARD_ARG}" 2>&1 | tee integration.log
+          fi
+
+      # Zero-test-signal guard — see the unit lane's copy for why it is gated on
+      # event/opt-in/label only.
+      #
+      # ALSO gated on a single shard, and that condition is load-bearing. The
+      # guard's question is "did this LANE run anything", but a shard only ever
+      # sees its own slice, and an empty slice is a legitimate outcome of
+      # splitting a narrow selection across runners — shard 3 of 4 drawing
+      # nothing is arithmetic, not a selector bug. Run per-shard it would turn
+      # that into a red build, which is worse than the hole it closes: a guard
+      # that cries wolf gets bypassed, and then it guards nothing.
+      #
+      # The exclusion is an ARTIFACT of this workflow, not of the idea. Guarding
+      # a MERGED report — one job after the matrix, over `vitest
+      # --merge-reports` — makes sharding and the guard fully compatible,
+      # because you never inspect a slice. A sibling repo already merges shard
+      # blobs into a single junit exactly that way; it simply has no guard on
+      # top of it yet. So the fix here is a merge step, and this condition is
+      # scaffolding until one exists — not a permanent either/or.
+      - name: Verify the integration lane executed at least one test
+        if: >-
+          ${{ github.event_name == 'pull_request'
+              && inputs.integration-junit-reports != ''
+              && inputs.integration-shards == 1
+              && !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label) }}
+        uses: 12-apps/ci/.github/actions/vitest-signal-guard@v1
+        with:
+          reports: ${{ inputs.integration-junit-reports }}
+          lane: integration
+          bypass-label: ${{ inputs.allow-zero-tests-label }}
 
       # Save even on failure — failures drive the next run's ordering (see
       # unit-tests).
@@ -631,4 +825,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ inputs.integration-cache-path }}
-          key: vitest-int-results-${{ github.ref }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: vitest-int-results-${{ github.ref }}-s${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
