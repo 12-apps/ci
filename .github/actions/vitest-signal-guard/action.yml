@@ -1,0 +1,38 @@
+name: 'Vitest signal guard'
+description: >-
+  Fail a test lane that reported zero executed test cases. Affected-test
+  selection plus `--passWithNoTests` cannot distinguish "nothing needed running"
+  from "the selector resolved nothing at all"; both exit 0. This asserts the
+  lane's JUnit reports at least one test case. Fail-closed: a missing or
+  unparseable report fails too.
+
+inputs:
+  reports:
+    description: >-
+      Space-separated JUnit XML files and/or directories (scanned recursively
+      for *.xml). Multiple paths are summed — a unit lane that runs vitest per
+      workspace package emits one report per package.
+    required: true
+  lane:
+    description: 'Lane name used in log and annotation text (e.g. unit, integration).'
+    required: false
+    default: 'test'
+  working-directory:
+    description: 'Consumer checkout root the report paths are relative to.'
+    required: false
+    default: '.'
+
+runs:
+  using: composite
+  steps:
+    - name: Verify the lane executed at least one test
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        LANE_LABEL: ${{ inputs.lane }}
+        REPORTS: ${{ inputs.reports }}
+      run: |
+        set -euo pipefail
+        # Intentionally unquoted: REPORTS is a space-separated path list.
+        # shellcheck disable=SC2086
+        node "$GITHUB_ACTION_PATH/check-test-signal.mjs" $REPORTS

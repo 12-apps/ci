@@ -411,6 +411,53 @@ than keeping a second copy. The two uses are one claim read in both directions �
 verdict" — so a drift between copies would not make the lane slow, it would make
 it skip.
 
+### Zero-test-signal guard (opt-in)
+
+`unit-junit-reports` / `integration-junit-reports` assert that a PR run's lane
+actually executed at least one test case, and fail it if not. Empty (the
+default) disables the mechanism entirely.
+
+The hole it closes: affected selection is paired with `--passWithNoTests`, which
+is right per-invocation — a changed file with no importing test legitimately
+runs nothing — but at the **job** level it is indistinguishable from *the
+selector resolved nothing at all*. A stale impact map, an unresolvable diff
+base, or a mis-classified path all land on exit 0, every check green, and no
+test signal whatsoever. Selection machinery makes that more likely, not less;
+the selectors already fail safe, and this is the assertion that the fail-safe
+actually held.
+
+Your test command has to emit the reports — a workflow cannot inject
+`--reporter=junit` into an opaque command string:
+
+```
+--reporter=default --reporter=junit --outputFile.junit=reports/junit/integration.xml
+```
+
+Keep the default reporter alongside it; the human-readable log is what a
+triager reads. A lane that runs vitest **per workspace package** must give each
+one a distinct filename, then point the input at the directory — paths are
+scanned recursively and summed.
+
+It is **fail-closed**: a missing or unparseable report fails too, because "no
+report" and "no tests" are the same amount of evidence. It runs on
+`pull_request` only (on push the full command runs, so a zero total means
+something else is already broken and that lane's own failure is the better
+signal), and it is deliberately **not** gated on whether the tests passed — a
+failing lane already reports red; a lane that *passed having run nothing* is the
+entire point.
+
+`full-tests-label` (default `ci:full-tests`) skips the guard for a genuinely
+test-free PR — workflow YAML, docs, a regenerated baseline — so the bypass is a
+visible act on the PR rather than a silent condition. It only skips the guard:
+it does not widen selection or force a full suite, so it costs no CI time.
+
+**Not compatible with `integration-shards > 1`**, and the workflow enforces that
+rather than leaving it to you. A shard only sees its own slice, and an empty
+slice is normal arithmetic when a narrow selection is split across runners —
+checked per-shard the guard would fail builds that are fine, and a guard that
+cries wolf gets bypassed until it guards nothing. A sharded lane needs the check
+against a merged report, which this workflow does not produce yet.
+
 ### Sharding the integration lane (opt-in)
 
 `integration-shards: N` fans the integration lane out over N runners. The default

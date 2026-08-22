@@ -197,6 +197,51 @@ on:
         type: string
         required: false
         default: ''
+      unit-junit-reports:
+        description: >-
+          OPT-IN. Space-separated JUnit XML paths (files or directories) the unit
+          lane writes. When set, a PR run asserts the lane executed at least one
+          test case and fails if it did not.
+
+          The mode it closes: affected selection is paired with
+          `--passWithNoTests`, which is correct per-invocation — a changed file
+          with no importing test legitimately runs nothing — but at the JOB level
+          it is indistinguishable from "the selector resolved nothing at all". A
+          stale impact map, an unresolvable diff base or a mis-classified path
+          all land on exit 0, every check green, and no test signal whatsoever.
+          More machinery between "PR opened" and "tests chosen" means more ways
+          to select nothing, not fewer; the selectors already fail SAFE, and this
+          is the assertion that the fail-safe actually held.
+
+          The consumer's `unit-test-command` must emit the reports
+          (`--reporter=junit --outputFile.junit=<path>`); a workflow cannot
+          inject reporter flags into an opaque command string. Directories are
+          scanned recursively and summed, so a lane running vitest per workspace
+          package can point at one folder.
+
+          Empty (default) disables the mechanism — existing callers are
+          unaffected.
+        type: string
+        required: false
+        default: ''
+      integration-junit-reports:
+        description: >-
+          OPT-IN. As `unit-junit-reports`, for the integration lane.
+        type: string
+        required: false
+        default: ''
+      full-tests-label:
+        description: >-
+          PR label that skips the zero-test guards. For a genuinely test-free PR
+          (workflow YAML, docs, a regenerated baseline) the guard is correct to
+          fire and wrong to block, so the bypass is a deliberate, visible act on
+          the PR rather than a silent condition.
+
+          Applies ONLY to the guards: it does not widen selection or force a full
+          suite, so it costs no extra CI time.
+        type: string
+        required: false
+        default: 'ci:full-tests'
       integration-shards:
         description: >-
           Fan the integration lane out over this many runners. 1 (default) keeps
@@ -432,6 +477,25 @@ jobs:
           else
             bash -c "$UNIT_FULL_CMD" 2>&1 | tee unit.log
           fi
+
+      # ── Zero-test-signal guard ─────────────────────────────────────────────
+      # PR-only: on push the FULL command runs, so a zero total means something
+      # else is already broken and the lane's own failure is the better signal.
+      #
+      # Deliberately NOT gated on the test step's outcome. A lane that FAILED
+      # already reports red; a lane that PASSED having run nothing is the entire
+      # point of this step. Gated only on event, opt-in, and the label — and
+      # carrying no `continue-on-error`, because a guard that cannot fail is
+      # decoration.
+      - name: Verify the unit lane executed at least one test
+        if: >-
+          ${{ github.event_name == 'pull_request'
+              && inputs.unit-junit-reports != ''
+              && !contains(github.event.pull_request.labels.*.name, inputs.full-tests-label) }}
+        uses: 12-apps/ci/.github/actions/vitest-signal-guard@v1
+        with:
+          reports: ${{ inputs.unit-junit-reports }}
+          lane: unit
 
       # Save even when tests FAIL — the failure entries are what makes the next
       # run's ordering useful (actions/cache's built-in post step skips saving
@@ -706,6 +770,33 @@ jobs:
           else
             bash -c "${INT_FULL_CMD}${SHARD_ARG}" 2>&1 | tee integration.log
           fi
+
+      # Zero-test-signal guard — see the unit lane's copy for why it is gated on
+      # event/opt-in/label only.
+      #
+      # ALSO gated on a single shard, and that condition is load-bearing. The
+      # guard's question is "did this LANE run anything", but a shard only ever
+      # sees its own slice, and an empty slice is a legitimate outcome of
+      # splitting a narrow selection across runners — shard 3 of 4 drawing
+      # nothing is arithmetic, not a selector bug. Run per-shard it would turn
+      # that into a red build, which is worse than the hole it closes: a guard
+      # that cries wolf gets bypassed, and then it guards nothing.
+      #
+      # Sharded lanes need the check against a MERGED report (one job, after the
+      # matrix, over `vitest --merge-reports`), which this workflow does not
+      # produce today. Until it does, sharding and this guard are mutually
+      # exclusive on the integration lane, and this condition is what makes that
+      # explicit instead of intermittent.
+      - name: Verify the integration lane executed at least one test
+        if: >-
+          ${{ github.event_name == 'pull_request'
+              && inputs.integration-junit-reports != ''
+              && inputs.integration-shards == 1
+              && !contains(github.event.pull_request.labels.*.name, inputs.full-tests-label) }}
+        uses: 12-apps/ci/.github/actions/vitest-signal-guard@v1
+        with:
+          reports: ${{ inputs.integration-junit-reports }}
+          lane: integration
 
       # Save even on failure — failures drive the next run's ordering (see
       # unit-tests).
