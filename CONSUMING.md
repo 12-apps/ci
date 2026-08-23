@@ -316,6 +316,9 @@ jobs:
         packages/ui/node_modules/.vite/vitest
       run-integration: ${{ contains(fromJSON(needs.static.outputs.matched), 'integration') }}
       integration-cache-path: node_modules/.vite/vitest
+      # Optional: fan the integration lane out over N runners (default 1 — the
+      # single-job shape). See "Sharding the integration lane" below.
+      integration-shards: 4
 
   # Repo-specific jobs gate on the static tier the same way `tests` does, and
   # read their own filters out of `matched`:
@@ -407,6 +410,102 @@ than keeping a second copy. The two uses are one claim read in both directions �
 "this path cannot change a verdict" and "two trees differing only here share a
 verdict" — so a drift between copies would not make the lane slow, it would make
 it skip.
+
+### Zero-test-signal guard (opt-in)
+
+`unit-junit-reports` / `integration-junit-reports` assert that a PR run's lane
+actually executed at least one test case, and fail it if not. Empty (the
+default) disables the mechanism entirely.
+
+The hole it closes: affected selection is paired with `--passWithNoTests`, which
+is right per-invocation — a changed file with no importing test legitimately
+runs nothing — but at the **job** level it is indistinguishable from *the
+selector resolved nothing at all*. A stale impact map, an unresolvable diff
+base, or a mis-classified path all land on exit 0, every check green, and no
+test signal whatsoever. Selection machinery makes that more likely, not less;
+the selectors already fail safe, and this is the assertion that the fail-safe
+actually held.
+
+Your test command has to emit the reports — a workflow cannot inject
+`--reporter=junit` into an opaque command string:
+
+```
+--reporter=default --reporter=junit --outputFile.junit=reports/junit/integration.xml
+```
+
+Keep the default reporter alongside it; the human-readable log is what a
+triager reads. A lane that runs vitest **per workspace package** must give each
+one a distinct filename, then point the input at the directory — paths are
+scanned recursively and summed.
+
+It is **fail-closed**: a missing or unparseable report fails too, because "no
+report" and "no tests" are the same amount of evidence. It runs on
+`pull_request` only (on push the full command runs, so a zero total means
+something else is already broken and that lane's own failure is the better
+signal), and it is deliberately **not** gated on whether the tests passed — a
+failing lane already reports red; a lane that *passed having run nothing* is the
+entire point.
+
+`allow-zero-tests-label` (default `ci:allow-zero-tests`) skips the guard for a
+genuinely test-free PR — workflow YAML, docs, a regenerated baseline — so the
+bypass is a visible act on the PR rather than a silent condition. It only skips
+the guard: it does not widen selection or force a full suite, so it costs no CI
+time.
+
+> **Do not rename this to `ci:full-tests`.** That label already means *widen
+> selection to the full suite* in a sibling repo. One label with two meanings
+> across repos fails in the dangerous direction: someone applies it expecting
+> broader coverage and gets unchanged (narrow) coverage plus a disarmed guard.
+> The default name says exactly what it permits, and the failure message quotes
+> whichever label you actually configured.
+
+**Currently not compatible with `integration-shards > 1`**, and the workflow
+enforces that rather than leaving it to you. A shard only sees its own slice,
+and an empty slice is normal arithmetic when a narrow selection is split across
+runners — checked per-shard the guard would fail builds that are fine, and a
+guard that cries wolf gets bypassed until it guards nothing.
+
+That exclusion is an **artifact of this workflow, not of the guard**. Point the
+check at a *merged* report — one job after the matrix running `vitest
+--merge-reports --outputFile.junit=…` — and the two become fully compatible,
+because no slice is ever inspected. Adding that merge step is the fix; until it
+exists, pick one per lane.
+
+### Sharding the integration lane (opt-in)
+
+`integration-shards: N` fans the integration lane out over N runners. The default
+is `1`, which is byte-for-byte the single-job shape — same check name, same
+command line — so no existing caller is affected.
+
+Reach for it when the integration lane is the longest job in the run AND its
+runtime is dominated by the suite rather than by setup. The distinction matters
+because every leg pays the full checkout, install and `pre-integration-command`
+again: at 40s of setup and a 12-minute suite, four shards is most of a 4x; at 40s
+of setup and a 90-second suite, four shards is slower than one.
+
+It exists because an integration suite that provisions a database per test file
+saturates a single runner from *inside* one job. Such suites cap their worker
+pool for RAM (`poolOptions.forks.maxForks`), so the pool — not the core count —
+is the ceiling, and raising `--maxWorkers` trades an out-of-memory failure for a
+slow one. More machines is the only direction that helps.
+
+Each leg appends `--shard=<index>/<total>` to the integration command. vitest
+applies that to the file set that survives *your* selection, so an affected-only
+selector still narrows first and the shard splits only what it chose. Your
+command has to forward extra CLI args through to vitest — the default
+(`pnpm run test:integration -- …`) does, and so does a custom selector that ends
+with `process.argv.slice(2)`.
+
+Two things to know before raising it:
+
+- **Sizing is measurement, not taste.** Shard until the slowest leg approaches
+  the setup floor, then stop. A single slow *file* is a hard floor no shard count
+  can cross: vitest parallelises across files, never within one, so a suite whose
+  longest file runs 6 minutes cannot finish faster than 6 minutes on any number
+  of runners. Split that file instead.
+- **`fail-fast` is off** for the matrix, deliberately. One shard's failure must
+  not cancel the others, or the post-merge safety net reports a partial
+  inventory of what actually broke.
 
 ## B. Required in the consumer repo
 
