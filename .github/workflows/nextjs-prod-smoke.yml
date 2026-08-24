@@ -115,6 +115,21 @@ on:
         type: string
         required: false
         default: '.'
+      pglite-template-migrations:
+        description: >-
+          hashFiles() pattern covering the committed migrations behind the
+          consumer's PGlite schema template (the migrated data directory the
+          smoke's throwaway-DB provisioning copies from instead of replaying
+          migrations). When set, the job restores/saves
+          node_modules/.cache/pglite-template around the smoke. Empty (default)
+          skips the cache entirely. Safe by construction: the template
+          directory is content-addressed, so a stale restore just makes the
+          provisioner build the missing fingerprint — see
+          actions/pglite-template-cache. Needs no secrets, so the no-secrets
+          boundary above holds.
+        type: string
+        required: false
+        default: ''
 
 # Least-privilege, enforced at the source. The effective grant is the
 # INTERSECTION of these and the caller's job permissions, so a consumer that
@@ -225,6 +240,14 @@ jobs:
         run: |
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
+      # The consumer's PGlite schema template, restored before the smoke whose
+      # provisioning would otherwise build it. Opt-in via
+      # pglite-template-migrations; rationale lives with the action.
+      - name: Cache the PGlite schema template
+        if: ${{ steps.probe.outputs.present == 'true' && inputs.pglite-template-migrations != '' }}
+        uses: 12-apps/ci/.github/actions/pglite-template-cache@v1
+        with:
+          migrations-glob: ${{ inputs.pglite-template-migrations }}
       - name: Pre-command
         if: ${{ steps.probe.outputs.present == 'true' && inputs.pre-command != '' }}
         shell: bash

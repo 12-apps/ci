@@ -316,6 +316,11 @@ jobs:
         packages/ui/node_modules/.vite/vitest
       run-integration: ${{ contains(fromJSON(needs.static.outputs.matched), 'integration') }}
       integration-cache-path: node_modules/.vite/vitest
+      # Optional: cache the PGlite schema template the integration setup
+      # builds (a content-addressed migrated data directory, so a stale
+      # restore is harmless — the setup just rebuilds). The value is the
+      # hashFiles() glob over the committed migrations:
+      pglite-template-migrations: packages/prisma/prisma/migrations/**/migration.sql
       # Optional: fan the integration lane out over N runners (default 1 — the
       # single-job shape). See "Sharding the integration lane" below.
       integration-shards: 4
@@ -1222,7 +1227,11 @@ self-skips with a notice until the `smoke-script` exists; set `false` to opt out
 `smoke-script` (default `prod:smoke`), `build-command` (the prod build; empty
 skips the build step), `pre-command`, `github-packages-scope`, `package-dir`
 (default `.` — the directory whose `package.json` holds the `smoke-script`; point
-it at a workspace package, e.g. `apps/web`, if the script lives there).
+it at a workspace package, e.g. `apps/web`, if the script lives there), and
+`pglite-template-migrations` (empty by default — a hashFiles() glob over the
+consumer's committed migrations; when set, the job caches the PGlite schema
+template its throwaway-DB provisioning copies from, so the smoke skips the
+initdb + migration replay on a warm key; needs no secrets).
 
 The self-skip is only for a **valid** manifest that hasn't adopted the script
 yet. A `package.json` that is **missing, unreadable, or malformed** at
