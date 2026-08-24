@@ -197,6 +197,20 @@ on:
         type: string
         required: false
         default: ''
+      pglite-template-migrations:
+        description: >-
+          hashFiles() pattern covering the committed migrations behind the
+          consumer's PGlite schema template (the migrated data directory its
+          integration setup builds once per run and copies per suite). When
+          set, every integration shard restores/saves
+          node_modules/.cache/pglite-template, so the template build happens
+          once per cache key instead of once per job. Empty (default) skips
+          the cache entirely. Safe by construction: the template directory is
+          content-addressed, so a stale restore just makes the setup build the
+          missing fingerprint — see actions/pglite-template-cache.
+        type: string
+        required: false
+        default: ''
       unit-junit-reports:
         description: >-
           OPT-IN. Space-separated JUnit XML paths (files or directories) the unit
@@ -718,6 +732,15 @@ jobs:
         run: |
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
+
+      # The consumer's PGlite schema template, restored before the setup that
+      # would otherwise build it. Opt-in via pglite-template-migrations; the
+      # rationale (and why a stale restore is harmless) lives with the action.
+      - name: Cache the PGlite schema template
+        if: ${{ inputs.pglite-template-migrations != '' }}
+        uses: 12-apps/ci/.github/actions/pglite-template-cache@v1
+        with:
+          migrations-glob: ${{ inputs.pglite-template-migrations }}
 
       - name: Pre-integration setup
         if: ${{ inputs.pre-integration-command != '' }}

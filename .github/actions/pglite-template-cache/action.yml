@@ -1,0 +1,43 @@
+name: 'Cache the PGlite schema template'
+description: >-
+  Restore/save the consumer's PGlite schema template — the migrated data
+  directory its pglite-template module builds once per run and its
+  integration/e2e provisioners COPY per database, instead of each paying
+  initdb plus a full migration replay (~7s per boot). With the cache the
+  once-per-run build itself happens once per cache key, not once per job.
+
+  The template is content-addressed INSIDE the directory (each entry's name IS
+  the schema fingerprint), so a stale or mismatched restore is harmless — the
+  provisioner simply builds the fingerprint it needs. The key exists to make
+  that near-never happen, not to guard correctness, which is what makes this
+  cache safe for lanes that must never go green on the wrong schema. It tracks
+  the two inputs the data files depend on — the migrations and the PGlite
+  version that wrote them — and deliberately NOT the lockfile: a dependency
+  bump that leaves PGlite alone must not evict a template it cannot have
+  changed.
+
+inputs:
+  migrations-glob:
+    description: >-
+      hashFiles() pattern covering every committed migration the template
+      replays. The default is the @repo/prisma layout the current consumers
+      share.
+    required: false
+    default: 'packages/prisma/prisma/migrations/**/migration.sql'
+
+runs:
+  using: composite
+  steps:
+    # Read the version from the installed tree, not a manifest: the pin can be
+    # a catalog/range reference, and what wrote the template's data files is
+    # whatever actually resolved into node_modules.
+    - name: Resolve PGlite version (template cache key)
+      id: pglite
+      shell: bash
+      run: echo "version=$(node -p "JSON.parse(require('fs').readFileSync('node_modules/@electric-sql/pglite/package.json','utf8')).version")" >> "$GITHUB_OUTPUT"
+
+    - name: Cache the PGlite schema template
+      uses: actions/cache@v4
+      with:
+        path: node_modules/.cache/pglite-template
+        key: pglite-template-${{ steps.pglite.outputs.version }}-${{ hashFiles(inputs.migrations-glob) }}
