@@ -508,6 +508,55 @@ command has to forward extra CLI args through to vitest — the default
 with `process.argv.slice(2)`. On a unit lane with a turbo fallback path, the
 flag rides turbo's `--` pass-through into each package's test script.
 
+#### Sizing the fan-out from the diff, not from the input
+
+`unit-shards` / `integration-shards` are a CEILING. The matrix is expanded
+before anything has asked how much work the diff contains, so a change your
+selector answers with "nothing to test" still boots every leg, installs,
+runs the pre-command and exits 0 — and sharding multiplies that bill. Measured
+on future-pay: a two-file, e2e-only pull request paid **eight** such jobs
+across the two lanes, where before sharding it paid two.
+
+`unit-plan-command` / `integration-plan-command` close that. Point either at a
+command that prints, as its LAST line of stdout, how many shards THIS diff
+needs:
+
+```yaml
+      unit-shards: 4                     # the ceiling
+      unit-plan-command: node scripts/ci-unit-plan.mjs
+```
+
+* `0` — the lane has no work and **no shard runs at all**.
+* `N` — clamped to the matching `*-shards` input.
+* unset (default) — the static count, exactly as before.
+
+Same contract as `unit-fingerprint-command`: dependency-free, run on the
+runner's system Node, before any install. The plan job checks the tree out
+only when a command is set (with full history, since sizing usually means
+diffing a merge base).
+
+The POLICY belongs to you, because only your selector knows its own shape. The
+first consumer's rule is "the narrow `vitest related` path needs one runner;
+the package-level fallback needs all of them" — a handful of related test files
+never needed four machines, and the fallback always does.
+
+It **fails open**: a command that exits non-zero, or whose last line is not an
+integer, leaves the static count in force and logs a warning. The asymmetry
+decides it — a lane that runs too wide costs minutes, a lane that runs too
+narrow reports a verdict it never earned.
+
+Two consequences worth stating plainly:
+
+* **An empty matrix skips the lane and reports success.** That is the one
+  outcome a test lane must never produce BY ACCIDENT, which is why every
+  failure path above falls back instead of emptying, and why the plan job
+  prints a `::notice::` naming the reason whenever it does empty. Deliberate
+  and reasoned is a different thing from silent.
+* **It retires the zero-test bypass label for this case.** A lane that never
+  starts has no junit report to guard, so the signal job is skipped rather
+  than failed — which is what an SPA-only or docs-only pull request was
+  reaching for `ci:allow-zero-tests` to survive.
+
 **A new input needs the tag that ships it.** Workflow-call inputs are
 validated against the CALLED workflow at the pinned ref, so passing
 `unit-shards` (or any newer input) while `@v1` still points before the release

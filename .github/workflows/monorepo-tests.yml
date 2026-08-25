@@ -328,6 +328,40 @@ on:
         type: number
         required: false
         default: 1
+      unit-plan-command:
+        description: >-
+          Size the unit lane from the DIFF instead of from `unit-shards`.
+
+          `unit-shards` is a ceiling, not a plan: the matrix is expanded before
+          anything has asked how much work exists, so a diff the caller's
+          selector answers with "nothing to test" still boots every shard,
+          installs, generates a client and exits 0. Sharding multiplies that —
+          measured on the first consumer, a two-file e2e-only PR paid EIGHT
+          such jobs across the two lanes.
+
+          Set this to a command that prints, as its LAST line of stdout, how
+          many shards this diff actually needs. `0` means the lane has no work
+          and NO shard runs. Anything larger is clamped to `unit-shards`.
+          Same contract as `unit-fingerprint-command`: dependency-free, run on
+          the runner's system Node before any install (the plan job checks the
+          tree out only when this is set).
+
+          The caller decides the policy because only it knows its selector's
+          shape — e.g. "the narrow `vitest related` path needs one runner, the
+          package-level fallback needs all of them". Fail-open by design: a
+          command that errors, or prints something that is not an integer,
+          leaves `unit-shards` in force and is reported as a warning. The lane
+          running too wide is a cost; running too narrow is a lie.
+        type: string
+        required: false
+        default: ""
+      integration-plan-command:
+        description: >-
+          `unit-plan-command` for the integration lane — same contract, same
+          fail-open rule, clamped to `integration-shards`.
+        type: string
+        required: false
+        default: ""
 
 # Authenticate npm installs for consumers with RESTRICTED packages. Workflow-
 # level so every `pnpm install` in this file sees it; the consumer's .npmrc is
@@ -358,26 +392,74 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
+      # The EFFECTIVE shard count — the plan's answer, or `unit-shards` when no
+      # plan command is set. Everything downstream reads this rather than the
+      # input, so the job names and the guard conditions describe the matrix
+      # that actually ran.
+      count: ${{ steps.plan.outputs.count }}
     steps:
+      # Only a caller that SIZES the lane needs the tree. Without a plan
+      # command this job stays what it was: arithmetic over an input.
+      - name: Checkout
+        if: ${{ inputs.unit-plan-command != '' }}
+        uses: actions/checkout@v4
+        with:
+          # The caller's plan command almost certainly diffs against a merge
+          # base, which a shallow clone cannot resolve.
+          fetch-depth: 0
       - name: Compute the shard list
         id: plan
         shell: bash
         env:
           SHARDS: ${{ inputs.unit-shards }}
+          PLAN_CMD: ${{ inputs.unit-plan-command }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          # Clamp rather than trust: a bad INPUT must never reach the matrix.
           if ! [[ "$SHARDS" =~ ^[0-9]+$ ]] || [ "$SHARDS" -lt 1 ]; then
             echo "::warning::unit-shards='$SHARDS' is not a positive integer; falling back to a single shard."
             SHARDS=1
           fi
-          echo "shards=$(seq "$SHARDS" | jq -cRn '[inputs | tonumber]')" >> "$GITHUB_OUTPUT"
+          COUNT="$SHARDS"
+          if [ -n "$PLAN_CMD" ]; then
+            # Fail OPEN. Every failure mode here — a non-zero exit, a crash, a
+            # non-integer — leaves the static count in force, because the
+            # damage is asymmetric: a lane that runs too wide costs minutes, a
+            # lane that runs too narrow reports a verdict it never earned.
+            if ASKED_RAW="$(bash -c "$PLAN_CMD")"; then
+              ASKED="$(printf '%s' "$ASKED_RAW" | tail -n 1 | tr -d '[:space:]')"
+              if [[ "$ASKED" =~ ^[0-9]+$ ]]; then
+                if [ "$ASKED" -gt "$SHARDS" ]; then ASKED="$SHARDS"; fi
+                COUNT="$ASKED"
+              else
+                echo "::warning::unit-plan-command's last line was '$ASKED', not an integer; using unit-shards=$SHARDS."
+              fi
+            else
+              echo "::warning::unit-plan-command exited non-zero; using unit-shards=$SHARDS."
+            fi
+          fi
+          # An empty matrix skips the lane while reporting success. Reached by
+          # ACCIDENT — a miscomputed input — that is the one outcome a test
+          # lane must never produce, which is why the clamp above exists and
+          # why every failure path falls back rather than emptying. Reached
+          # DELIBERATELY, because the caller's own selector answered "this diff
+          # cannot affect a test in this lane", it is the correct outcome and
+          # the alternative is paying for runners to prove it one at a time.
+          # The distinction is the printed reason, so print one.
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::notice::unit lane: the plan command reports no work for this diff — no shard will run."
+            echo "shards=[]" >> "$GITHUB_OUTPUT"
+          else
+            echo "shards=$(seq "$COUNT" | jq -cRn '[inputs | tonumber]')" >> "$GITHUB_OUTPUT"
+          fi
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
 
   unit-tests:
     # An explicit name suppresses the "(1)" suffix GitHub would otherwise
     # append for a matrix job; the unsharded name must stay byte-identical or
     # every consumer requiring `Tests / Unit Tests` in a branch ruleset starts
     # waiting on a context that no longer reports (see integration-tests).
-    name: ${{ inputs.unit-shards > 1 && format('Unit Tests · shard {0}/{1}', matrix.shard, inputs.unit-shards) || 'Unit Tests' }}
+    name: ${{ needs.unit-plan.outputs.count > 1 && format('Unit Tests · shard {0}/{1}', matrix.shard, needs.unit-plan.outputs.count) || 'Unit Tests' }}
     runs-on: ubuntu-latest
     needs: unit-plan
     strategy:
@@ -416,7 +498,7 @@ jobs:
         if: >-
           ${{ inputs.unit-fingerprint-command != ''
               && github.event_name == 'pull_request'
-              && (inputs.unit-shards == 1 || inputs.unit-junit-reports == '') }}
+              && (needs.unit-plan.outputs.count == 1 || inputs.unit-junit-reports == '') }}
         shell: bash
         env:
           FP_CMD: ${{ inputs.unit-fingerprint-command }}
@@ -431,7 +513,7 @@ jobs:
           # different slice of the same tree, so a verdict recorded by shard 1
           # must never answer for shard 2 — and a recorded 1-of-1 verdict must
           # not survive a change in the shard count, which reslices every leg.
-          LANE_SHARD: ${{ matrix.shard }}/${{ inputs.unit-shards }}
+          LANE_SHARD: ${{ matrix.shard }}/${{ needs.unit-plan.outputs.count }}
         run: |
           set -o pipefail
           # NOT `set -e`: every failure here must fall through to an empty
@@ -571,7 +653,7 @@ jobs:
           UNIT_CMD: ${{ inputs.unit-test-command }}
           UNIT_FULL_CMD: ${{ inputs.unit-full-command }}
           SHARD_INDEX: ${{ matrix.shard }}
-          SHARD_TOTAL: ${{ inputs.unit-shards }}
+          SHARD_TOTAL: ${{ needs.unit-plan.outputs.count }}
           # Empty unless the caller opted in AND this pull request is in a stack.
           STACK_BASE_SHA: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.sha || '' }}
           # The base tip the step above actually fetched. Empty only when the
@@ -626,7 +708,7 @@ jobs:
         if: >-
           ${{ github.event_name == 'pull_request'
               && inputs.unit-junit-reports != ''
-              && inputs.unit-shards == 1
+              && needs.unit-plan.outputs.count == 1
               && !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label) }}
         uses: 12-apps/ci/.github/actions/vitest-signal-guard@v1
         with:
@@ -644,7 +726,7 @@ jobs:
         if: >-
           ${{ github.event_name == 'pull_request'
               && inputs.unit-junit-reports != ''
-              && inputs.unit-shards > 1
+              && needs.unit-plan.outputs.count > 1
               && steps.unit.outcome == 'success' }}
         shell: bash
         env:
@@ -723,11 +805,11 @@ jobs:
   unit-signal:
     name: Unit Signal
     runs-on: ubuntu-latest
-    needs: unit-tests
+    needs: [unit-plan, unit-tests]
     if: >-
       ${{ github.event_name == 'pull_request'
           && inputs.unit-junit-reports != ''
-          && inputs.unit-shards > 1
+          && needs.unit-plan.outputs.count > 1
           && !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label) }}
     steps:
       # Scoped to this attempt: artifact names are immutable within a run, so
@@ -848,30 +930,59 @@ jobs:
     if: ${{ inputs.run-integration }}
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
+      # The effective count — see unit-plan.
+      count: ${{ steps.plan.outputs.count }}
     steps:
+      - name: Checkout
+        if: ${{ inputs.integration-plan-command != '' }}
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Compute the shard list
         id: plan
         shell: bash
         env:
           SHARDS: ${{ inputs.integration-shards }}
+          PLAN_CMD: ${{ inputs.integration-plan-command }}
         run: |
-          set -euo pipefail
-          # Clamp rather than trust. A zero or negative count emits an EMPTY
-          # matrix, and an empty matrix skips the lane while reporting success —
-          # a silent green with no tests run, which is the one outcome a test
-          # lane must never produce by accident.
+          set -uo pipefail
+          # Clamp rather than trust: a bad INPUT must never reach the matrix.
           if ! [[ "$SHARDS" =~ ^[0-9]+$ ]] || [ "$SHARDS" -lt 1 ]; then
             echo "::warning::integration-shards='$SHARDS' is not a positive integer; falling back to a single shard."
             SHARDS=1
           fi
-          echo "shards=$(seq "$SHARDS" | jq -cRn '[inputs | tonumber]')" >> "$GITHUB_OUTPUT"
+          COUNT="$SHARDS"
+          if [ -n "$PLAN_CMD" ]; then
+            # Fail open — see unit-plan for why the asymmetry decides this.
+            if ASKED_RAW="$(bash -c "$PLAN_CMD")"; then
+              ASKED="$(printf '%s' "$ASKED_RAW" | tail -n 1 | tr -d '[:space:]')"
+              if [[ "$ASKED" =~ ^[0-9]+$ ]]; then
+                if [ "$ASKED" -gt "$SHARDS" ]; then ASKED="$SHARDS"; fi
+                COUNT="$ASKED"
+              else
+                echo "::warning::integration-plan-command's last line was '$ASKED', not an integer; using integration-shards=$SHARDS."
+              fi
+            else
+              echo "::warning::integration-plan-command exited non-zero; using integration-shards=$SHARDS."
+            fi
+          fi
+          # Empty by accident is the outcome a test lane must never produce;
+          # empty because the caller's selector proved there is no work is the
+          # correct one. See unit-plan for the full reasoning.
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::notice::integration lane: the plan command reports no work for this diff — no shard will run."
+            echo "shards=[]" >> "$GITHUB_OUTPUT"
+          else
+            echo "shards=$(seq "$COUNT" | jq -cRn '[inputs | tonumber]')" >> "$GITHUB_OUTPUT"
+          fi
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
 
   integration-tests:
     # An explicit name suppresses the "(1)" suffix GitHub would otherwise append
     # for a matrix job. That matters beyond looks: the unsharded name has to stay
     # byte-identical or every consumer requiring `Tests / Integration Tests` in a
     # branch ruleset starts waiting on a context that no longer reports.
-    name: ${{ inputs.integration-shards > 1 && format('Integration Tests · shard {0}/{1}', matrix.shard, inputs.integration-shards) || 'Integration Tests' }}
+    name: ${{ needs.integration-plan.outputs.count > 1 && format('Integration Tests · shard {0}/{1}', matrix.shard, needs.integration-plan.outputs.count) || 'Integration Tests' }}
     runs-on: ubuntu-latest
     needs: integration-plan
     if: ${{ inputs.run-integration }}
@@ -960,7 +1071,7 @@ jobs:
           INT_CMD: ${{ inputs.integration-command }}
           INT_FULL_CMD: ${{ inputs.integration-full-command }}
           SHARD_INDEX: ${{ matrix.shard }}
-          SHARD_TOTAL: ${{ inputs.integration-shards }}
+          SHARD_TOTAL: ${{ needs.integration-plan.outputs.count }}
         run: |
           set -o pipefail
           # Appended, not injected: vitest applies `--shard` to the file set that
@@ -995,7 +1106,7 @@ jobs:
         if: >-
           ${{ github.event_name == 'pull_request'
               && inputs.integration-junit-reports != ''
-              && inputs.integration-shards == 1
+              && needs.integration-plan.outputs.count == 1
               && !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label) }}
         uses: 12-apps/ci/.github/actions/vitest-signal-guard@v1
         with:
@@ -1010,7 +1121,7 @@ jobs:
         if: >-
           ${{ github.event_name == 'pull_request'
               && inputs.integration-junit-reports != ''
-              && inputs.integration-shards > 1
+              && needs.integration-plan.outputs.count > 1
               && steps.integration.outcome == 'success' }}
         shell: bash
         env:
@@ -1047,11 +1158,11 @@ jobs:
   integration-signal:
     name: Integration Signal
     runs-on: ubuntu-latest
-    needs: integration-tests
+    needs: [integration-plan, integration-tests]
     if: >-
       ${{ github.event_name == 'pull_request'
           && inputs.integration-junit-reports != ''
-          && inputs.integration-shards > 1
+          && needs.integration-plan.outputs.count > 1
           && !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label) }}
     steps:
       # Scoped to this attempt — see unit-signal.
