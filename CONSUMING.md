@@ -1357,6 +1357,131 @@ Two things to read before wiring `detect-changes.yml` in:
 
 Both live on `@v2`; `v1` is unchanged.
 
+# Keeping a bundle budget from being loosened quietly
+
+A bundle budget is a ledger of ceilings committed next to the code and
+re-measured on every build. The good ones fail in **both** directions — over the
+ceiling, and *stale* when the bundle shrank and the number did not — because a
+ceiling drifting above the truth has quietly stopped gating.
+
+That stale half is also the hole. It requires an `--update` that rewrites the
+ledger from the current measurement, and the same command raises the ceilings as
+happily as it lowers them. So the cheapest exit from a red budget is the command
+the failure message just taught you:
+
+```
+eager raw is 812.4 KiB, over the 737.4 KiB ceiling by 75.0 KiB.
+  → pnpm quality:bundle:update      # green again, two numbers up, nobody decided
+```
+
+The gate can *ask* the author not to ("check what the entry chunk gained before
+raising this"). Prose is not a gate, and the one thing a local script cannot see
+is the number the ledger used to hold.
+
+A diff can. `bundle-ceiling-guard` reads the ledger at the merge base and at
+HEAD and holds one rule:
+
+> **Tightening is free. Loosening costs a sentence.**
+
+Loosening means a ceiling that rose, a floor that fell, a limit that vanished, or
+a surface that stopped being measured at all — that last one because a gate you
+can delete in one line is not a gate, and deleting it is the loosest move on the
+board.
+
+## A. Caller job
+
+Needs the merge base, so pair it with `fetch-base`:
+
+```yaml
+jobs:
+  bundle-ceiling:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # the guard diffs; a shallow tree has no base
+      - id: base
+        uses: 12-apps/ci/.github/actions/fetch-base@v1
+      - uses: 12-apps/ci/.github/actions/bundle-ceiling-guard@v1
+        with:
+          ledger: .bundle-budget.json
+          base-ref: ${{ steps.base.outputs.merge-base }}
+          # ceiling-keys: raw,brotli   # may only go DOWN  (defaults)
+          # floor-keys: chunks         # may only go UP
+```
+
+It builds nothing and measures nothing — your own budget script stays the single
+implementation of that, so the two can never disagree about whether a tree
+passes. This is node builtins reading two JSON blobs out of git, and runs in
+about a second.
+
+Put it where **no paths filter can skip it** (this org's repos use a
+`ci-success`-style job with `if: always()`). A budget is a completeness property:
+when its trigger misses, the result is not a red run but *no run at all*.
+
+## B. What the ledger must look like
+
+Any JSON with a `surfaces` object keyed by surface name. Which keys are limits is
+yours to declare, because only you know which of your numbers is a maximum:
+
+```jsonc
+{
+  "surfaces": {
+    "storefront": {
+      "dist": "apps/client/dist",
+      "raw": 737414,      // ceiling-key: may only go down
+      "brotli": 204344,   // ceiling-key
+      "chunks": 4         // floor-key: recombining cacheable chunks into one is
+                          // a regression that leaves every byte total untouched
+    }
+  }
+}
+```
+
+Everything not named in `ceiling-keys` / `floor-keys` is ignored, so a `measured`
+block that moves on every build costs nothing.
+
+## C. Loosening one on purpose
+
+Sometimes the bytes genuinely have to move. Record it against the surface:
+
+```jsonc
+"loosened": {
+  "raw": 760000,
+  "why": "The PIX QR encoder moved onto first paint: the shopper cannot pay without it, so deferring it would trade bytes for a broken checkout."
+}
+```
+
+Two rules, and both exist because an exemption list is where things go to be
+forgotten:
+
+- **It must name the new value.** The moment the ceiling moves again the recorded
+  number no longer matches, and the next author owes their own sentence about
+  their own regression. One raise, one argument.
+- **It must read like an argument.** Empty, a bare label, or an opener like
+  `TODO` / `TBD` / `n/a` / `WIP` is refused. (`Because <the reason>` is fine —
+  only a bare `because` is not. A rule that rejected real prose would teach worse
+  writing, not tighter limits.)
+
+Retiring a surface takes the same sentence, at the top level, since there is no
+surface left to hang it on:
+
+```jsonc
+"retired": { "storefront": { "why": "..." } }
+```
+
+## D. What it will not do
+
+- It never fails a diff that only **tightens** — that is the ratchet working, and
+  it must stay free or nobody will ratchet.
+- A ledger absent from the base is an **adoption**, not a violation: there is no
+  previous number to loosen, so the first PR to add one passes.
+- Everything else fails closed. A head ledger that is missing, unreadable or
+  malformed is an error, because a guard that cannot read what it guards must
+  never report success.
+
 # Fetching a PR base you can actually diff against
 
 The reusable workflows here already do this for their own lanes. This section is
