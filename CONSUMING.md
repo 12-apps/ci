@@ -533,7 +533,17 @@ needs:
 Same contract as `unit-fingerprint-command`: dependency-free, run on the
 runner's system Node, before any install. The plan job checks the tree out
 only when a command is set (with full history, since sizing usually means
-diffing a merge base).
+diffing a merge base) and fetches the base through the same `fetch-base`
+action the lane itself uses, so the plan and the run resolve the SAME base —
+`FETCH_HEAD` means the same thing in both.
+
+**PR-only, and that is the load-bearing half.** The push run is the
+post-merge safety net: it skips nothing, by definition. A selector asked to
+size a push diff has no PR base to narrow against — it would answer for the
+default branch against itself, return `0`, and empty the matrix of the one
+run whose whole purpose is to miss nothing. So the plan command is ignored on
+`push` and the static count stands. Sizing is an optimisation; the safety net
+is not.
 
 The POLICY belongs to you, because only your selector knows its own shape. The
 first consumer's rule is "the narrow `vitest related` path needs one runner;

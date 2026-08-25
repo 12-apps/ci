@@ -401,18 +401,34 @@ jobs:
       # Only a caller that SIZES the lane needs the tree. Without a plan
       # command this job stays what it was: arithmetic over an input.
       - name: Checkout
-        if: ${{ inputs.unit-plan-command != '' }}
+        if: ${{ inputs.unit-plan-command != '' && github.event_name == 'pull_request' }}
         uses: actions/checkout@v4
         with:
           # The caller's plan command almost certainly diffs against a merge
           # base, which a shallow clone cannot resolve.
           fetch-depth: 0
+      # The caller's command diffs against a base, and FETCH_HEAD is how every
+      # selector in this tier reaches it. Same action the lane itself uses, so
+      # the plan and the run resolve the SAME base — a plan sized against a
+      # different one would be sizing a diff the lane never runs.
+      - name: Fetch the base for affected selection
+        if: ${{ inputs.unit-plan-command != '' && github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/fetch-base@v1
+        with:
+          base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
+          fallback-branch: ${{ inputs.default-branch }}
       - name: Compute the shard list
         id: plan
         shell: bash
         env:
           SHARDS: ${{ inputs.unit-shards }}
-          PLAN_CMD: ${{ inputs.unit-plan-command }}
+          # PR-ONLY, and this is the load-bearing half of the input. The push
+          # run is the post-merge safety net: it skips nothing, by definition.
+          # A selector asked to size a push diff has no PR base to narrow
+          # against — it would answer for `main` against itself, return 0, and
+          # empty the matrix of the one run whose whole purpose is to miss
+          # nothing. Sizing is an optimisation; the safety net is not.
+          PLAN_CMD: ${{ github.event_name == 'pull_request' && inputs.unit-plan-command || '' }}
         run: |
           set -uo pipefail
           # Clamp rather than trust: a bad INPUT must never reach the matrix.
@@ -934,16 +950,32 @@ jobs:
       count: ${{ steps.plan.outputs.count }}
     steps:
       - name: Checkout
-        if: ${{ inputs.integration-plan-command != '' }}
+        if: ${{ inputs.integration-plan-command != '' && github.event_name == 'pull_request' }}
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # The caller's command diffs against a base, and FETCH_HEAD is how every
+      # selector in this tier reaches it. Same action the lane itself uses, so
+      # the plan and the run resolve the SAME base — a plan sized against a
+      # different one would be sizing a diff the lane never runs.
+      - name: Fetch the base for affected selection
+        if: ${{ inputs.integration-plan-command != '' && github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/fetch-base@v1
+        with:
+          base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
+          fallback-branch: ${{ inputs.default-branch }}
       - name: Compute the shard list
         id: plan
         shell: bash
         env:
           SHARDS: ${{ inputs.integration-shards }}
-          PLAN_CMD: ${{ inputs.integration-plan-command }}
+          # PR-ONLY, and this is the load-bearing half of the input. The push
+          # run is the post-merge safety net: it skips nothing, by definition.
+          # A selector asked to size a push diff has no PR base to narrow
+          # against — it would answer for `main` against itself, return 0, and
+          # empty the matrix of the one run whose whole purpose is to miss
+          # nothing. Sizing is an optimisation; the safety net is not.
+          PLAN_CMD: ${{ github.event_name == 'pull_request' && inputs.integration-plan-command || '' }}
         run: |
           set -uo pipefail
           # Clamp rather than trust: a bad INPUT must never reach the matrix.
