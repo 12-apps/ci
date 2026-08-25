@@ -48,3 +48,7 @@ jobs:
       - name: vitest-signal-guard
         shell: bash
         run: node --test .github/actions/vitest-signal-guard/__tests__/check-test-signal.test.mjs
+
+      - name: bundle-ceiling-guard
+        shell: bash
+        run: node --test .github/actions/bundle-ceiling-guard/__tests__/bundle-ceiling-guard.test.mjs

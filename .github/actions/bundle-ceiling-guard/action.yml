@@ -1,0 +1,55 @@
+name: 'Bundle ceiling guard'
+description: >-
+  Fail a pull request that LOOSENED a committed bundle budget without saying why.
+  A budget gate ships an `--update` because its stale half requires one, and that
+  same command also raises the ceilings — so the cheapest way out of a red budget
+  is the command the failure message just taught you. This reads the ledger at the
+  merge base and at HEAD: tightening is free, loosening costs a sentence naming
+  the value it applies to. Measures nothing and builds nothing; the consumer's own
+  budget script stays the single implementation of that.
+
+inputs:
+  ledger:
+    description: >-
+      Repo-relative path to the committed budget JSON (e.g. .bundle-budget.json).
+      Must hold a `surfaces` object keyed by surface name.
+    required: true
+  base-ref:
+    description: >-
+      Ref to compare against — normally the merge base, from the fetch-base
+      action's `merge-base` output. Absent from the base tree means the diff
+      ADOPTS the budget, which is not a loosening and passes.
+    required: true
+  ceiling-keys:
+    description: >-
+      Comma-separated numeric keys that may only go DOWN (byte totals). Declared
+      by the caller because only the caller knows which of its numbers is a
+      maximum.
+    required: false
+    default: 'raw,brotli'
+  floor-keys:
+    description: >-
+      Comma-separated numeric keys that may only go UP. A chunk COUNT is the
+      usual one: recombining four cacheable chunks into one is a regression that
+      leaves every byte total untouched.
+    required: false
+    default: 'chunks'
+  working-directory:
+    description: 'Consumer checkout root the ledger path is relative to.'
+    required: false
+    default: '.'
+
+runs:
+  using: composite
+  steps:
+    - name: A budget may be tightened freely and loosened deliberately
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CEILING_KEYS: ${{ inputs.ceiling-keys }}
+        FLOOR_KEYS: ${{ inputs.floor-keys }}
+        LEDGER: ${{ inputs.ledger }}
+        BASE_REF: ${{ inputs.base-ref }}
+      run: |
+        set -euo pipefail
+        node "$GITHUB_ACTION_PATH/bundle-ceiling-guard.mjs" "$LEDGER" "$BASE_REF"
