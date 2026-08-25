@@ -321,9 +321,10 @@ jobs:
       # restore is harmless — the setup just rebuilds). The value is the
       # hashFiles() glob over the committed migrations:
       pglite-template-migrations: packages/prisma/prisma/migrations/**/migration.sql
-      # Optional: fan the integration lane out over N runners (default 1 — the
-      # single-job shape). See "Sharding the integration lane" below.
+      # Optional: fan the test lanes out over N runners each (default 1 — the
+      # single-job shape). See "Sharding the test lanes" below.
       integration-shards: 4
+      unit-shards: 4
 
   # Repo-specific jobs gate on the static tier the same way `tests` does, and
   # read their own filters out of `matched`:
@@ -476,30 +477,45 @@ check at a *merged* report — one job after the matrix running `vitest
 because no slice is ever inspected. Adding that merge step is the fix; until it
 exists, pick one per lane.
 
-### Sharding the integration lane (opt-in)
+### Sharding the test lanes (opt-in)
 
-`integration-shards: N` fans the integration lane out over N runners. The default
-is `1`, which is byte-for-byte the single-job shape — same check name, same
-command line — so no existing caller is affected.
+`integration-shards: N` fans the integration lane out over N runners, and
+`unit-shards: N` does the same for the unit lane. Both default to `1`, which is
+byte-for-byte the single-job shape — same check name, same command line — so no
+existing caller is affected.
 
-Reach for it when the integration lane is the longest job in the run AND its
-runtime is dominated by the suite rather than by setup. The distinction matters
-because every leg pays the full checkout, install and `pre-integration-command`
-again: at 40s of setup and a 12-minute suite, four shards is most of a 4x; at 40s
-of setup and a 90-second suite, four shards is slower than one.
+Reach for either when that lane is the longest job in the run AND its runtime is
+dominated by the suite rather than by setup. The distinction matters because
+every leg pays the full checkout, install and pre-command again: at 40s of setup
+and a 12-minute suite, four shards is most of a 4x; at 40s of setup and a
+90-second suite, four shards is slower than one.
 
-It exists because an integration suite that provisions a database per test file
-saturates a single runner from *inside* one job. Such suites cap their worker
-pool for RAM (`poolOptions.forks.maxForks`), so the pool — not the core count —
-is the ceiling, and raising `--maxWorkers` trades an out-of-memory failure for a
-slow one. More machines is the only direction that helps.
+The two lanes hit the same wall by different roads. An integration suite that
+provisions a database per test file saturates a single runner from *inside* one
+job — its worker pool is capped for RAM (`poolOptions.forks.maxForks`), so the
+pool, not the core count, is the ceiling. A unit lane running per-package
+already parallelises across packages (turbo), so its floor is the single
+biggest package's suite — and vitest's transform/collect cost, which often
+dwarfs the tests themselves, scales with the files each run loads. In both
+cases more machines is the only direction that helps, and `--shard` splits the
+file list so the transform bill divides too.
 
-Each leg appends `--shard=<index>/<total>` to the integration command. vitest
+Each leg appends `--shard=<index>/<total>` to the lane's command. vitest
 applies that to the file set that survives *your* selection, so an affected-only
 selector still narrows first and the shard splits only what it chose. Your
 command has to forward extra CLI args through to vitest — the default
 (`pnpm run test:integration -- …`) does, and so does a custom selector that ends
-with `process.argv.slice(2)`.
+with `process.argv.slice(2)`. On a unit lane with a turbo fallback path, the
+flag rides turbo's `--` pass-through into each package's test script.
+
+**The zero-test-signal guard composes with sharding.** At one shard it runs
+inside the job as always; above one, each shard ships its JUnit reports as an
+artifact and a post-matrix job (`Unit Signal` / `Integration Signal`) asserts
+the MERGED total — no slice is ever inspected alone, so an empty shard of a
+narrow selection cannot redden the build. One interaction to know: with
+`unit-junit-reports` armed on a sharded unit lane, the verdict-fingerprint skip
+stands down (a per-shard record cannot carry a lane-level signal claim — the
+fingerprint step in the workflow states the full argument).
 
 Two things to know before raising it:
 

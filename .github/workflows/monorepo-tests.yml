@@ -242,14 +242,13 @@ on:
         description: >-
           OPT-IN. As `unit-junit-reports`, for the integration lane.
 
-          Currently mutually exclusive with `integration-shards > 1`, and the
-          workflow enforces that rather than leaving it to the caller: a shard
-          sees only its own slice, and an empty slice is ordinary arithmetic
-          when a narrow selection is split across runners. That exclusion is an
-          artifact of this workflow having no merge step — guarding a MERGED
-          report (`vitest --merge-reports` in a job after the matrix) makes the
-          two fully compatible, because no slice is ever inspected. Read it as
-          scaffolding, not as a property of the guard.
+          Fully compatible with sharding. At one shard the guard runs inside
+          the job, exactly as before. Above one, each shard ships its reports
+          as an artifact and a post-matrix job (`Integration Signal`) asserts
+          the MERGED total instead — a shard is never inspected alone, because
+          an empty slice is ordinary arithmetic when a narrow selection is
+          split across runners, not a selector bug. The unit lane pairs
+          `unit-junit-reports` with `unit-shards` the same way.
         type: string
         required: false
         default: ''
@@ -297,6 +296,38 @@ on:
         type: number
         required: false
         default: 1
+      unit-shards:
+        description: >-
+          Fan the unit lane out over this many runners. 1 (default) keeps the
+          single-job shape every existing caller has today — same check name,
+          same command line.
+
+          The integration lane sharded first because RAM capped its worker
+          pool; the unit lane shards for a different measured reason: packages
+          already run concurrently under turbo, so the lane's floor is its
+          single BIGGEST package's suite (in the first consumer, ~14 of the
+          lane's 16 minutes), and vitest's own transform/collect cost scales
+          with the files each worker loads. `--shard` splits the file list, so
+          both the run and the transform bill divide across machines — the one
+          axis a single runner cannot.
+
+          Each leg appends `--shard=<index>/<total>` to the unit command
+          (`unit-test-command` on PRs, `unit-full-command` on push), applied by
+          vitest AFTER the caller's own selection, exactly as
+          `integration-shards` does. The caller's command must forward extra
+          CLI args to every vitest invocation it makes — including a turbo
+          fallback path, where `turbo run test --affected -- --shard=…`
+          delivers the flag through each package's test script.
+
+          The verdict fingerprint stays sound under sharding when the junit
+          guard is off: the shard index and total are folded into the lane
+          half of the verdict key, so each shard records and reuses only its
+          own slice's verdict. With `unit-junit-reports` ALSO set, the verdict
+          skip stands down entirely (see the fingerprint step for why the two
+          cannot compose), so a guard-armed sharded lane always runs.
+        type: number
+        required: false
+        default: 1
 
 # Authenticate npm installs for consumers with RESTRICTED packages. Workflow-
 # level so every `pnpm install` in this file sees it; the consumer's .npmrc is
@@ -317,9 +348,44 @@ env:
   NPM_CONFIG_USERCONFIG: ${{ github.workspace }}/.npmrc
 
 jobs:
-  unit-tests:
-    name: Unit Tests
+  # Mirrors integration-plan, for the same reason it exists at all: a matrix
+  # computed from a raw input would emit an EMPTY list for a zero, a negative
+  # or a typo — and an empty matrix skips the lane while reporting success,
+  # the one outcome a test lane must never produce by accident. The clamp
+  # lives in a job so the matrix can only ever be [1..N].
+  unit-plan:
+    name: Unit Plan
     runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - name: Compute the shard list
+        id: plan
+        shell: bash
+        env:
+          SHARDS: ${{ inputs.unit-shards }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$SHARDS" =~ ^[0-9]+$ ]] || [ "$SHARDS" -lt 1 ]; then
+            echo "::warning::unit-shards='$SHARDS' is not a positive integer; falling back to a single shard."
+            SHARDS=1
+          fi
+          echo "shards=$(seq "$SHARDS" | jq -cRn '[inputs | tonumber]')" >> "$GITHUB_OUTPUT"
+
+  unit-tests:
+    # An explicit name suppresses the "(1)" suffix GitHub would otherwise
+    # append for a matrix job; the unsharded name must stay byte-identical or
+    # every consumer requiring `Tests / Unit Tests` in a branch ruleset starts
+    # waiting on a context that no longer reports (see integration-tests).
+    name: ${{ inputs.unit-shards > 1 && format('Unit Tests · shard {0}/{1}', matrix.shard, inputs.unit-shards) || 'Unit Tests' }}
+    runs-on: ubuntu-latest
+    needs: unit-plan
+    strategy:
+      # One shard's failure must not cancel the others — a partial matrix
+      # reports a partial inventory (see integration-tests).
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.unit-plan.outputs.shards) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -338,7 +404,19 @@ jobs:
         id: fingerprint
         # PR-only. The push run is the post-merge safety net; it skips nothing,
         # by definition, and must never consult a recorded verdict.
-        if: ${{ inputs.unit-fingerprint-command != '' && github.event_name == 'pull_request' }}
+        #
+        # Also disabled when the junit guard is armed on a SHARDED lane. The
+        # verdict is recorded per shard, but the guard's claim is lane-level
+        # ("the MERGED total ran at least one test", asserted by unit-signal
+        # after the matrix) — so a shard's record can never carry it: a run
+        # whose signal job failed would still have recorded every green shard,
+        # and the next identical tree would skip straight past the guard on
+        # those records. Two sound mechanisms, unsound composed; the guard is
+        # the safety property, so it wins and the skip stands down.
+        if: >-
+          ${{ inputs.unit-fingerprint-command != ''
+              && github.event_name == 'pull_request'
+              && (inputs.unit-shards == 1 || inputs.unit-junit-reports == '') }}
         shell: bash
         env:
           FP_CMD: ${{ inputs.unit-fingerprint-command }}
@@ -349,6 +427,11 @@ jobs:
           LANE_NODE: ${{ inputs.node-version }}
           LANE_PRE: ${{ inputs.pre-test-command }}
           LANE_UNIT: ${{ inputs.unit-test-command }}
+          # The shard is part of the lane's identity: each shard runs a
+          # different slice of the same tree, so a verdict recorded by shard 1
+          # must never answer for shard 2 — and a recorded 1-of-1 verdict must
+          # not survive a change in the shard count, which reslices every leg.
+          LANE_SHARD: ${{ matrix.shard }}/${{ inputs.unit-shards }}
         run: |
           set -o pipefail
           # NOT `set -e`: every failure here must fall through to an empty
@@ -362,8 +445,8 @@ jobs:
             echo "value=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          lane="$(printf '%s\0%s\0%s\0%s' \
-            "$LANE_NODE" "$LANE_PRE" "$LANE_UNIT" "$FP_CMD" \
+          lane="$(printf '%s\0%s\0%s\0%s\0%s' \
+            "$LANE_NODE" "$LANE_PRE" "$LANE_UNIT" "$FP_CMD" "$LANE_SHARD" \
             | sha256sum | cut -c1-16)"
           echo "value=${lane}-${fp}" >> "$GITHUB_OUTPUT"
           echo "unit verdict key: ${lane}-${fp}"
@@ -431,7 +514,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .turbo
-          key: turbo-unit-${{ github.sha }}
+          # The shard is in the save key so the legs don't race one immutable
+          # entry (losers would just warn, but every loser's warm state is
+          # thrown away); the prefix restore still shares whatever any leg
+          # saved, which is safe because turbo's own task hashes decide reuse.
+          key: turbo-unit-${{ github.sha }}-s${{ matrix.shard }}
           restore-keys: |
             turbo-unit-
 
@@ -445,10 +532,14 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ inputs.vitest-cache-paths }}
-          key: vitest-results-${{ github.ref }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # The shard index is part of the key space for the same reason as the
+          # integration lane's: without it every leg writes the same entry, the
+          # legs race, and the survivor's timings describe one shard's slice
+          # while being restored by all of them.
+          key: vitest-results-${{ github.ref }}-s${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            vitest-results-${{ github.ref }}-
-            vitest-results-refs/heads/${{ inputs.default-branch }}-
+            vitest-results-${{ github.ref }}-s${{ matrix.shard }}-
+            vitest-results-refs/heads/${{ inputs.default-branch }}-s${{ matrix.shard }}-
 
       # Make FETCH_HEAD — and with it every three-dot diff and turbo's
       # --affected range — actually resolvable. This used to be a
@@ -479,6 +570,8 @@ jobs:
         env:
           UNIT_CMD: ${{ inputs.unit-test-command }}
           UNIT_FULL_CMD: ${{ inputs.unit-full-command }}
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: ${{ inputs.unit-shards }}
           # Empty unless the caller opted in AND this pull request is in a stack.
           STACK_BASE_SHA: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.sha || '' }}
           # The base tip the step above actually fetched. Empty only when the
@@ -487,6 +580,15 @@ jobs:
           BASE_SHA: ${{ steps.base.outputs.base-sha }}
         run: |
           set -o pipefail
+          # Appended, not injected — vitest applies `--shard` to the file set
+          # that survives the caller's own selection, and omitting it entirely
+          # at one shard keeps an unsharded caller's command line byte-identical
+          # (see the integration lane's copy of this).
+          SHARD_ARG=""
+          if [ "$SHARD_TOTAL" -gt 1 ]; then
+            SHARD_ARG=" --shard=${SHARD_INDEX}/${SHARD_TOTAL}"
+            echo "▶️  shard ${SHARD_INDEX}/${SHARD_TOTAL}"
+          fi
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             # Pin turbo's --affected base to a SHA that exists locally. Left to
             # itself turbo resolves GITHUB_BASE_REF by NAME, and a pull request
@@ -503,9 +605,9 @@ jobs:
             elif [ -n "$BASE_SHA" ]; then
               export TURBO_SCM_BASE="$BASE_SHA" TURBO_SCM_HEAD=HEAD
             fi
-            bash -c "$UNIT_CMD" 2>&1 | tee unit.log
+            bash -c "${UNIT_CMD}${SHARD_ARG}" 2>&1 | tee unit.log
           else
-            bash -c "$UNIT_FULL_CMD" 2>&1 | tee unit.log
+            bash -c "${UNIT_FULL_CMD}${SHARD_ARG}" 2>&1 | tee unit.log
           fi
 
       # ── Zero-test-signal guard ─────────────────────────────────────────────
@@ -517,16 +619,52 @@ jobs:
       # point of this step. Gated only on event, opt-in, and the label — and
       # carrying no `continue-on-error`, because a guard that cannot fail is
       # decoration.
+      # Gated on a single shard: a shard only sees its own slice, and an empty
+      # slice is arithmetic, not a selector bug. Above one shard the guard
+      # moves to `unit-signal` below, which asserts the MERGED total.
       - name: Verify the unit lane executed at least one test
         if: >-
           ${{ github.event_name == 'pull_request'
               && inputs.unit-junit-reports != ''
+              && inputs.unit-shards == 1
               && !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label) }}
         uses: 12-apps/ci/.github/actions/vitest-signal-guard@v1
         with:
           reports: ${{ inputs.unit-junit-reports }}
           lane: unit
           bypass-label: ${{ inputs.allow-zero-tests-label }}
+
+      # Sharded runs ship each leg's reports to the post-matrix signal job
+      # instead. upload-artifact wants newline-separated paths where the guard's
+      # contract is space-separated, hence the translation; `error` on no files
+      # keeps the guard's fail-closed posture — a misconfigured report path
+      # fails the shard loudly rather than starving the aggregate quietly.
+      - name: Stage JUnit reports for the signal job
+        id: unit-junit-paths
+        if: >-
+          ${{ github.event_name == 'pull_request'
+              && inputs.unit-junit-reports != ''
+              && inputs.unit-shards > 1
+              && steps.unit.outcome == 'success' }}
+        shell: bash
+        env:
+          REPORTS: ${{ inputs.unit-junit-reports }}
+        run: |
+          set -euo pipefail
+          {
+            echo "paths<<PATHS_EOF"
+            printf '%s\n' $REPORTS
+            echo "PATHS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload JUnit reports for the signal job
+        if: ${{ steps.unit-junit-paths.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-junit-a${{ github.run_attempt }}-s${{ matrix.shard }}
+          path: ${{ steps.unit-junit-paths.outputs.paths }}
+          if-no-files-found: error
+          retention-days: 1
 
       # Save even when tests FAIL — the failure entries are what makes the next
       # run's ordering useful (actions/cache's built-in post step skips saving
@@ -537,7 +675,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ inputs.vitest-cache-paths }}
-          key: vitest-results-${{ github.ref }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: vitest-results-${{ github.ref }}-s${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       # ── Record the verdict, and ONLY a passing one ─────────────────────────
       # `steps.unit.outcome == 'success'` is the entire safety argument, so it is
@@ -576,6 +714,36 @@ jobs:
         with:
           path: .unit-verdict
           key: unit-verdict-${{ steps.fingerprint.outputs.value }}
+
+  # The zero-test-signal guard for a SHARDED unit lane: one job after the
+  # matrix, over every shard's shipped reports, so no slice is ever inspected
+  # alone. Runs only when all shards succeeded (a red shard is already the
+  # better signal) and inherits the guard's fail-closed posture — zero
+  # artifacts, zero parseable reports or a zero summed total all fail.
+  unit-signal:
+    name: Unit Signal
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    if: >-
+      ${{ github.event_name == 'pull_request'
+          && inputs.unit-junit-reports != ''
+          && inputs.unit-shards > 1
+          && !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label) }}
+    steps:
+      # Scoped to this attempt: artifact names are immutable within a run, so
+      # each attempt uploads under its own prefix and reads back only its own —
+      # a retried run must not count the previous attempt's reports.
+      - name: Download every shard's JUnit reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: unit-junit-a${{ github.run_attempt }}-*
+          path: junit-signal
+      - name: Verify the unit lane executed at least one test
+        uses: 12-apps/ci/.github/actions/vitest-signal-guard@v1
+        with:
+          reports: junit-signal
+          lane: unit
+          bypass-label: ${{ inputs.allow-zero-tests-label }}
 
   build:
     name: Build
@@ -820,15 +988,9 @@ jobs:
       # splitting a narrow selection across runners — shard 3 of 4 drawing
       # nothing is arithmetic, not a selector bug. Run per-shard it would turn
       # that into a red build, which is worse than the hole it closes: a guard
-      # that cries wolf gets bypassed, and then it guards nothing.
-      #
-      # The exclusion is an ARTIFACT of this workflow, not of the idea. Guarding
-      # a MERGED report — one job after the matrix, over `vitest
-      # --merge-reports` — makes sharding and the guard fully compatible,
-      # because you never inspect a slice. A sibling repo already merges shard
-      # blobs into a single junit exactly that way; it simply has no guard on
-      # top of it yet. So the fix here is a merge step, and this condition is
-      # scaffolding until one exists — not a permanent either/or.
+      # that cries wolf gets bypassed, and then it guards nothing. Above one
+      # shard the guard is `integration-signal` below, which asserts the
+      # MERGED total across every shard's shipped reports instead.
       - name: Verify the integration lane executed at least one test
         if: >-
           ${{ github.event_name == 'pull_request'
@@ -841,6 +1003,35 @@ jobs:
           lane: integration
           bypass-label: ${{ inputs.allow-zero-tests-label }}
 
+      # Sharded runs ship each leg's reports to the post-matrix signal job —
+      # same mechanics and rationale as the unit lane's copy of these steps.
+      - name: Stage JUnit reports for the signal job
+        id: int-junit-paths
+        if: >-
+          ${{ github.event_name == 'pull_request'
+              && inputs.integration-junit-reports != ''
+              && inputs.integration-shards > 1
+              && steps.integration.outcome == 'success' }}
+        shell: bash
+        env:
+          REPORTS: ${{ inputs.integration-junit-reports }}
+        run: |
+          set -euo pipefail
+          {
+            echo "paths<<PATHS_EOF"
+            printf '%s\n' $REPORTS
+            echo "PATHS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload JUnit reports for the signal job
+        if: ${{ steps.int-junit-paths.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-junit-a${{ github.run_attempt }}-s${{ matrix.shard }}
+          path: ${{ steps.int-junit-paths.outputs.paths }}
+          if-no-files-found: error
+          retention-days: 1
+
       # Save even on failure — failures drive the next run's ordering (see
       # unit-tests).
       - name: Save vitest results cache
@@ -849,3 +1040,29 @@ jobs:
         with:
           path: ${{ inputs.integration-cache-path }}
           key: vitest-int-results-${{ github.ref }}-s${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+  # The zero-test-signal guard for a SHARDED integration lane — the merge job
+  # the per-shard gate above always named as the missing piece. Same shape as
+  # unit-signal: post-matrix, merged total, fail-closed.
+  integration-signal:
+    name: Integration Signal
+    runs-on: ubuntu-latest
+    needs: integration-tests
+    if: >-
+      ${{ github.event_name == 'pull_request'
+          && inputs.integration-junit-reports != ''
+          && inputs.integration-shards > 1
+          && !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label) }}
+    steps:
+      # Scoped to this attempt — see unit-signal.
+      - name: Download every shard's JUnit reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: integration-junit-a${{ github.run_attempt }}-*
+          path: junit-signal
+      - name: Verify the integration lane executed at least one test
+        uses: 12-apps/ci/.github/actions/vitest-signal-guard@v1
+        with:
+          reports: junit-signal
+          lane: integration
+          bypass-label: ${{ inputs.allow-zero-tests-label }}
