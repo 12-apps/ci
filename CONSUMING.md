@@ -508,6 +508,15 @@ command has to forward extra CLI args through to vitest — the default
 with `process.argv.slice(2)`. On a unit lane with a turbo fallback path, the
 flag rides turbo's `--` pass-through into each package's test script.
 
+**A new input needs the tag that ships it.** Workflow-call inputs are
+validated against the CALLED workflow at the pinned ref, so passing
+`unit-shards` (or any newer input) while `@v1` still points before the release
+that added it fails every run at startup — `startup_failure`, no jobs, no
+check runs, which on a required check reads as "waiting for status" forever.
+Land the consumer change only after the moving major tag contains the release
+(it advances automatically on every compatible push to main here), or pin the
+workflow by SHA for the transition.
+
 **The zero-test-signal guard composes with sharding.** At one shard it runs
 inside the job as always; above one, each shard ships its JUnit reports as an
 artifact and a post-matrix job (`Unit Signal` / `Integration Signal`) asserts
