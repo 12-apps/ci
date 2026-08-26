@@ -64,3 +64,11 @@ jobs:
       - name: package-gates
         shell: bash
         run: node --test .github/actions/package-gates/__tests__/package-gates.test.mjs
+
+      # Not an action's tests — the workflow FILES' own shape. A reusable
+      # workflow that references an action by a relative path works in every
+      # job above (same checkout, same directory) and breaks only in the
+      # consuming repo, so nothing else in this lane can see it.
+      - name: Reusable workflow references
+        shell: bash
+        run: node --test .github/workflows/__tests__/reusable-workflow-refs.test.mjs
