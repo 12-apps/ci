@@ -150,10 +150,18 @@ emit({ ...result, base: mergeBase, lane, changed });
 /** Write the plan file, set the action outputs, and print the summary. */
 function emit(plan) {
   const tests = plan.tests ?? [];
+  // Nothing to run means an EMPTY matrix, not one idle shard: the matrix is
+  // expanded before any runner exists, so a `1` here boots a machine to pay a
+  // checkout, an install and a setup before exiting 0. The document and the
+  // outputs must agree about that — the document is the artifact a reviewer
+  // reads afterwards, so a `1` recorded beside `shards=[]` is a record of a
+  // run that did not happen.
   const shardTotal =
-    plan.mode === "full"
-      ? maxShards
-      : Math.max(1, Math.min(maxShards, Math.ceil(tests.length / perShard)));
+    plan.mode === "none" && tests.length === 0
+      ? 0
+      : plan.mode === "full"
+        ? maxShards
+        : Math.max(1, Math.min(maxShards, Math.ceil(tests.length / perShard)));
   const document = {
     lane: plan.lane ?? lane,
     base: plan.base ?? null,
@@ -169,7 +177,7 @@ function emit(plan) {
   mkdirSync(dirname(outPath), { recursive: true });
   writeFileSync(outPath, `${JSON.stringify(document, null, 2)}\n`);
 
-  const shards = plan.mode === "none" && tests.length === 0 ? [] : Array.from({ length: shardTotal }, (_, i) => i + 1);
+  const shards = Array.from({ length: shardTotal }, (_, i) => i + 1);
   const out = process.env.GITHUB_OUTPUT;
   if (out) {
     appendFileSync(
@@ -177,7 +185,7 @@ function emit(plan) {
       [
         `mode=${plan.mode}`,
         `count=${tests.length}`,
-        `shard-total=${shards.length === 0 ? 0 : shardTotal}`,
+        `shard-total=${shardTotal}`,
         `shards=${JSON.stringify(shards)}`,
         `plan-file=${outPath}`,
         "",

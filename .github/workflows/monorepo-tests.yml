@@ -422,7 +422,7 @@ jobs:
       # Only a caller that SIZES the lane needs the tree. Without a plan
       # command this job stays what it was: arithmetic over an input.
       - name: Checkout
-        if: ${{ inputs.unit-plan-command != '' && github.event_name == 'pull_request' }}
+        if: ${{ (inputs.unit-plan-command != '' || inputs.affected-plan-config != '') && github.event_name == 'pull_request' }}
         uses: actions/checkout@v4
         with:
           # The caller's plan command almost certainly diffs against a merge
@@ -433,7 +433,7 @@ jobs:
       # the plan and the run resolve the SAME base — a plan sized against a
       # different one would be sizing a diff the lane never runs.
       - name: Fetch the base for affected selection
-        if: ${{ inputs.unit-plan-command != '' && github.event_name == 'pull_request' }}
+        if: ${{ (inputs.unit-plan-command != '' || inputs.affected-plan-config != '') && github.event_name == 'pull_request' }}
         uses: 12-apps/ci/.github/actions/fetch-base@v1
         with:
           base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
@@ -1005,7 +1005,7 @@ jobs:
       count: ${{ steps.plan.outputs.count }}
     steps:
       - name: Checkout
-        if: ${{ inputs.integration-plan-command != '' && github.event_name == 'pull_request' }}
+        if: ${{ (inputs.integration-plan-command != '' || inputs.affected-plan-config != '') && github.event_name == 'pull_request' }}
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -1014,7 +1014,7 @@ jobs:
       # the plan and the run resolve the SAME base — a plan sized against a
       # different one would be sizing a diff the lane never runs.
       - name: Fetch the base for affected selection
-        if: ${{ inputs.integration-plan-command != '' && github.event_name == 'pull_request' }}
+        if: ${{ (inputs.integration-plan-command != '' || inputs.affected-plan-config != '') && github.event_name == 'pull_request' }}
         uses: 12-apps/ci/.github/actions/fetch-base@v1
         with:
           base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
