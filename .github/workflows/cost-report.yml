@@ -77,6 +77,9 @@ jobs:
   report:
     name: Cost Report
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 15
     outputs:
       billed-minutes: ${{ steps.report.outputs.billed-minutes }}
       cost: ${{ steps.report.outputs.cost }}

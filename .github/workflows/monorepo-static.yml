@@ -153,6 +153,30 @@ on:
         type: string
         required: false
         default: '1.7.7'
+      # ── Timeout overrides ──────────────────────────────────────────────
+      # Every job here is bounded so a HANG fails in minutes rather than
+      # running to GitHub's six-hour default. The defaults are sized from
+      # observed maxima times generous headroom, because these bound a hang
+      # and NOT slowness — a bound tight enough to trip a slow-but-working
+      # run converts a rare infrastructure stall into routine flakiness.
+      #
+      # A consumer's suite length is the one thing this repo cannot observe,
+      # so the lanes whose cost scales with it take an override. Raise it
+      # rather than shave it; the short lanes are fixed on purpose.
+      lint-timeout-minutes:
+        description: >-
+          Bound for the lint job. Raise it for a repo whose lint pass is
+          genuinely slower than the default headroom allows.
+        type: number
+        required: false
+        default: 30
+      type-check-timeout-minutes:
+        description: >-
+          Bound for the type-check job. A large project reference graph is
+          the usual reason to raise this.
+        type: number
+        required: false
+        default: 30
     outputs:
       code:
         description: >-
@@ -207,6 +231,9 @@ jobs:
   changes:
     name: Detect Changes
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 10
     # On a push (the full-suite safety net) every output is forced 'true':
     # the whole point of that run is to skip nothing, so the filter step does
     # not even execute. `matched` mirrors that contract for the caller's
@@ -428,6 +455,9 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: ${{ inputs.lint-timeout-minutes }}
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
@@ -526,6 +556,9 @@ jobs:
   type-check:
     name: Type Check
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: ${{ inputs.type-check-timeout-minutes }}
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
@@ -593,6 +626,9 @@ jobs:
   actionlint:
     name: Actionlint
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 10
     needs: changes
     if: ${{ inputs.run-actionlint && needs.changes.outputs.workflows == 'true' }}
     steps:

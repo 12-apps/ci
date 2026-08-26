@@ -202,6 +202,9 @@ jobs:
     # job and is unaffected by this condition.
     if: ${{ inputs.run-drift || inputs.run-lint || inputs.run-coverage || inputs.run-parity }}
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       # Probe FIRST, before the toolchain setup and install, so its answer can
@@ -396,6 +399,9 @@ jobs:
     name: MCP Store Compliance
     if: ${{ inputs.run-store-compliance }}
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       # The gate reads the COMMITTED manifest, so it needs neither an install

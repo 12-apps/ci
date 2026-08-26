@@ -383,6 +383,35 @@ on:
         type: string
         required: false
         default: ""
+      # ── Timeout overrides ──────────────────────────────────────────────
+      # Every job here is bounded so a HANG fails in minutes rather than
+      # running to GitHub's six-hour default. The defaults are sized from
+      # observed maxima times generous headroom, because these bound a hang
+      # and NOT slowness — a bound tight enough to trip a slow-but-working
+      # run converts a rare infrastructure stall into routine flakiness.
+      #
+      # A consumer's suite length is the one thing this repo cannot observe,
+      # so the lanes whose cost scales with it take an override. Raise it
+      # rather than shave it; the short lanes are fixed on purpose.
+      unit-timeout-minutes:
+        description: >-
+          Bound for each unit-test SHARD (not the lane as a whole).
+        type: number
+        required: false
+        default: 45
+      build-timeout-minutes:
+        description: >-
+          Bound for the build job.
+        type: number
+        required: false
+        default: 45
+      integration-timeout-minutes:
+        description: >-
+          Bound for each integration-test SHARD. Higher than the unit default:
+          these boot a database and apply production migrations first.
+        type: number
+        required: false
+        default: 60
 
 # Authenticate npm installs for consumers with RESTRICTED packages. Workflow-
 # level so every `pnpm install` in this file sees it; the consumer's .npmrc is
@@ -413,6 +442,9 @@ jobs:
   unit-plan:
     name: Unit Plan
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 15
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
       # The EFFECTIVE shard count — the plan's answer, or `unit-shards` when no
@@ -529,6 +561,9 @@ jobs:
     # waiting on a context that no longer reports (see integration-tests).
     name: ${{ needs.unit-plan.outputs.count > 1 && format('Unit Tests · shard {0}/{1}', matrix.shard, needs.unit-plan.outputs.count) || 'Unit Tests' }}
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: ${{ inputs.unit-timeout-minutes }}
     needs: unit-plan
     # The zero-planned-tests skip, which the matrix cannot perform: `shards=[]`
     # is a job GitHub refuses to create, and that fails the run (see unit-plan).
@@ -901,6 +936,9 @@ jobs:
   unit-signal:
     name: Unit Signal
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 10
     needs: [unit-plan, unit-tests]
     if: >-
       ${{ github.event_name == 'pull_request'
@@ -926,6 +964,9 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: ${{ inputs.build-timeout-minutes }}
     if: ${{ inputs.run-build }}
     steps:
       - name: Checkout
@@ -1023,6 +1064,9 @@ jobs:
   integration-plan:
     name: Integration Plan
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 15
     if: ${{ inputs.run-integration }}
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
@@ -1118,6 +1162,9 @@ jobs:
     # branch ruleset starts waiting on a context that no longer reports.
     name: ${{ needs.integration-plan.outputs.count > 1 && format('Integration Tests · shard {0}/{1}', matrix.shard, needs.integration-plan.outputs.count) || 'Integration Tests' }}
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: ${{ inputs.integration-timeout-minutes }}
     needs: integration-plan
     # `run-integration` as before, AND the zero-planned-tests guard the matrix
     # cannot express — see unit-tests.
@@ -1308,6 +1355,9 @@ jobs:
   integration-signal:
     name: Integration Signal
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 10
     needs: [integration-plan, integration-tests]
     if: >-
       ${{ github.event_name == 'pull_request'

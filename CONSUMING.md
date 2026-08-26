@@ -1540,6 +1540,57 @@ surface left to hang it on:
   malformed is an error, because a guard that cannot read what it guards must
   never report success.
 
+# Job timeouts (nothing to configure)
+
+Every job these workflows define carries `timeout-minutes`. Without one a job
+runs to GitHub's six-hour default, and a hang is then indistinguishable from
+work: the check never resolves, auto-merge waits on it, and nothing anywhere
+says which of the two it is.
+
+**A consumer cannot fix this from its own repo.** `timeout-minutes` is rejected
+on a job that calls a reusable workflow — actionlint puts it exactly:
+
+```
+when a reusable workflow is called with "uses", "timeout-minutes" is not
+available. only following keys are allowed: "name", "uses", "with",
+"secrets", "needs", "if", and "permissions"
+```
+
+So a caller's own guard can only ever bound the jobs it defines itself, and the
+lanes it delegates here stay unbounded no matter what it does. That is why the
+bound lives on this side, and why `.github/workflows/__tests__/job-timeouts.test.mjs`
+fails the build if a new job here ships without one.
+
+The defaults are sized from observed maxima times generous headroom, on purpose:
+these bound a HANG, not slowness. A bound tight enough to trip a slow-but-working
+run converts a rare infrastructure stall into routine flakiness, which is worse
+than the thing it catches. So when a lane legitimately gets slower, **raise the
+bound rather than shave it.**
+
+The short lanes are fixed. The lanes whose cost scales with YOUR suite — the one
+thing this repo cannot observe — take an override:
+
+| workflow | input | default | covers |
+|---|---|---|---|
+| `monorepo-tests.yml` | `unit-timeout-minutes` | `45` | each unit shard |
+| `monorepo-tests.yml` | `integration-timeout-minutes` | `60` | each integration shard (boots a DB first) |
+| `monorepo-tests.yml` | `build-timeout-minutes` | `45` | the build job |
+| `monorepo-static.yml` | `lint-timeout-minutes` | `30` | lint |
+| `monorepo-static.yml` | `type-check-timeout-minutes` | `30` | type-check |
+| `quality.yml` | `static-gates-timeout-minutes` | `45` | the whole gate set |
+| `quality.yml` | `e2e-timeout-minutes` | `60` | both e2e jobs |
+| `package-gates.yml` | `timeout-minutes` | `15` | your own gate scripts |
+
+Each bounds ONE job, not the lane as a whole — a sharded suite gets the bound
+per shard.
+
+```yaml
+  tests:
+    uses: 12-apps/ci/.github/workflows/monorepo-tests.yml@v2
+    with:
+      integration-timeout-minutes: 90   # migrations + PGlite on a big schema
+```
+
 # Running your own gate scripts
 
 `package-gates.yml` runs the gate scripts a consumer already owns. It supplies
