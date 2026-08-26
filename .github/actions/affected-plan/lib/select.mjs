@@ -152,15 +152,28 @@ export function selectAffected(options) {
   const packages = loadPackages(repoRoot, workspaceDirs);
   const files = listSourceFiles(repoRoot, roots);
   const { edges, unresolved } = buildGraph(repoRoot, files, { packages, aliasesFor });
-  if (unresolved.length > 0) {
-    return {
-      mode: FULL,
-      tests: [],
-      reasons: {},
-      symbols: symbolReport,
-      stats: { changed: relevant.length, unresolved: unresolved.length },
-      why: `the import graph has ${unresolved.length} unresolved edge(s) — refusing to narrow against an incomplete graph (first: ${unresolved[0].file}:${unresolved[0].line} → ${unresolved[0].spec})`,
-    };
+
+  // An import we cannot resolve is a hole in the graph, and the safe reading of
+  // a hole is "this file might depend on anything". That used to widen the
+  // whole RUN to `full`, which is safe and also how this stops working: one odd
+  // file in thousands disables narrowing for every diff, forever, and the only
+  // symptom is a lane that is slow. Two lines of one test file — a suite that
+  // asserts on another file's source and therefore writes `import("./x")`
+  // inside a string literal — did exactly that here.
+  //
+  // Widen the FILE instead. A file whose imports cannot be read is treated as
+  // affected by any change at all: if it is a test it runs, and if it is a
+  // module its importers follow through the ordinary propagation below. That is
+  // the same claim the global fallback made, made only where it is true, so a
+  // hole costs one file rather than the entire suite.
+  //
+  // It cannot resurrect a `none`: that verdict is returned above, before this
+  // graph exists, and it means no exported symbol moved anywhere — so there is
+  // nothing for an unreadable file to have depended on.
+  const blind = [...new Set(unresolved.map((u) => u.file))];
+  for (const file of blind) {
+    affected.set(file, "*");
+    symbolReport[file] = ["*"];
   }
 
   const importers = new Map(); // target -> [{file, record}]
@@ -172,7 +185,7 @@ export function selectAffected(options) {
 
   // ── propagate ────────────────────────────────────────────────────────────
   const via = new Map(); // file -> {from, line, text, spec}
-  const queue = [...affected.keys()];
+  const queue = [...affected.keys()]; // includes the blind files seeded above
   const settled = new Set();
   while (queue.length > 0) {
     const current = queue.shift();
@@ -213,11 +226,18 @@ export function selectAffected(options) {
       changed: relevant.length,
       affectedFiles: affected.size,
       graphFiles: files.length,
+      unresolved: unresolved.length,
+      blindFiles: blind.length,
       tests: tests.length,
     },
+    // The blind count is reported even when it is the whole reason a test was
+    // picked: a selection nobody can explain is one nobody can check.
     why:
-      tests.length > 0
+      (tests.length > 0
         ? `${tests.length} test file(s) reach a changed symbol across ${relevant.length} changed file(s)`
-        : "no test file reaches a changed symbol",
+        : "no test file reaches a changed symbol") +
+      (blind.length > 0
+        ? `; ${blind.length} file(s) always run — their imports cannot be resolved (first: ${unresolved[0].file}:${unresolved[0].line} → ${unresolved[0].spec})`
+        : ""),
   };
 }

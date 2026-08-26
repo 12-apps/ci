@@ -68,14 +68,31 @@ const DYNAMIC_IMPORT = /\bimport\(\s*["']([^"']+)["']\s*\)/g;
 const REQUIRE_CALL = /\brequire\(\s*["']([^"']+)["']\s*\)/g;
 
 /**
- * Remove comments while preserving string, template and regex literals.
+ * One scan, two views of the same source.
  *
- * Hand-written rather than regex-based because the cases that matter are
+ * `code` removes comments and keeps string, template and regex literals —
+ * hand-written rather than regex-based because the cases that matter are
  * exactly the ones a regex gets wrong: `"https://x"` is not a comment, and a
  * `/* *​/` sequence inside a template literal is not a comment either.
+ *
+ * `masked` is `code` with every string literal's CONTENT blanked to spaces,
+ * the quotes themselves left in place. It exists because import syntax is not
+ * only written as code — it is also written ABOUT, inside string literals, by
+ * any test that asserts on the shape of another file's source:
+ *
+ *   expect(chip).toContain('import("./mesa-sheet")');
+ *
+ * Read as code that is a dynamic import of `./mesa-sheet` from the test's own
+ * directory, which does not exist, so it reports as an unresolved edge. Two
+ * such lines in one file of this repo's 2,992 were enough to make every plan
+ * report `full` — safe, and silently useless, which is the worst way for a
+ * selector to fail. Positions are found in `masked` and specifiers read from
+ * `code`, so the two must stay CHARACTER-ALIGNED: every branch below appends
+ * the same number of characters to both.
  */
-export function stripComments(source) {
+function scan(source) {
   let out = "";
+  let hidden = "";
   let i = 0;
   const n = source.length;
   let quote = null; // ' " ` when inside a string
@@ -87,8 +104,12 @@ export function stripComments(source) {
 
     if (quote) {
       out += c;
+      // A newline inside a template literal is a real newline: blank it to a
+      // space and every line number after it would shift.
+      hidden += c === "\n" ? "\n" : c === quote ? c : " ";
       if (c === "\\") {
         out += next ?? "";
+        hidden += next === undefined ? "" : next === "\n" ? "\n" : " ";
         i += 2;
         continue;
       }
@@ -101,6 +122,7 @@ export function stripComments(source) {
       quote = c;
       if (c === "`") templateDepth += 1;
       out += c;
+      hidden += c;
       i += 1;
       continue;
     }
@@ -113,7 +135,10 @@ export function stripComments(source) {
     if (c === "/" && next === "*") {
       i += 2;
       while (i < n && !(source[i] === "*" && source[i + 1] === "/")) {
-        if (source[i] === "\n") out += "\n"; // keep line numbering intact
+        if (source[i] === "\n") {
+          out += "\n"; // keep line numbering intact
+          hidden += "\n";
+        }
         i += 1;
       }
       i += 2;
@@ -121,11 +146,15 @@ export function stripComments(source) {
     }
 
     out += c;
+    hidden += c;
     i += 1;
     void templateDepth;
   }
-  return out;
+  return { code: out, masked: hidden };
 }
+
+/** Comments removed, literals intact. */
+export const stripComments = (source) => scan(source).code;
 
 /** Line number (1-based) of `index` within `source`. */
 const lineAt = (source, index) => source.slice(0, index).split("\n").length;
@@ -186,7 +215,7 @@ export function parseImports(rawSource) {
   // unresolvable dependency that forced whole lanes to the full suite.
   // `stripComments` preserves newlines, so reported line numbers still point
   // at the real line in the real file.
-  const source = stripComments(rawSource);
+  const { code: source, masked } = scan(rawSource);
   const lines = rawSource.split("\n");
   const out = [];
   const push = (spec, clause, index, forceValue = false) => {
@@ -195,10 +224,25 @@ export function parseImports(rawSource) {
     const { names, wildcard } = forceValue ? { names: [], wildcard: true } : bindingsOf(clause);
     out.push({ spec, typeOnly, wildcard, names, line, text: (lines[line - 1] ?? "").trim() });
   };
-  for (const m of source.matchAll(FROM_STATEMENT)) push(m[3], m[2], m.index + m[0].indexOf(m[1]));
-  for (const m of source.matchAll(BARE_IMPORT)) push(m[1], "", m.index, true);
-  for (const m of source.matchAll(DYNAMIC_IMPORT)) push(m[1], "", m.index, true);
-  for (const m of source.matchAll(REQUIRE_CALL)) push(m[1], "", m.index, true);
+  /**
+   * Match `re` where it is CODE, and read the specifier from the code.
+   *
+   * `masked` decides which occurrences are real — a blanked literal cannot
+   * still contain the word `import` — and `source` supplies the value, because
+   * in `masked` the specifier itself is spaces. The two are character-aligned
+   * by construction, so one index means the same place in both. Masking can
+   * only delete characters, never introduce an `import` keyword, so an index
+   * present in `masked` and absent from `source` contributes nothing.
+   */
+  const inCode = (re) => {
+    const real = new Set();
+    for (const m of masked.matchAll(re)) real.add(m.index);
+    return [...source.matchAll(re)].filter((m) => real.has(m.index));
+  };
+  for (const m of inCode(FROM_STATEMENT)) push(m[3], m[2], m.index + m[0].indexOf(m[1]));
+  for (const m of inCode(BARE_IMPORT)) push(m[1], "", m.index, true);
+  for (const m of inCode(DYNAMIC_IMPORT)) push(m[1], "", m.index, true);
+  for (const m of inCode(REQUIRE_CALL)) push(m[1], "", m.index, true);
   return out;
 }
 
