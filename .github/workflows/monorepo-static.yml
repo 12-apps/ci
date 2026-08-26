@@ -177,6 +177,67 @@ on:
         type: number
         required: false
         default: 30
+      retry-gate-probe-command:
+        description: >-
+          Shell that answers ONE question, from a bare checkout with no
+          toolchain: is there anything worth replaying before this tier runs?
+          It must write `any=true` or `any=false` to $GITHUB_OUTPUT. Empty
+          (default) disables the probe, and `retry-gate-command` then runs
+          unconditionally.
+
+
+          The probe is what keeps this lane free on the happy path. Everything
+          after it — pnpm, Node, install, the pre-command and the replay
+          itself — is gated on `any=true`, so a push whose predecessor was
+          GREEN pays a checkout and a few API calls (~5s) and gets out of the
+          way. Only a push that follows a RED one pays for a toolchain, which
+          is exactly the push that has something to learn from one.
+        type: string
+        required: false
+        default: ''
+      retry-gate-command:
+        description: >-
+          Shell that re-runs what the previous run of this branch already
+          proved broken, BEFORE lint / type-check / actionlint — and, through
+          this tier's result, before every lane the consumer gates on it. A
+          non-zero exit fails the tier and the whole fan-out never starts.
+          Empty (default) disables the lane entirely: the job is skipped and
+          the three jobs below run exactly as they did before this input
+          existed.
+
+
+          The command owns every judgement about WHAT to replay and how
+          narrowly. This workflow only decides WHEN it runs — it cannot see a
+          consumer's lanes, its test runners or its ledger format, and a
+          version of this input that tried to would be a second implementation
+          of a selection the consumer already owns.
+
+
+          It must FAIL OPEN. A missing, unreadable, stale or unrecognised
+          ledger has to exit 0 and let the tier proceed: a gate that ran
+          nothing costs a few seconds, and a gate that reddens a sound tree
+          costs a cycle plus the trust that makes the next red believable.
+        type: string
+        required: false
+        default: ''
+      retry-gate-pre-command:
+        description: >-
+          Shell run after `pnpm install` and before `retry-gate-command`, for
+          whatever the replay needs that an install does not leave behind (a
+          Prisma client, a codegen step). Runs only when the probe said
+          `any=true`. Empty to skip.
+        type: string
+        required: false
+        default: ''
+      retry-gate-timeout-minutes:
+        description: >-
+          Bound for the retry gate. It sits in front of the whole pipeline, so
+          a hang here stalls everything the consumer gates on this tier —
+          which argues for a TIGHTER bound than the lanes it protects, not a
+          looser one. The default covers an install plus a narrow replay.
+        type: number
+        required: false
+        default: 20
     outputs:
       code:
         description: >-
@@ -452,14 +513,131 @@ jobs:
         with:
           filters: ${{ steps.spec.outputs.yaml }}
 
+  # ── Replay what already failed, before anything else runs ──────────────────
+  # Selection in this pipeline answers "what could this diff have broken?".
+  # Nothing anywhere answers the cheaper question a fix push actually asks:
+  # "is the thing that was broken LAST time still broken?" — even though the
+  # previous run already computed that answer and threw it away.
+  #
+  # So a run that fails leaves a ledger of what failed, and the next run on the
+  # same branch replays exactly that, first, narrowly, and in front of the
+  # whole pipeline. When the fix did not work, the verdict arrives in about the
+  # time the ledger's own tests take instead of after the full fan-out, and
+  # nothing downstream ever starts.
+  #
+  # It sits between `changes` and lint/type-check for a reason that survives
+  # being re-litigated: a gate placed beside them would let lint, type-check
+  # and every tests-tier lane start on a tree already known to be broken, and
+  # the minutes those burn are the minutes this exists to save. Everything the
+  # consumer gates on this tier is downstream of the tier's RESULT, so failing
+  # here stops the fan-out with no `needs:` edits in the caller.
+  #
+  # Three properties hold it up, and all three are load-bearing:
+  #
+  #   FREE WHEN GREEN. The probe runs from a bare checkout with no toolchain.
+  #   No ledger — the overwhelmingly common case, because most pushes follow a
+  #   green one — and every step below it is skipped.
+  #
+  #   IT CAN ONLY EVER FAIL EARLIER. The lanes this front-runs still run in
+  #   full behind it and stay authoritative; the gate replays a SUBSET and can
+  #   never report a verdict on anything it did not run. So a ledger that is
+  #   stale, partial or wrong costs seconds, never a false green.
+  #
+  #   IT FAILS OPEN. Every "I don't know" — no ledger, unreadable, files gone
+  #   from this checkout, a lane the consumer cannot invoke — exits 0. The
+  #   consumer's command owns that judgement; see `retry-gate-command`.
+  #
+  # Pull requests only. On `push` the tier IS the post-merge safety net, whose
+  # whole contract is to skip nothing and inventory everything that landed —
+  # a lane that front-runs it with a subset has nothing to add there.
+  retry-gate:
+    name: Retry Gate
+    runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    # Deliberately tighter than the lanes downstream — see the input's docs.
+    timeout-minutes: ${{ inputs.retry-gate-timeout-minutes }}
+    needs: changes
+    if: >-
+      ${{ inputs.retry-gate-command != ''
+          && github.event_name == 'pull_request'
+          && needs.changes.outputs.code == 'true' }}
+    # A job-level block REPLACES the workflow-level one. `actions: read` is
+    # what lets the probe read the previous run and its artifacts; without it
+    # the API 403s, the probe finds no ledger, and the lane degrades to the
+    # no-op it already is when there is nothing to replay. A CALLER must grant
+    # a superset of this or GitHub rejects the run at startup.
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The whole cost/benefit of this lane lives in this step: it decides,
+      # before any toolchain exists, whether the rest of the job happens.
+      - name: Look for a ledger from this branch's last run
+        id: ledger
+        if: ${{ inputs.retry-gate-probe-command != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ${{ inputs.retry-gate-probe-command }}
+
+      # `!= 'false'` rather than `== 'true'`: with no probe configured the
+      # output is empty and the replay runs unconditionally, which is the
+      # documented contract for an empty `retry-gate-probe-command`. Only an
+      # explicit `false` — a probe that ran and found nothing — skips.
+      - uses: pnpm/action-setup@v4
+        if: ${{ steps.ledger.outputs.any != 'false' }}
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        if: ${{ steps.ledger.outputs.any != 'false' }}
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        if: ${{ steps.ledger.outputs.any != 'false' }}
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Pre-replay setup
+        if: ${{ steps.ledger.outputs.any != 'false' && inputs.retry-gate-pre-command != '' }}
+        shell: bash
+        run: ${{ inputs.retry-gate-pre-command }}
+
+      - name: Replay what failed last time
+        if: ${{ steps.ledger.outputs.any != 'false' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ${{ inputs.retry-gate-command }}
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: ${{ inputs.lint-timeout-minutes }}
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
+    needs: [changes, retry-gate]
+    # The retry gate is SKIPPED whenever it is unconfigured, disabled for the
+    # event, or has nothing to replay — which is almost always. A skipped
+    # `needs:` skips its dependents by default, so this condition has to be
+    # written to survive one, and `success() || skipped()` is the whole
+    # intent: run when the gate passed, run when it never ran, and run in
+    # neither case when it FAILED.
+    #
+    # `!cancelled()` alone would be wrong in the direction that matters — it
+    # is true for a FAILED dependency too, so lint would start on the very
+    # tree the gate just proved broken. The result is therefore tested by
+    # name rather than inferred from a helper.
+    if: >-
+      ${{ !cancelled()
+          && (needs.retry-gate.result == 'success' || needs.retry-gate.result == 'skipped')
+          && needs.changes.outputs.code == 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -559,8 +737,12 @@ jobs:
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: ${{ inputs.type-check-timeout-minutes }}
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
+    needs: [changes, retry-gate]
+    # Same shape as lint's, and for the same reason — see the note there.
+    if: >-
+      ${{ !cancelled()
+          && (needs.retry-gate.result == 'success' || needs.retry-gate.result == 'skipped')
+          && needs.changes.outputs.code == 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -629,8 +811,12 @@ jobs:
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 10
-    needs: changes
-    if: ${{ inputs.run-actionlint && needs.changes.outputs.workflows == 'true' }}
+    needs: [changes, retry-gate]
+    # Same shape as lint's, and for the same reason — see the note there.
+    if: >-
+      ${{ !cancelled()
+          && (needs.retry-gate.result == 'success' || needs.retry-gate.result == 'skipped')
+          && inputs.run-actionlint && needs.changes.outputs.workflows == 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
