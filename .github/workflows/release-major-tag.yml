@@ -31,16 +31,38 @@ name: Release major tag
 on:
   push:
     branches: [main]
+  # Recovery, and the reason it is needed: a run that never starts still HOLDS
+  # the concurrency group below, and there is no other way to reach this
+  # workflow. Measured on 2026-08-26 — run 65 (3cedddf) sat `queued` for 90
+  # minutes without its job ever starting; run 66 (d7bd37c) queued behind it and
+  # was concluded `failure` with its only job still `queued`. So `v1` stopped at
+  # 742f13a while main was two compatible commits ahead, and consumers pinned to
+  # `@v1` kept resolving the older workflow. Nothing was red in a way that named
+  # this: the holder reads `queued`, not failed, and the victim reads `failure`
+  # with no failing job to open.
+  workflow_dispatch:
 
 # Least-privilege: this job's only side effect is writing tag refs.
 permissions:
   contents: write
 
-# Serialize tag moves. cancel-in-progress stays false so a running push always
-# finishes; correctness does not depend on it (each run recomputes every target).
+# Serialize tag moves, and let a newer push REPLACE a pending one.
+#
+# This was `cancel-in-progress: false`, to let a running push always finish. The
+# comment that set it also recorded why nothing depends on that: each run
+# recomputes every target from main's live tip, so a cancelled run costs nothing
+# a later run does not redo. It was buying no correctness — and it was charging
+# for it, because a `false` group is held by a run that never starts as firmly as
+# by one that is working, and this workflow has exactly one job. One stranded run
+# therefore froze every moving major indefinitely, which is the failure recorded
+# above the trigger.
+#
+# `true` makes the group self-clearing: the next push to main supersedes whatever
+# is stuck, and — by that same recompute-from-live-tip property — ships every
+# compatible commit the superseded run would have.
 concurrency:
   group: release-major-tag
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   move-major-tag:
