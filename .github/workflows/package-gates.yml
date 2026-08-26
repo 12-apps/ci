@@ -1,0 +1,194 @@
+name: Package Gates (reusable)
+
+# Reusable runner for a consumer's OWN gate scripts — the shape every ratchet
+# needs and none of them should hand-roll: checkout, pnpm, Node, npm auth,
+# `pnpm install --frozen-lockfile`, least-privilege permissions and a bounded
+# timeout. Consuming repos add a small caller:
+#
+#   jobs:
+#     ratchets:
+#       # Budgets are COMPLETENESS properties: run them unconditionally.
+#       if: always()
+#       permissions:
+#         contents: read
+#       uses: 12-apps/ci/.github/workflows/package-gates.yml@v1
+#       secrets:
+#         NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+#       with:
+#         name: Ratchets
+#         gates: |
+#           A batched State API seed says what its order is|pnpm quality:seed-order
+#           The gate still recognises a batched seed|node --test scripts/__tests__/e2e-seed-order.test.mjs
+#
+# WHY THIS EXISTS. The sibling gates here (rbac-coverage.yml,
+# entitlements-coverage.yml, mcp-test-coverage.yml) each wrap exactly ONE named
+# script, so a consumer adding its own ratchet had nowhere to put it and copied
+# ~30 lines of setup into its own ci.yml instead — once per gate. That copy is
+# the thing that rots: it is where a Node version drifts, where the pnpm 10
+# userconfig trap below gets forgotten, and where a missing `timeout-minutes`
+# lets a hang burn six hours. The gate logic belongs to the consumer; the
+# RUNNER SHAPE belongs here.
+#
+# WHAT IT DOES NOT DO: decide anything about the gates. It does not know what
+# they assert, does not supply a script, and fails only if one of them does.
+# The consumer owns the scripts, their ratchet files and their exit codes.
+#
+# EVERY GATE RUNS. A failing gate does not abort the rest — the job runs them
+# all and fails at the end naming each one that failed. Two reasons. A budget
+# sweep usually trips several ratchets at once and seeing one per push turns
+# one fix into four. And the failure is reported by NAME, so the answer does
+# not depend on reading a step list to find which of them was red.
+#
+# SECRETS: takes NPM_TOKEN only, and only because a restricted install needs
+# it. Every gate is consumer-controlled code, so nothing else may be passed —
+# `permissions: contents: read` scopes the GITHUB_TOKEN but does NOT protect
+# env secrets, and withholding `secrets: inherit` is the separate, necessary
+# control. Same boundary as rbac-coverage.yml.
+
+on:
+  workflow_call:
+    secrets:
+      NPM_TOKEN:
+        description: >-
+          npm token for consumers whose installs resolve RESTRICTED packages
+          (e.g. a private @12-apps package). Optional: absent, NODE_AUTH_TOKEN
+          resolves empty and installs stay anonymous. Takes effect only when the
+          consumer's committed .npmrc reads ${NODE_AUTH_TOKEN}.
+        required: false
+    inputs:
+      gates:
+        description: >-
+          The gates to run, one per line, as `LABEL|COMMAND`. LABEL is what a
+          failure is reported as, so write the property rather than the script
+          name ("A batched seed says what its order is", not "seed-order").
+          COMMAND runs from `package-dir` through bash. Blank lines and lines
+          starting with # are ignored. A line with no `|` is an error rather
+          than a command with an empty label — a gate nobody can name in a
+          failure is the thing this input exists to prevent.
+        type: string
+        required: true
+      name:
+        description: >-
+          Display name for the job, so a consumer running several callers gets
+          distinguishable check runs.
+        type: string
+        required: false
+        default: 'Package Gates'
+      node-version:
+        description: 'Node version for the gates.'
+        type: string
+        required: false
+        default: '24'
+      package-dir:
+        description: >-
+          Directory the gate commands run from (default repo root). Dependency
+          install still runs at the repo root.
+        type: string
+        required: false
+        default: '.'
+      install:
+        description: >-
+          Run `pnpm install --frozen-lockfile` before the gates. On by default:
+          the reason a gate lands here rather than in a no-install job is
+          usually that it imports something. Set false for gates that are pure
+          Node builtins and want the faster start.
+        type: boolean
+        required: false
+        default: true
+      pre-command:
+        description: 'Shell run after install and before the gates (e.g. build a package). Empty to skip.'
+        type: string
+        required: false
+        default: ''
+      timeout-minutes:
+        description: >-
+          Bound so a HANG fails in minutes rather than running to GitHub's
+          six-hour default.
+        type: number
+        required: false
+        default: 15
+      github-packages-scope:
+        description: >-
+          npm scope (e.g. @my-org) whose dependencies come from GitHub Packages.
+          When set, wires ~/.npmrc to install that scope from npm.pkg.github.com
+          using the job GITHUB_TOKEN (requires packages: read on the caller).
+          Empty (default) = no private-registry wiring.
+        type: string
+        required: false
+        default: ''
+
+# Least-privilege, enforced at the source. The effective grant is the
+# INTERSECTION of these and the caller's job permissions, so a consumer that
+# grants more in a combined CI file cannot leak that privilege here. Both are
+# READ-only. `packages: read` is a CEILING, not an auto-grant — see
+# rbac-coverage.yml for the full note.
+permissions:
+  contents: read
+  packages: read
+
+env:
+  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+  # pnpm 10+ stopped expanding env vars in credentials that come from a PROJECT
+  # .npmrc (a committed file could redirect the expanded secret to an
+  # attacker-controlled registry), so a consumer's ${NODE_AUTH_TOKEN} line is
+  # silently ignored there and a restricted install 404s. Re-reading the same
+  # file as the USER config restores the expansion. No-op for repos with no
+  # .npmrc: a missing userconfig reads empty.
+  NPM_CONFIG_USERCONFIG: ${{ github.workspace }}/.npmrc
+
+jobs:
+  gates:
+    name: ${{ inputs.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+
+      # Wire ~/.npmrc for private GitHub Packages BEFORE install, using the
+      # job's own GITHUB_TOKEN (packages: read) — NOT an inherited user secret,
+      # so the no-secrets boundary holds. Skipped unless a scope is given.
+      - name: Configure GitHub Packages auth
+        if: ${{ inputs.github-packages-scope != '' }}
+        shell: bash
+        env:
+          GH_PKG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          {
+            echo "${{ inputs.github-packages-scope }}:registry=https://npm.pkg.github.com"
+            echo "//npm.pkg.github.com/:_authToken=${GH_PKG_TOKEN}"
+          } >> "$HOME/.npmrc"
+
+      - name: Install dependencies
+        if: ${{ inputs.install }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+
+      - name: Pre-command
+        if: ${{ inputs.pre-command != '' }}
+        shell: bash
+        working-directory: ${{ inputs.package-dir }}
+        run: |
+          set -euo pipefail
+          ${{ inputs.pre-command }} 2>&1 | tee pre-command.log
+
+      # The runner lives in the composite action, where it has tests. A gate
+      # runner that stopped recognising a gate would report "all gates passed"
+      # and go green — the same silent-success failure the gates it runs exist
+      # to prevent — so it is not bash in a YAML file.
+      - name: Run gates
+        uses: ./.github/actions/package-gates
+        with:
+          gates: ${{ inputs.gates }}
+          working-directory: ${{ inputs.package-dir }}

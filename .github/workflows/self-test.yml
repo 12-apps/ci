@@ -52,3 +52,7 @@ jobs:
       - name: bundle-ceiling-guard
         shell: bash
         run: node --test .github/actions/bundle-ceiling-guard/__tests__/bundle-ceiling-guard.test.mjs
+
+      - name: package-gates
+        shell: bash
+        run: node --test .github/actions/package-gates/__tests__/package-gates.test.mjs
