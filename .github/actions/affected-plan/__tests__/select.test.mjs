@@ -126,18 +126,78 @@ test("a pure move selects nothing", () => {
 
 // ── the widening routes ─────────────────────────────────────────────────────
 
-test("an unresolved import widens to the full suite", () => {
+test("an unresolved import widens the FILE that owns it, not the run", () => {
+  // `broken.ts` imports something that does not exist, so what it depends on is
+  // unknown and it must be assumed to depend on everything. That is a claim
+  // about one file. Widening the whole run on it is equally safe and is how a
+  // selector quietly stops selecting: one odd file disables narrowing for every
+  // diff, and the only symptom is a slow lane.
   const { root, readBase } = scenario({
     head: {
       "src/entry.ts": "export const a = 2;\n",
       "src/broken.ts": 'import { gone } from "./does-not-exist";\nexport const x = gone;\n',
+      "src/broken.test.ts": 'import { x } from "./broken";\nx;\n',
+      "src/x.test.ts": 'import { a } from "./entry";\na;\n',
+      "src/unrelated.ts": "export const u = 1;\n",
+      "src/unrelated.test.ts": 'import { u } from "./unrelated";\nu;\n',
+    },
+    base: { "src/entry.ts": "export const a = 1;\n" },
+  });
+  const result = run({ repoRoot: root, changed: ["src/entry.ts"], readBase });
+
+  assert.equal(result.mode, "narrowed", "one hole must not cost the whole suite");
+  // The file with the hole runs, and so does the test that imports it —
+  // conservative, because nobody can say what that edge reached.
+  assert.ok(result.tests.includes("src/broken.test.ts"), result.tests.join(", "));
+  // The genuinely affected test still runs...
+  assert.ok(result.tests.includes("src/x.test.ts"), result.tests.join(", "));
+  // ...and a test reaching neither is still dropped. That is the whole point:
+  // the hole is bounded.
+  assert.ok(!result.tests.includes("src/unrelated.test.ts"), result.tests.join(", "));
+  assert.equal(result.stats.blindFiles, 1);
+  assert.match(result.why, /imports cannot be resolved/);
+});
+
+test("a hole cannot resurrect `none` — nothing changed, nothing runs", () => {
+  // The blind file is only ever a claim about REACHABILITY. With no changed
+  // symbol anywhere there is nothing for it to have reached, and a lane that
+  // ran it anyway would be paying for a graph defect on every green diff.
+  const { root, readBase } = scenario({
+    head: {
+      "src/entry.ts": "export const a = 1;\n",
+      "src/broken.ts": 'import { gone } from "./does-not-exist";\nexport const x = gone;\n',
+      "src/broken.test.ts": 'import { x } from "./broken";\nx;\n',
+    },
+    base: { "src/entry.ts": "export const a = 1; // only a comment moved\n" },
+  });
+  const result = run({ repoRoot: root, changed: ["src/entry.ts"], readBase });
+  assert.equal(result.mode, "none", result.why);
+  assert.deepEqual(result.tests, []);
+});
+
+test("import syntax quoted INSIDE a string literal is not an edge", () => {
+  // A suite that asserts on another file's source writes import syntax as data.
+  // Read as code it is a dynamic import from the asserting file's own
+  // directory, which does not exist — so it reported as an unresolved edge and,
+  // before the fix above, made every plan in the consumer repo say `full`.
+  const { root, readBase } = scenario({
+    head: {
+      "src/entry.ts": "export const a = 2;\n",
+      "src/shell/lazy.ts": "export const lazy = 1;\n",
+      "src/asserts-source.test.ts":
+        'const chip = "x";\n' +
+        'expect(chip).toContain(\'import("./lazy")\');\n' +
+        "// eslint-disable-next-line\n" +
+        'const also = `require(\"./lazy\")`;\n' +
+        "also;\n",
       "src/x.test.ts": 'import { a } from "./entry";\na;\n',
     },
     base: { "src/entry.ts": "export const a = 1;\n" },
   });
   const result = run({ repoRoot: root, changed: ["src/entry.ts"], readBase });
-  assert.equal(result.mode, "full", "a graph with holes must never narrow");
-  assert.match(result.why, /unresolved/);
+  assert.equal(result.mode, "narrowed", result.why);
+  assert.equal(result.stats.blindFiles, 0, "a quoted specifier is data, not an import");
+  assert.deepEqual(result.tests, ["src/x.test.ts"]);
 });
 
 test("an untraceable path widens to the full suite", () => {
