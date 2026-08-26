@@ -223,7 +223,7 @@ back to in-place replacement per service rather than risking the OOM killer.
 | Variable | `ENABLE_DEPLOY_CLOUDFLARE` = `true` | enable the CF target |
 | Variable | `DEPLOY_HOST` | DO droplet IPv4, set after first provision |
 | Secret | `DO_API_TOKEN`, `DO_SSH_PRIVATE_KEY_B64` | DigitalOcean |
-| Secret | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | optional app OAuth |
+| Secret | `DOPPLER_TOKEN` | **required** for DigitalOcean — read-scoped service token. Both provision and redeploy inject every app secret at container start; no secret-bearing `.env` is written to the droplet. App OAuth credentials (`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`) belong in this config, not in repo secrets — the provision path used to interpolate them into cloud-init user-data, which the metadata endpoint serves to any process on the box |
 | Secret | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` | Cloudflare |
 | Secret | `NPM_TOKEN` | optional — only when installs resolve RESTRICTED npm packages (e.g. a private `@12-apps` package). Every install-running workflow here accepts it (pass `secrets: inherit`); it reaches installs as `NODE_AUTH_TOKEN`, which the consumer's committed `.npmrc` must read (`//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}`), and image builds as the `npm_token` BuildKit secret |
 

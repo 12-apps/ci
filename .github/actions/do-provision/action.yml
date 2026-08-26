@@ -4,6 +4,9 @@ description: >-
   scripts/ephemeral/deploy-cloud-init.sh so consumer repos never vendor it.
   Secrets are passed as inputs because composite actions have no `secrets` context.
 
+  App secrets are injected at container start by a secrets PROVIDER; no
+  secret-bearing .env is written to the droplet. See `secrets_provider`.
+
 inputs:
   do_api_token:
     description: 'DigitalOcean API token'
@@ -12,12 +15,24 @@ inputs:
     description: 'Token for cloning a private repo on the droplet'
     required: false
     default: ''
-  google_client_id:
-    description: 'Optional Google OAuth client id'
+  secrets_provider:
+    description: >-
+      Where the droplet gets its app secrets: `doppler` (default) or `none`.
+      With a provider, secrets are injected into each compose invocation at
+      container start and never written to disk — only the service token lands
+      on the box, root-only (0600). `none` is the unmanaged throwaway-box path:
+      POSTGRES_PASSWORD and AUTH_SECRET are generated ON the droplet into a
+      root-only .env, and no OAuth credentials are available.
     required: false
-    default: ''
-  google_client_secret:
-    description: 'Optional Google OAuth client secret'
+    default: doppler
+  secrets_token:
+    description: >-
+      The provider's service token. Required unless `secrets_provider` is
+      `none`. It is embedded in cloud-init user-data — unavoidably, since that
+      is the only channel a fresh droplet has — which is why the first thing
+      cloud-init does is drop non-root egress to the metadata endpoint, so an
+      unprivileged process on the box cannot read the user-data back and lift
+      it. Pass a read-scoped token.
     required: false
     default: ''
   image_tag:
@@ -39,6 +54,19 @@ inputs:
     required: false
     default: main
 
+# `google_client_id` / `google_client_secret` are GONE, and deliberately not
+# replaced. They existed only to be interpolated into cloud-init user-data,
+# which the metadata endpoint serves to any process on the droplet — so the
+# secret half had no safe use, and an input that can only be used unsafely
+# should not exist. The id half had no consumer left once the .env write it fed
+# was removed. OAuth credentials now reach the app the same way every other
+# secret does: through the provider, at container start.
+#
+# Removing an input is a breaking change for a caller that still passes one.
+# GitHub warns on an unexpected input rather than failing the run, so a stale
+# caller keeps working and simply stops shipping the credential — which is the
+# intended outcome, not a regression to paper over.
+
 runs:
   using: composite
   steps:
@@ -46,8 +74,8 @@ runs:
       env:
         DO_API_TOKEN: ${{ inputs.do_api_token }}
         GITHUB_TOKEN: ${{ inputs.github_token }}
-        GOOGLE_CLIENT_ID: ${{ inputs.google_client_id }}
-        GOOGLE_CLIENT_SECRET: ${{ inputs.google_client_secret }}
+        SECRETS_PROVIDER: ${{ inputs.secrets_provider }}
+        SECRETS_TOKEN: ${{ inputs.secrets_token }}
         IMAGE_TAG: ${{ inputs.image_tag }}
         REPO_URL: ${{ inputs.repo_url }}
       run: |

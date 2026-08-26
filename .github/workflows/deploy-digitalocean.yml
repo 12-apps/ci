@@ -10,8 +10,11 @@ name: Deploy · DigitalOcean
 #   ALL app secrets (AUTH_*, GOOGLE_*, POSTGRES_*, PAGBANK_*, DATA_ENCRYPTION_KEY,
 #   …) are injected at container start via `doppler run`; NO secret-bearing .env
 #   is written — only non-secret per-deploy image pins go to /app/.env.
-# Optional secrets: GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET — used ONLY by the
-#   one-time provision (cloud-init) path, not by redeploys.
+#   DOPPLER_TOKEN is required for PROVISION too, not only redeploys: cloud-init
+#   installs the CLI and injects secrets exactly as a redeploy does, so no
+#   secret-bearing .env is ever written to the droplet. GOOGLE_CLIENT_ID /
+#   GOOGLE_CLIENT_SECRET are no longer read by any path here — OAuth
+#   credentials come from the Doppler config like every other secret.
 # Required variable (after first provision): DEPLOY_HOST (droplet public IPv4).
 
 on:
@@ -61,8 +64,12 @@ jobs:
         with:
           do_api_token: ${{ secrets.DO_API_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          google_client_id: ${{ secrets.GOOGLE_CLIENT_ID }}
-          google_client_secret: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          # The same token the redeploy job below already requires, so provision
+          # and redeploy now agree about where secrets come from. They did not:
+          # provision baked a .env (and an OAuth secret) into cloud-init
+          # user-data, and the first redeploy replaced that posture with this
+          # one — the box was weakest exactly while it was newest.
+          secrets_token: ${{ secrets.DOPPLER_TOKEN }}
           image_tag: ${{ inputs.image_tag }}
           repo_url: ${{ github.server_url }}/${{ github.repository }}.git
           droplet_name: ${{ inputs.droplet_name }}

@@ -18,11 +18,17 @@ on:
       # was filtered to `.github/actions/**` while asserting things about
       # monorepo-tests.yml — a gate that stops running is never red.
       - '.github/workflows/**'
+      # Same rule, one directory over: the provisioning scripts a composite
+      # action SHIPS are asserted here, and an edit to one has to run those
+      # assertions. do-provision executes deploy-cloud-init.sh, so a change
+      # there is a change to what a consumer's droplet boots with.
+      - 'scripts/ephemeral/**'
   push:
     branches: [main]
     paths:
       - '.github/actions/**'
       - '.github/workflows/**'
+      - 'scripts/ephemeral/**'
 
 permissions:
   contents: read
@@ -81,6 +87,17 @@ jobs:
       - name: Matrix zero guard
         shell: bash
         run: node --test .github/workflows/__tests__/matrix-zero-guard.test.mjs
+
+      # What a provisioned droplet actually boots with. do-provision runs
+      # scripts/ephemeral/deploy-cloud-init.sh, and every way that document can
+      # be wrong is silent: the API accepts any user-data at all, the droplet
+      # boots, and the run reports success. So the test RENDERS it (no token, no
+      # API call, no droplet) and asserts on the bytes — that it parses, that
+      # non-root egress to the metadata endpoint is dropped before any token is
+      # written, and that no secret is interpolated that need not be.
+      - name: Cloud-init user-data
+        shell: bash
+        run: node --test scripts/ephemeral/__tests__/deploy-cloud-init.test.mjs
 
   # Not a script test and not a file-shape test: an assertion about GITHUB, run
   # on GitHub, because the alternative is a comment.
