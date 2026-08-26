@@ -95,6 +95,18 @@ test("the gate is opt-in, and pull-request only", () => {
   );
 });
 
+test("the probe is the shared action, by its full path", () => {
+  // A relative `./.github/actions/...` resolves against the CALLER's checkout,
+  // so it works in every self-test here and dies for the consumer.
+  // reusable-workflow-refs.test.mjs enforces that repo-wide; this pins that the
+  // probe specifically is the shared action rather than a consumer command,
+  // which is the whole point of the move — the job-name table it reads is a set
+  // of strings THESE workflows own.
+  const gate = jobs().get("retry-gate");
+  assert.match(gate.body, /uses:\s*12-apps\/ci\/\.github\/actions\/failure-ledger@v1/);
+  assert.match(gate.body, /mode:\s*probe/);
+});
+
 test("nothing in the gate installs a toolchain before the probe has spoken", () => {
   const gate = jobs().get("retry-gate");
   const lines = gate.body.split(/\r?\n/);
@@ -110,7 +122,7 @@ test("nothing in the gate installs a toolchain before the probe has spoken", () 
     const window = lines.slice(Math.max(0, at - 6), at + 6).join("\n");
     assert.match(
       window,
-      /steps\.ledger\.outputs\.any != 'false'/,
+      /steps\.ledger\.outputs\.any == 'true'/,
       `the step matching ${marker} must be gated on the probe — an ungated install ` +
         "costs every green push the toolchain this lane exists to avoid",
     );

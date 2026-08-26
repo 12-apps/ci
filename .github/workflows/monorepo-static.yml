@@ -177,21 +177,22 @@ on:
         type: number
         required: false
         default: 30
-      retry-gate-probe-command:
+      retry-gate-extra-lanes:
         description: >-
-          Shell that answers ONE question, from a bare checkout with no
-          toolchain: is there anything worth replaying before this tier runs?
-          It must write `any=true` or `any=false` to $GITHUB_OUTPUT. Empty
-          (default) disables the probe, and `retry-gate-command` then runs
-          unconditionally.
-
-
-          The probe is what keeps this lane free on the happy path. Everything
-          after it — pnpm, Node, install, the pre-command and the replay
-          itself — is gated on `any=true`, so a push whose predecessor was
-          GREEN pays a checkout and a few API calls (~5s) and gets out of the
-          way. Only a push that follows a RED one pays for a toolchain, which
-          is exactly the push that has something to learn from one.
+          JSON `{"<job-name regex>": "<lane>"}` for jobs the CONSUMER defines,
+          so its own failures are recorded as replayable. The jobs THESE
+          workflows emit are already known to the ledger — see the
+          `failure-ledger` action, which holds that table precisely so a
+          consumer never has to copy strings it does not own.
+        type: string
+        required: false
+        default: ''
+      retry-gate-quarantine-file:
+        description: >-
+          Path to the consumer's known-flaky list; a listed path never enters a
+          replay. This is the one real cost of the whole mechanism — a test that
+          failed by chance last time and fails by chance again turns a sound
+          push red early instead of green late.
         type: string
         required: false
         default: ''
@@ -206,17 +207,20 @@ on:
           existed.
 
 
-          The command owns every judgement about WHAT to replay and how
-          narrowly. This workflow only decides WHEN it runs — it cannot see a
-          consumer's lanes, its test runners or its ledger format, and a
-          version of this input that tried to would be a second implementation
-          of a selection the consumer already owns.
+          It is handed a ledger at `.ci-failure-ledger.json` — already narrowed
+          by the probe to entries whose files this checkout still has, and with
+          quarantined paths removed. What is left is the one judgement this
+          workflow cannot make: whether the consumer's own runners can invoke a
+          given path, and with which command. Encoding that here would be a
+          second implementation of an invocation the consumer already owns, and
+          a replay that ran the files ITS own way would answer a different
+          question from the lane it front-runs.
 
 
-          It must FAIL OPEN. A missing, unreadable, stale or unrecognised
-          ledger has to exit 0 and let the tier proceed: a gate that ran
-          nothing costs a few seconds, and a gate that reddens a sound tree
-          costs a cycle plus the trust that makes the next red believable.
+          It must FAIL OPEN. A missing, unreadable or unrecognised ledger has to
+          exit 0 and let the tier proceed: a gate that ran nothing costs a few
+          seconds, and a gate that reddens a sound tree costs a cycle plus the
+          trust that makes the next red believable.
         type: string
         required: false
         default: ''
@@ -575,42 +579,40 @@ jobs:
         uses: actions/checkout@v4
 
       # The whole cost/benefit of this lane lives in this step: it decides,
-      # before any toolchain exists, whether the rest of the job happens.
+      # before any toolchain exists, whether the rest of the job happens. It
+      # runs from the bare checkout above — no pnpm, no Node setup, no install —
+      # so a branch whose last run was GREEN pays a checkout and three API
+      # calls, and only a push following a RED one buys a toolchain.
       - name: Look for a ledger from this branch's last run
         id: ledger
-        if: ${{ inputs.retry-gate-probe-command != '' }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: ${{ inputs.retry-gate-probe-command }}
+        uses: 12-apps/ci/.github/actions/failure-ledger@v1
+        with:
+          mode: probe
+          quarantine-file: ${{ inputs.retry-gate-quarantine-file }}
 
-      # `!= 'false'` rather than `== 'true'`: with no probe configured the
-      # output is empty and the replay runs unconditionally, which is the
-      # documented contract for an empty `retry-gate-probe-command`. Only an
-      # explicit `false` — a probe that ran and found nothing — skips.
       - uses: pnpm/action-setup@v4
-        if: ${{ steps.ledger.outputs.any != 'false' }}
+        if: ${{ steps.ledger.outputs.any == 'true' }}
         with:
           run_install: false
 
       - uses: actions/setup-node@v4
-        if: ${{ steps.ledger.outputs.any != 'false' }}
+        if: ${{ steps.ledger.outputs.any == 'true' }}
         with:
           node-version: ${{ inputs.node-version }}
           cache: 'pnpm'
 
       - name: Install dependencies
-        if: ${{ steps.ledger.outputs.any != 'false' }}
+        if: ${{ steps.ledger.outputs.any == 'true' }}
         shell: bash
         run: pnpm install --frozen-lockfile
 
       - name: Pre-replay setup
-        if: ${{ steps.ledger.outputs.any != 'false' && inputs.retry-gate-pre-command != '' }}
+        if: ${{ steps.ledger.outputs.any == 'true' && inputs.retry-gate-pre-command != '' }}
         shell: bash
         run: ${{ inputs.retry-gate-pre-command }}
 
       - name: Replay what failed last time
-        if: ${{ steps.ledger.outputs.any != 'false' }}
+        if: ${{ steps.ledger.outputs.any == 'true' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
