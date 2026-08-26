@@ -75,10 +75,27 @@ everything a thirty-job run knew without opening thirty logs.
 
 ## Tests
 
-`__tests__/ledger.test.mjs` is the one that matters most, and its fixtures are
-real runner output quoted from consumer runs rather than output invented to
-match the regexes. A detector that stopped recognising a format records an empty
-ledger, the next run stands down politely, and nothing is red at any point.
+`__tests__/ledger.test.mjs` is the one that matters most, because every way this
+extractor can break is GREEN. A detector that stops recognising a format records
+an empty ledger, the next run stands down politely, and nothing is red at any
+point — so the tests are the only thing standing between a working feature and a
+feature that merely looks like one.
+
+**A fixture must be the bytes the logs API returns, not the log as a browser
+renders it.** They are different, and the difference is invisible in a paste: a
+runner colours its output, so vitest's badge really arrives as
+`ESC[41mESC[1m FAIL ESC[22mESC[49m lib/x/y.test.ts`, with the escapes in exactly
+the gap where `VITEST_FAIL` expects the path. `extractFiles` strips the CSI
+family before matching, and `a colourised unit failure is extracted` pins that.
+Its fixture is assembled from `String.fromCharCode(27)` rather than pasted,
+because copying through any rendering surface silently removes the thing under
+test.
+
+That is not hypothetical. Every fixture here was once a browser copy, this
+README claimed they were real runner output, twenty-one tests were green, and
+the action had never extracted a single file from a single real run — found only
+by staging a deliberate one-file failure in a consumer and reading what the
+ledger recorded (12-apps/future-pay run 33019734835).
 
 `__tests__/probe.test.mjs` pins the other direction: every way of being unsure
 stands down. Both run in `self-test.yml`.
