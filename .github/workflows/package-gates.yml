@@ -187,8 +187,18 @@ jobs:
       # runner that stopped recognising a gate would report "all gates passed"
       # and go green — the same silent-success failure the gates it runs exist
       # to prevent — so it is not bash in a YAML file.
+      #
+      # Referenced by its FULL path, not `./.github/actions/package-gates`. A
+      # relative `uses:` resolves against the CALLER's checkout, and the caller
+      # is the consuming repo — which has no such directory, so the step dies
+      # looking for an action that is sitting right beside this file. Every
+      # other action reference in this repo's reusable workflows is already
+      # spelled this way (fetch-base, affected-plan, vitest-signal-guard,
+      # setup-playwright, flakiness-lint, pglite-template-cache); the relative
+      # form here was the lone exception and it only reads as correct from
+      # inside this repo.
       - name: Run gates
-        uses: ./.github/actions/package-gates
+        uses: 12-apps/ci/.github/actions/package-gates@v1
         with:
           gates: ${{ inputs.gates }}
           working-directory: ${{ inputs.package-dir }}
