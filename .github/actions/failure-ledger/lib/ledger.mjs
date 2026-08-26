@@ -50,6 +50,28 @@ export const BUILTIN_LANES = [
   [/E2E \(affected only\)/, "e2e"],
 ];
 
+/**
+ * The colour a runner writes and a reader never sees.
+ *
+ * This is the difference between a log as the API returns it and a log as the
+ * web UI renders it, and it is the whole reason this strip exists. Vitest
+ * paints its badge, so the RAW bytes of a failing unit lane read
+ * `ESC[41mESC[1m FAIL ESC[22mESC[49m lib/x/y.test.ts` — the escapes sit in the
+ * gap between `FAIL` and the path, which is exactly where `VITEST_FAIL`
+ * requires the path to begin.
+ *
+ * Fixtures copied out of the browser are already rendered, so they match and
+ * the real thing does not. Measured on 12-apps/future-pay run 33019734835: a
+ * unit lane failed on one named file and the ledger recorded
+ * `no unit test file named in the log`, with fourteen green tests either side
+ * of the bug. Strip first, then match, and a fixture can be the real bytes.
+ *
+ * Deliberately the whole CSI family rather than SGR alone: cursor and erase
+ * sequences cost nothing to drop and a runner that emits one would fail the
+ * same silent way.
+ */
+const ANSI = /\u001B\[[0-?]*[ -/]*[@-~]/g;
+
 /** Vitest names a failing file after `FAIL`, before the ` > test > name` trail. */
 const VITEST_FAIL = /(?:^|\s)FAIL\s+(\S+\.(?:test|spec)\.[cm]?tsx?)\b/;
 /** Playwright names it as `file.e2e.ts:line:col`, in the failure and the summary. */
@@ -115,7 +137,9 @@ export function normalize(raw) {
  * check before a single test runs. The walk is what makes the lane USEFUL; the
  * gate is what makes it safe.
  */
-export function extractFiles(lane, log, marker = DEFAULT_WORKSPACE_MARKER) {
+export function extractFiles(lane, rawLog, marker = DEFAULT_WORKSPACE_MARKER) {
+  // Before any match, so every pattern below sees the log a reader sees.
+  const log = String(rawLog ?? "").replace(ANSI, "");
   if (lane === "e2e") {
     // Playwright runs from the repo root, so its paths already are repo-relative.
     return [...new Set([...log.matchAll(PLAYWRIGHT_SPEC)].map((m) => normalize(m[1])))];

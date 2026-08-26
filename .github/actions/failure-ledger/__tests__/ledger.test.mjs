@@ -47,6 +47,20 @@ const INTEGRATION_LOG = `
  FAIL  apps/web/tests/integration/soft-delete-default.integration.test.ts > archived rows
 `;
 
+// The fixtures above are the log as a BROWSER renders it. The logs API returns
+// the bytes the runner wrote, and vitest paints its badge — so the escapes land
+// in the gap between `FAIL` and the path, precisely where the pattern expects
+// the path to start.
+//
+// This one is therefore built from character 27 rather than pasted, because a
+// paste through any rendering surface silently loses the thing under test.
+// Transcribed from 12-apps/future-pay run 33019734835, job 98347325455.
+const ESC = String.fromCharCode(27);
+const ANSI_UNIT_LOG = [
+  "2026-08-26T22:30:24.1839941Z [ci-planned] apps/web: 1 planned test file(s).",
+  `2026-08-26T22:30:25.3735097Z ${ESC}[41m${ESC}[1m FAIL ${ESC}[22m${ESC}[49m lib/feature-flags/__tests__/retry-gate-evidence.test.ts${ESC}[2m > ${ESC}[22mretry gate evidence`,
+].join("\n");
+
 test("a playwright failure names its spec, repo-relative and once", () => {
   assert.deepEqual(extractFiles("e2e", PLAYWRIGHT_LOG), [
     "apps/admin/src/pages/config/orders/config-orders.e2e.ts",
@@ -173,4 +187,23 @@ test("a consumer's own workspace marker can replace the default", () => {
     extractFiles("unit", log, String.raw`>>> entering ((?:apps|packages)/[\w.-]+)`),
     ["packages/ui/src/Button/__tests__/Button.test.tsx"],
   );
+});
+
+
+test("a colourised unit failure is extracted (the raw bytes, not the rendered log)", () => {
+  // The bug this pins: every fixture above was ANSI-free, fourteen tests were
+  // green, and the feature had never once extracted a file from a real run.
+  // Measured on run 33019734835 — one named failing file in, `no unit test file
+  // named in the log` out.
+  assert.deepEqual(extractFiles("unit", ANSI_UNIT_LOG), [
+    "apps/web/lib/feature-flags/__tests__/retry-gate-evidence.test.ts",
+  ]);
+});
+
+test("colour changes nothing about what a log means", () => {
+  // Stripping must be invisible rather than merely permissive: the same lines
+  // with and without escapes have to produce the same answer, or the strip is
+  // just a second way to read a log.
+  const stripped = ANSI_UNIT_LOG.replaceAll(new RegExp(`${ESC}\\[[0-9;]*m`, "g"), "");
+  assert.deepEqual(extractFiles("unit", ANSI_UNIT_LOG), extractFiles("unit", stripped));
 });
