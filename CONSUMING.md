@@ -557,11 +557,21 @@ narrow reports a verdict it never earned.
 
 Two consequences worth stating plainly:
 
-* **An empty matrix skips the lane and reports success.** That is the one
-  outcome a test lane must never produce BY ACCIDENT, which is why every
-  failure path above falls back instead of emptying, and why the plan job
-  prints a `::notice::` naming the reason whenever it does empty. Deliberate
-  and reasoned is a different thing from silent.
+* **A zero skips the lane and reports success — but the matrix is not what
+  skips it.** An empty matrix vector does not produce an empty expansion:
+  GitHub refuses to create the job (`Matrix vector 'shard' does not contain any
+  values`) and the run ends in error, so a caller aggregating `needs.tests.result`
+  goes red with no failing test anywhere. The skip is a `count` guard on the
+  matrix job itself, which is why the plan job emits BOTH `shards` and `count`.
+  Zero reached by ACCIDENT is still the one outcome a test lane must never
+  produce, which is why every failure path above falls back instead of
+  emptying, and why the plan job prints a `::notice::` naming the reason
+  whenever it does. Deliberate and reasoned is a different thing from silent.
+
+  A skipped matrix job gets no matrix context, so GitHub records its check run
+  under the raw `name:` expression rather than evaluating it — in the zero case
+  `Tests / Unit Tests` does not report. Require your own aggregate job in the
+  ruleset, not an individual lane context.
 * **It retires the zero-test bypass label for this case.** A lane that never
   starts has no junit report to guard, so the signal job is skipped rather
   than failed — which is what an SPA-only or docs-only pull request was
