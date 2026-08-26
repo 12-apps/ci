@@ -22,6 +22,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { reachableExports } from "./exports-dataflow.mjs";
 import { buildGraph, listSourceFiles, loadPackages } from "./modules.mjs";
 import { affectedExports, exportedSymbols } from "./symbols.mjs";
 
@@ -32,6 +33,21 @@ export const FULL = "full";
 function importReaches(record, symbols) {
   if (symbols === "*" || record.wildcard) return true;
   return record.names.some((n) => symbols.has(n));
+}
+
+/**
+ * The exports of `file` that can see what this import record just bound.
+ *
+ * A wildcard record (`import * as ns`, a default import, a bare side-effect
+ * import, `require`, a dynamic `import()`) understates nothing on purpose —
+ * there is no name list to intersect, so the whole file widens, exactly as it
+ * did before this narrowing existed.
+ */
+function narrowedExports(source, record, symbols) {
+  if (source == null || record.wildcard) return "*";
+  const tainted = symbols === "*" ? record.names : record.names.filter((n) => symbols.has(n));
+  if (tainted.length === 0) return "*";
+  return reachableExports(source, [...tainted, ...tainted.map((n) => `${record.spec}#${n}`)]);
 }
 
 /**
@@ -89,6 +105,24 @@ export function selectAffected(options) {
   const headByName = new Map();
   const headSources = new Map();
   const baseSources = new Map();
+
+  /**
+   * A graph file's current source, read once and cached. `headSources` only
+   * covers the DIFF; the narrowing needs any importer the walk reaches, which
+   * is most of the graph. Unreadable answers null, which widens.
+   */
+  const sourceCache = new Map();
+  const headSourceOf = (file) => {
+    if (headSources.has(file)) return headSources.get(file);
+    if (!sourceCache.has(file)) {
+      try {
+        sourceCache.set(file, readFileSync(join(repoRoot, file), "utf8"));
+      } catch {
+        sourceCache.set(file, null);
+      }
+    }
+    return sourceCache.get(file);
+  };
   for (const file of relevant) {
     const base = readBase(file);
     baseSources.set(file, base);
@@ -194,9 +228,23 @@ export function selectAffected(options) {
     const symbols = affected.get(current);
     for (const { file, record } of importers.get(current) ?? []) {
       if (!importReaches(record, symbols)) continue;
-      if (affected.get(file) === "*") continue;
-      affected.set(file, "*");
+      const previous = affected.get(file);
+      if (previous === "*") continue;
+
+      // Which of THIS file's exports can see what it just bound? Answering
+      // "all of them" is what made hop two lose the precision hop one has, and
+      // compounded it over every hop after (see exports-dataflow.mjs). Every
+      // uncertainty in there answers `"*"`, so this can only ever narrow a
+      // claim the old walk was already making.
+      const next = narrowedExports(headSourceOf(file), record, symbols);
+      // Nothing here can observe it: the chain genuinely ends at this file.
+      if (next !== "*" && next.size === 0) continue;
+      // Already knew everything this hop carries — re-queueing would not add.
+      if (next !== "*" && previous && [...next].every((n) => previous.has(n))) continue;
+
+      affected.set(file, next === "*" ? "*" : new Set([...(previous ?? []), ...next]));
       if (!via.has(file)) via.set(file, { from: current, line: record.line, text: record.text, spec: record.spec });
+      settled.delete(file);
       queue.push(file);
     }
   }
