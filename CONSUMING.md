@@ -364,32 +364,57 @@ whole pipeline**. It runs between `Detect Changes` and lint/type-check, so a
 failed replay stops this tier — and with it every lane you gate on this tier's
 result, with no `needs:` edits of your own.
 
+Two halves. The RECORDER runs in your final aggregate job; the gate reads what
+it wrote on the next push.
+
 ```yaml
+  # In your `ci-success` (or equivalent) job — runs on a red run, publishes the
+  # `ci-failure-ledger` artifact. Needs `actions: read`.
+      - name: Record what failed
+        if: ${{ !cancelled() && contains(join(needs.*.result, ' '), 'failure') }}
+        continue-on-error: true          # describing a failure must never BE one
+        uses: 12-apps/ci/.github/actions/failure-ledger@v1
+        with:
+          mode: record
+          # Only the jobs YOU define. The ones these workflows emit are already
+          # known — see below.
+          extra-lanes: '{"Gherkin Journeys": "e2e"}'
+
+  # The gate itself.
   static:
     uses: 12-apps/ci/.github/workflows/monorepo-static.yml@v1
-    # `actions: read` is what lets the probe read the previous run and its
-    # artifacts. A caller must grant a SUPERSET of what the reusable workflow
-    # declares, or GitHub rejects the run at startup.
+    # A caller must grant a SUPERSET of what the reusable workflow declares, or
+    # GitHub rejects the run at startup.
     permissions:
       contents: read
       actions: read
     with:
-      retry-gate-probe-command: node scripts/ci-retry-gate.mjs --probe
-      retry-gate-command: node scripts/ci-retry-gate.mjs --replay
+      retry-gate-command: node scripts/ci-retry-gate.mjs
       retry-gate-pre-command: pnpm --filter @repo/prisma prisma:generate
+      retry-gate-quarantine-file: flaky-quarantine.json
 ```
 
-Both halves live in YOUR repo, and deliberately: this workflow cannot see your
-lanes, your runners or your ledger format, and an input that tried to encode
-them would be a second implementation of a selection you already own. It decides
-only **when** the commands run.
+**You supply one command, not two.** The probe is this repo's, and so is the
+job-name → lane table it depends on. `Tests / Unit Tests`, `Tests / Integration
+Tests` and `Quality / E2E Reliability` are strings THESE workflows produce: a
+consumer holding a copy of them would be holding a hand-copied list it does not
+own, and a rename here would silently empty every consumer's ledger — no red
+run, just a feature that stopped working. Declare only your own jobs, via
+`extra-lanes`.
+
+What stays yours is the one thing this workflow genuinely cannot know: **how to
+invoke your runners.** Your `retry-gate-command` is handed
+`.ci-failure-ledger.json`, already narrowed to files this checkout still has and
+with quarantined paths removed; it decides which of those its lanes can run, and
+runs them — through the same code path the real lane uses, so a replay that
+passes where the lane fails is not a thing that can happen.
 
 **The probe is what keeps the lane free.** It runs from a bare checkout with no
-toolchain and writes `any=true` / `any=false` to `$GITHUB_OUTPUT`; everything
-after it — pnpm, Node, `pnpm install`, the pre-command, the replay — is gated on
-`any=true`. A push whose predecessor was green (the overwhelmingly common case)
-pays a checkout and a few API calls. Only a push that follows a **red** one pays
-for a toolchain, which is the push that has something to learn from one.
+toolchain; everything after it — pnpm, Node, `pnpm install`, the pre-command,
+the replay — is gated on its `any` output. A push whose predecessor was green
+(the overwhelmingly common case) pays a checkout and a few API calls. Only a
+push that follows a **red** one pays for a toolchain, which is the push that has
+something to learn from one.
 
 Three properties make this safe to put in front of everything, and all three are
 load-bearing:
@@ -398,10 +423,11 @@ load-bearing:
   behind it and stay authoritative. The gate replays a SUBSET and never reports
   a verdict on anything it did not run, so a stale or partial ledger costs
   seconds — never a false green.
-- **It must fail OPEN.** Your command has to exit 0 on every "I don't know": no
-  ledger, an unreadable one, files that have left the checkout, a lane it cannot
-  invoke. A gate that ran nothing costs a few seconds; a gate that reddens a
-  sound tree costs a cycle plus the trust that makes the next red believable.
+- **It must fail OPEN.** The probe already does; your command must too, on the
+  one judgement left to it — a lane it cannot invoke, or a ledger it cannot
+  read, has to exit 0. A gate that ran nothing costs a few seconds; a gate that
+  reddens a sound tree costs a cycle plus the trust that makes the next red
+  believable.
 - **Pull requests only.** On `push` this tier is the post-merge safety net,
   whose contract is to skip nothing and inventory everything that landed. A lane
   that front-runs it with a subset has nothing to add there, so the gate is

@@ -78,6 +78,16 @@ jobs:
         shell: bash
         run: node --test .github/actions/package-gates/__tests__/package-gates.test.mjs
 
+      # The failure ledger's EXTRACTOR is the piece that fails silently. A gate
+      # that reproduces a failure goes red and one that cannot read its ledger
+      # says so, but a detector that stopped recognising a runner's output
+      # records an EMPTY ledger: the next run finds nothing, stands down
+      # politely, and the pipeline goes on being slow with nothing red at any
+      # point. Its fixtures are real runner output quoted from consumer runs.
+      - name: failure-ledger
+        shell: bash
+        run: node --test .github/actions/failure-ledger/__tests__/*.test.mjs
+
       # Not an action's tests — the workflow FILES' own shape. A reusable
       # workflow that references an action by a relative path works in every
       # job above (same checkout, same directory) and breaks only in the

@@ -1,0 +1,152 @@
+name: 'CI failure ledger'
+description: >-
+  Record what a failing run broke, and answer — from a bare checkout — whether
+  the next push has anything worth replaying first.
+
+  Every selector in a CI pipeline answers "what could this diff have broken?".
+  Nothing answers the cheaper question a FIX push actually asks: "is the thing
+  that was broken last time still broken?" — even though the failing run
+  computed that answer in full and then threw it away.
+
+  `record` writes it down. It reads the run's failed jobs from the API (the
+  job's name, and the name of the step whose conclusion is `failure`), scrapes
+  each one's log for the test files it named, and publishes the result as the
+  `ci-failure-ledger` artifact. `probe` is the other end: on the next push to
+  the same branch it finds that artifact, drops anything the checkout no longer
+  has, and reports whether a replay is worth a toolchain.
+
+  The two inputs are deliberately asymmetric. WHICH LANE failed is structured
+  data the platform maintains, and it decides whether anything is replayed at
+  all. WHICH FILES failed is a scrape of a runner's output, so it may only ever
+  NARROW — a lane whose files cannot be extracted is recorded as unreplayable
+  rather than replayed whole. That asymmetry is what makes a log-scraped input
+  acceptable here when it would be indefensible in a selector: the gate this
+  feeds can only ever fail EARLIER, never green, because the real lanes still
+  run in full behind it.
+
+inputs:
+  mode:
+    description: >-
+      `record` (in the run's final aggregate job) or `probe` (in the retry gate,
+      before any toolchain exists).
+    required: true
+  out:
+    description: >-
+      Where the ledger is written. `record` publishes this path as the
+      artifact; `probe` leaves the downloaded document here for the replay
+      command to read.
+    required: false
+    default: ''
+  github-token:
+    description: >-
+      Token with `actions: read`. The workflow-runs and job-logs APIs are both
+      gated on it; without it `probe` finds no ledger and the gate degrades to
+      the no-op it already is when there is nothing to replay.
+    required: false
+    default: ${{ github.token }}
+  extra-lanes:
+    description: >-
+      `record` only. JSON object of `{"<job-name regex>": "<lane>"}` for jobs
+      the CONSUMER defines, merged ahead of the built-in table.
+
+      The built-ins cover the jobs THIS repo's workflows emit (`Tests / Unit
+      Tests`, `Tests / Integration Tests`, `Quality / E2E Reliability`, `Quality
+      / E2E (affected only)`) and belong here rather than in a consumer: they
+      are strings the consumer does not own, so a rename here would silently
+      empty every consumer's ledger — no red run, just a feature that stopped
+      working. Declare only the jobs you define yourself.
+
+      Lanes are free-form; whatever your replay command understands. Only lanes
+      whose failures NAME FILES are worth declaring — a gate lane fails as a
+      whole and is recorded under `unreplayable` instead.
+    required: false
+    default: ''
+  workspace-marker:
+    description: >-
+      `record` only. Regex whose first capture group is the workspace a runner
+      has entered, used to re-anchor package-relative paths.
+
+      A lane that shards vitest per workspace runs it with the PACKAGE as cwd,
+      so vitest prints `lib/x/__tests__/y.test.ts` — meaningless from the repo
+      root where the replay runs. The default matches the `[tag] <workspace>: …`
+      and `--filter ./<workspace>` shapes. Getting it wrong is safe (the probe's
+      existence check drops the path); getting it right is what makes those
+      lanes replayable at all.
+    required: false
+    default: ''
+  quarantine-file:
+    description: >-
+      `probe` only. Path to a JSON list of known-flaky test paths (an array of
+      strings, or `{"tests": [...]}`); a listed path never enters a replay.
+
+      This is the one real cost of the whole mechanism: a test that failed by
+      chance last time and fails by chance again turns a sound push red early
+      instead of green late. Point this at the file you already keep.
+    required: false
+    default: ''
+  head-sha:
+    description: '`record` only. Recorded in the ledger for provenance.'
+    required: false
+    default: ''
+  upload-artifact:
+    description: >-
+      `record` only. Publish the ledger as the `ci-failure-ledger` artifact.
+
+      On by default, and published even when nothing is replayable: half this
+      artifact's job is to tell a HUMAN what a thirty-job run broke without
+      opening thirty logs, and that half is worth most exactly when the gate can
+      do nothing.
+    required: false
+    default: 'true'
+  retention-days:
+    description: 'Artifact retention. A branch red for a week has a bigger problem.'
+    required: false
+    default: '7'
+
+outputs:
+  any:
+    description: >-
+      `probe` only. `true` when the previous run left a ledger naming files this
+      checkout still has. Gate every later step of the retry gate on it — that
+      gating is the entire reason the lane is free on a green branch.
+    value: ${{ steps.probe.outputs.any }}
+  wrote:
+    description: >-
+      `record` only. `true` when a ledger was written. The publish step reads
+      THIS rather than re-deriving it with `hashFiles`, which once skipped an
+      upload on a run whose log showed the file being written one step above.
+    value: ${{ steps.record.outputs.wrote }}
+
+runs:
+  using: composite
+  steps:
+    - name: Record what failed
+      id: record
+      if: ${{ inputs.mode == 'record' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        LEDGER_OUT: ${{ inputs.out || 'ci-failure-ledger.json' }}
+        LEDGER_EXTRA_LANES: ${{ inputs.extra-lanes }}
+        LEDGER_WORKSPACE_MARKER: ${{ inputs.workspace-marker }}
+        LEDGER_HEAD_SHA: ${{ inputs.head-sha }}
+      run: node "$GITHUB_ACTION_PATH/record.mjs"
+
+    - name: Publish the failure ledger
+      if: ${{ inputs.mode == 'record' && inputs.upload-artifact == 'true' && steps.record.outputs.wrote == 'true' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: ci-failure-ledger
+        path: ${{ inputs.out || 'ci-failure-ledger.json' }}
+        if-no-files-found: ignore
+        retention-days: ${{ inputs.retention-days }}
+
+    - name: Look for a ledger from this branch's last run
+      id: probe
+      if: ${{ inputs.mode == 'probe' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        LEDGER_OUT: ${{ inputs.out || '.ci-failure-ledger.json' }}
+        LEDGER_QUARANTINE_FILE: ${{ inputs.quarantine-file }}
+      run: node "$GITHUB_ACTION_PATH/probe.mjs"
