@@ -61,6 +61,9 @@ jobs:
   commitlint:
     name: Conventional commits
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:

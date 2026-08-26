@@ -46,6 +46,9 @@ jobs:
   release:
     name: Cut version
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:

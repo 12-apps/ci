@@ -50,6 +50,9 @@ jobs:
     name: Provision droplet
     if: inputs.action == 'provision'
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 30
     env:
       DROPLET_NAME: ${{ inputs.droplet_name }}
       DROPLET_SIZE: ${{ inputs.droplet_size }}
@@ -87,6 +90,9 @@ jobs:
     name: Redeploy
     if: inputs.action == 'deploy'
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 45
     # A superseded deploy still SUCCEEDS as a job (it correctly did nothing), so
     # `needs.deploy.result` cannot distinguish "deployed" from "skipped".
     # Downstream consumers must read this output instead.
@@ -320,6 +326,9 @@ jobs:
     # whatever happens to be live, which is the waste this was meant to remove.
     if: needs.deploy.result == 'success' && needs.deploy.outputs.superseded != 'true'
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 10
     steps:
       - name: Trigger post-cd workflow
         uses: actions/github-script@v7
@@ -339,6 +348,9 @@ jobs:
     name: Destroy droplet
     if: inputs.action == 'destroy'
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 10
     env:
       DROPLET_NAME: ${{ inputs.droplet_name }}
     steps:
