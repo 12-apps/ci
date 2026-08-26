@@ -96,6 +96,18 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/job-timeouts.test.mjs
 
+      # The retry gate's hold on lint/type-check/actionlint.
+      #
+      # Its failure mode is silent and one-directional: the gate is SKIPPED on
+      # every green branch, so the condition holding it must survive a skip —
+      # and the two idioms that do (`always()`, `!cancelled()`) are true for a
+      # FAILED gate too. Written either of those ways the tier starts on a tree
+      # the gate just proved broken, the run is still red, and the only thing
+      # lost is the minutes the lane exists to save. Nothing else would notice.
+      - name: Retry gate wiring
+        shell: bash
+        run: node --test .github/workflows/__tests__/retry-gate-wiring.test.mjs
+
   # Not a script test and not a file-shape test: an assertion about GITHUB, run
   # on GitHub, because the alternative is a comment.
   #

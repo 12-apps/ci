@@ -351,6 +351,73 @@ jobs:
           if printf '%s' "$RESULTS" | grep -qwE 'failure|cancelled'; then exit 1; fi
 ```
 
+### Replaying last run's failures first — the retry gate (opt-in)
+
+Every selector in this pipeline answers *what could this diff have broken?*
+Nothing answers the cheaper question a **fix push** actually asks: *is the thing
+that was broken last time still broken?* — even though the previous run computed
+that answer and threw it away.
+
+The retry gate closes that. A run that fails leaves a ledger of what failed; the
+next run on the same branch replays exactly that, narrowly, **in front of the
+whole pipeline**. It runs between `Detect Changes` and lint/type-check, so a
+failed replay stops this tier — and with it every lane you gate on this tier's
+result, with no `needs:` edits of your own.
+
+```yaml
+  static:
+    uses: 12-apps/ci/.github/workflows/monorepo-static.yml@v1
+    # `actions: read` is what lets the probe read the previous run and its
+    # artifacts. A caller must grant a SUPERSET of what the reusable workflow
+    # declares, or GitHub rejects the run at startup.
+    permissions:
+      contents: read
+      actions: read
+    with:
+      retry-gate-probe-command: node scripts/ci-retry-gate.mjs --probe
+      retry-gate-command: node scripts/ci-retry-gate.mjs --replay
+      retry-gate-pre-command: pnpm --filter @repo/prisma prisma:generate
+```
+
+Both halves live in YOUR repo, and deliberately: this workflow cannot see your
+lanes, your runners or your ledger format, and an input that tried to encode
+them would be a second implementation of a selection you already own. It decides
+only **when** the commands run.
+
+**The probe is what keeps the lane free.** It runs from a bare checkout with no
+toolchain and writes `any=true` / `any=false` to `$GITHUB_OUTPUT`; everything
+after it — pnpm, Node, `pnpm install`, the pre-command, the replay — is gated on
+`any=true`. A push whose predecessor was green (the overwhelmingly common case)
+pays a checkout and a few API calls. Only a push that follows a **red** one pays
+for a toolchain, which is the push that has something to learn from one.
+
+Three properties make this safe to put in front of everything, and all three are
+load-bearing:
+
+- **It can only ever fail EARLIER.** The lanes it front-runs still run in full
+  behind it and stay authoritative. The gate replays a SUBSET and never reports
+  a verdict on anything it did not run, so a stale or partial ledger costs
+  seconds — never a false green.
+- **It must fail OPEN.** Your command has to exit 0 on every "I don't know": no
+  ledger, an unreadable one, files that have left the checkout, a lane it cannot
+  invoke. A gate that ran nothing costs a few seconds; a gate that reddens a
+  sound tree costs a cycle plus the trust that makes the next red believable.
+- **Pull requests only.** On `push` this tier is the post-merge safety net,
+  whose contract is to skip nothing and inventory everything that landed. A lane
+  that front-runs it with a subset has nothing to add there, so the gate is
+  skipped on push regardless of configuration.
+
+Leave the inputs unset and the job is skipped and the tier behaves exactly as it
+did before this existed.
+
+> The one thing not to get wrong when reading this: lint, type-check and
+> actionlint hold on the gate with
+> `(needs.retry-gate.result == 'success' || … == 'skipped')`, **not** with
+> `always()` or `!cancelled()`. The gate is skipped on every green branch, so
+> the condition must survive a skip — and both of those idioms survive a
+> *failure* too, which starts the tier on a tree the gate just proved broken.
+> `retry-gate-wiring.test.mjs` fails if either creeps back in.
+
 ### Skipping a unit run whose answer is already known (opt-in)
 
 PR-time selection is **cumulative**: every lane diffs against the pull request's
@@ -1577,6 +1644,7 @@ thing this repo cannot observe — take an override:
 | `monorepo-tests.yml` | `build-timeout-minutes` | `45` | the build job |
 | `monorepo-static.yml` | `lint-timeout-minutes` | `30` | lint |
 | `monorepo-static.yml` | `type-check-timeout-minutes` | `30` | type-check |
+| `monorepo-static.yml` | `retry-gate-timeout-minutes` | `20` | the retry gate |
 | `quality.yml` | `static-gates-timeout-minutes` | `45` | the whole gate set |
 | `quality.yml` | `e2e-timeout-minutes` | `60` | both e2e jobs |
 | `package-gates.yml` | `timeout-minutes` | `15` | your own gate scripts |
