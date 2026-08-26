@@ -60,3 +60,7 @@ jobs:
       - name: affected-plan
         shell: bash
         run: node --test .github/actions/affected-plan/__tests__/*.test.mjs
+
+      - name: package-gates
+        shell: bash
+        run: node --test .github/actions/package-gates/__tests__/package-gates.test.mjs

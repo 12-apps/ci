@@ -1,0 +1,38 @@
+name: 'Package gates'
+description: >-
+  Run a consumer's OWN gate scripts and fail naming each one that failed. Every
+  gate runs even after one fails, because a budget sweep usually trips several
+  ratchets at once and reporting one per push turns one fix into four. Knows
+  nothing about what the gates assert — the consumer owns the scripts, their
+  ratchet files and their exit codes. Pair it with package-gates.yml when the
+  gates need an install; use it directly inside a job that has already set up
+  and installed (the storefront-bundle case, where a gate wants the build the
+  job just did).
+
+inputs:
+  gates:
+    description: >-
+      The gates, one per line, as `LABEL|COMMAND`. LABEL is what a failure is
+      reported as, so write the property rather than the script name. Only the
+      FIRST `|` splits, so a command may contain pipes. Blank lines and lines
+      starting with # are ignored. A line with no separator is an error rather
+      than a command with a blank label — a gate nobody can name in a failure
+      is what the label exists to prevent.
+    required: true
+  working-directory:
+    description: 'Directory the gate commands run from.'
+    required: false
+    default: '.'
+
+runs:
+  using: composite
+  steps:
+    - name: Run the declared gates
+      shell: bash
+      env:
+        GATES: ${{ inputs.gates }}
+        PACKAGE_DIR: '.'
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        node "$GITHUB_ACTION_PATH/package-gates.mjs"

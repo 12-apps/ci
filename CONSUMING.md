@@ -1530,6 +1530,88 @@ surface left to hang it on:
   malformed is an error, because a guard that cannot read what it guards must
   never report success.
 
+# Running your own gate scripts
+
+`package-gates.yml` runs the gate scripts a consumer already owns. It supplies
+only the SHAPE every ratchet needs and none of them should hand-roll: checkout,
+pnpm, Node, npm auth, `pnpm install --frozen-lockfile`, least-privilege
+permissions and a bounded timeout.
+
+The sibling gates here (`rbac-coverage.yml`, `entitlements-coverage.yml`,
+`mcp-test-coverage.yml`) each wrap exactly ONE named script. A consumer adding a
+ratchet of its own had nowhere to put it, so it copied ~30 lines of setup into
+its own `ci.yml` — once per gate. That copy is the part that rots: it is where a
+Node version drifts, where the pnpm 10 userconfig trap gets forgotten, and where
+a missing `timeout-minutes` lets a hang burn six hours.
+
+```yaml
+jobs:
+  ratchets:
+    # A budget is a COMPLETENESS property: any file can move a counted line, and
+    # a budget going stale is a failure with no touched path at all. Run it
+    # unconditionally — a paths filter that misses here means NO run, not a red
+    # one.
+    if: always()
+    permissions:
+      contents: read
+    uses: 12-apps/ci/.github/workflows/package-gates.yml@v1
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}   # only if your install resolves restricted packages
+    with:
+      name: Ratchets
+      gates: |
+        A batched State API seed says what its order is|pnpm quality:seed-order
+        The gate still recognises a batched seed|node --test scripts/__tests__/e2e-seed-order.test.mjs
+```
+
+**Write the LABEL as the property, not the script name.** It is what a failure
+is reported as (`::error title=<LABEL>::`), and "A batched seed says what its
+order is" is a sentence someone can act on where `seed-order` is not.
+
+**Every gate runs.** A failing gate does not abort the ones after it; the job
+runs them all and fails at the end naming each that failed. A budget sweep
+usually trips several ratchets at once, and reporting one per push turns one fix
+into four.
+
+Only the FIRST `|` splits, so a command may contain pipes. Blank lines and `#`
+comments are ignored. A line with no separator is an ERROR rather than a command
+with a blank label — a gate nobody can name in a failure is what the label
+exists to prevent, and an empty `gates` list is an error for the same reason: a
+caller that runs nothing must not read as passing.
+
+| input | default | what it is for |
+|---|---|---|
+| `gates` | *required* | the gates, one `LABEL\|COMMAND` per line |
+| `name` | `Package Gates` | job display name, so several callers stay distinguishable |
+| `node-version` | `24` | Node for the gates |
+| `package-dir` | `.` | directory the gates run from; install still runs at the root |
+| `install` | `true` | set false for gates that are pure Node builtins |
+| `pre-command` | `''` | shell run after install, before the gates (e.g. build a package) |
+| `timeout-minutes` | `15` | bound so a hang fails in minutes, not six hours |
+| `github-packages-scope` | `''` | scope served by GitHub Packages (needs `packages: read`) |
+
+## Already inside a job? Use the action
+
+When the gate wants something the job just produced — a build, a dist — calling
+the workflow would pay for a second checkout and install to redo it. Use the
+composite action directly instead:
+
+```yaml
+      - name: The storefront's critical path holds only what it declares
+        uses: 12-apps/ci/.github/actions/package-gates@v1
+        with:
+          gates: |
+            The critical path holds only what it declares|pnpm quality:eager
+```
+
+Same runner, same reporting, no setup — it assumes the job has already done it.
+
+**Secrets:** the workflow takes `NPM_TOKEN` only, and only because a restricted
+install needs it. Every gate is consumer-controlled code, so nothing else may be
+passed; `permissions: contents: read` scopes the GITHUB_TOKEN but does NOT
+protect env secrets, and withholding `secrets: inherit` is the separate,
+necessary control.
+
 # Fetching a PR base you can actually diff against
 
 The reusable workflows here already do this for their own lanes. This section is
