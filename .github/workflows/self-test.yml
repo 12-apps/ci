@@ -53,6 +53,14 @@ jobs:
         shell: bash
         run: node --test .github/actions/bundle-ceiling-guard/__tests__/bundle-ceiling-guard.test.mjs
 
+      # affected-plan decides what a consumer's test lane runs. Both of its
+      # failure directions are green — a lane that runs too much only costs
+      # minutes, and a lane that runs too little reports success on code no
+      # test touched — so it carries the widest self-test set here.
+      - name: affected-plan
+        shell: bash
+        run: node --test .github/actions/affected-plan/__tests__/*.test.mjs
+
       - name: package-gates
         shell: bash
         run: node --test .github/actions/package-gates/__tests__/package-gates.test.mjs

@@ -624,6 +624,54 @@ Two things to know before raising it:
     names, and the job fails loudly instead of quietly dropping those names from
     `matched` on push.
 
+# Consuming the affected-test plan
+
+`.github/actions/affected-plan` selects a lane's test files at SYMBOL level and
+writes the list to a JSON plan the lane then runs verbatim.
+
+File-level selection ("does this test load the changed file?") collapses on any
+repo with a shared entry module: the entry is loaded by nearly everything, so
+touching it selects nearly everything — whether or not the code those tests
+execute is different afterwards. Measured on one consumer pull request of 13
+files, the unit lane ran 462 of 761 test files and the integration lane 65 of
+143; at symbol level the same diff needs 125 and 0.
+
+Two properties do the work: each exported symbol's body is hashed with comments
+stripped, and those hashes are keyed by NAME across the whole diff, so code that
+MOVED with an identical body is recognised as unchanged. An importer is followed
+only when it imports a symbol that actually changed.
+
+Every uncertainty widens to `mode=full` — an unresolvable import, an unparseable
+declaration, a manifest change, a missing config. Pair it with a full run on the
+default branch; strict PR-time selection is only sound when something
+unconditional runs afterwards.
+
+```yaml
+- uses: 12-apps/ci/.github/actions/fetch-base@v1
+
+- id: plan
+  uses: 12-apps/ci/.github/actions/affected-plan@v1
+  with:
+    lane: unit
+    base: FETCH_HEAD
+    artifact-name: affected-plan-unit
+
+- if: steps.plan.outputs.mode != 'none'
+  run: |
+    if [ "${{ steps.plan.outputs.mode }}" = "full" ]; then
+      pnpm run test
+    else
+      jq -r '.tests[]' affected-plan.json | xargs pnpm exec vitest run
+    fi
+```
+
+Have the plan job publish the artifact and the lane run `.tests` from it. A plan
+that reports only a shard count while the lane re-derives its own selection is
+two implementations of one decision, and they drift.
+
+Config reference, the plan document's shape, and the full rationale:
+[`.github/actions/affected-plan/README.md`](.github/actions/affected-plan/README.md).
+
 # Consuming the Quality gate
 
 Separate from CD: a reusable static-quality + test-reliability gate
