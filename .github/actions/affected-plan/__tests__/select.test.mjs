@@ -258,3 +258,70 @@ test("every selected test carries a reason chain", () => {
   assert.equal(chain[0].importer, "src/top.test.ts");
   assert.ok(chain.every((hop) => typeof hop.line === "number"));
 });
+
+// --- hop two is narrowed too -----------------------------------------------
+// Hop one was always symbol-precise; hop two marked the whole importer, and
+// every hop after it inherited that. These pin the narrowing end to end and,
+// more importantly, the routes where it must still widen.
+
+test("an intermediate file only carries the change through the exports that see it", () => {
+  // `middle.ts` binds the changed symbol but only ONE of its exports uses it.
+  // The test that reaches `middle` through the other export cannot observe the
+  // change, and before this narrowing it ran anyway.
+  const { root, readBase } = scenario({
+    head: {
+      "src/dep.ts": "export function moved() {\n  return 2;\n}\nexport function stable() {\n  return 0;\n}\n",
+      "src/middle.ts":
+        'import { moved } from "./dep";\n' +
+        "export const uses = () => moved();\n" +
+        "export const clean = () => 7;\n",
+      "src/hot.test.ts": 'import { uses } from "./middle";\nuses();\n',
+      "src/cold.test.ts": 'import { clean } from "./middle";\nclean();\n',
+    },
+    base: { "src/dep.ts": "export function moved() {\n  return 1;\n}\nexport function stable() {\n  return 0;\n}\n" },
+  });
+  assert.deepEqual(run({ repoRoot: root, changed: ["src/dep.ts"], readBase }).tests, ["src/hot.test.ts"]);
+});
+
+test("a namespace import still widens — there is no name list to narrow with", () => {
+  const { root, readBase } = scenario({
+    head: {
+      "src/dep.ts": "export function moved() {\n  return 2;\n}\n",
+      "src/middle.ts": 'import * as dep from "./dep";\nexport const uses = () => dep.moved();\nexport const clean = () => 7;\n',
+      "src/cold.test.ts": 'import { clean } from "./middle";\nclean();\n',
+    },
+    base: { "src/dep.ts": "export function moved() {\n  return 1;\n}\n" },
+  });
+  assert.deepEqual(run({ repoRoot: root, changed: ["src/dep.ts"], readBase }).tests, ["src/cold.test.ts"]);
+});
+
+test("an importer the bracketer cannot read widens rather than narrowing on a guess", () => {
+  // A top-level side effect can touch anything, so no claim about which of this
+  // file's exports see the change is available. Widening here is the whole
+  // reason the narrowing is safe to trust everywhere else.
+  const { root, readBase } = scenario({
+    head: {
+      "src/dep.ts": "export function moved() {\n  return 2;\n}\n",
+      "src/middle.ts": 'import { moved } from "./dep";\nregisterEverything(moved);\nexport const clean = () => 7;\n',
+      "src/cold.test.ts": 'import { clean } from "./middle";\nclean();\n',
+    },
+    base: { "src/dep.ts": "export function moved() {\n  return 1;\n}\n" },
+  });
+  assert.deepEqual(run({ repoRoot: root, changed: ["src/dep.ts"], readBase }).tests, ["src/cold.test.ts"]);
+});
+
+test("a barrel forwards only the name it forwards", () => {
+  // `export { a } from "./left"` is a reference to left's `a` and nothing else,
+  // so a change in `right` must not arrive through the line naming `left`.
+  const { root, readBase } = scenario({
+    head: {
+      "src/left.ts": "export const a = 1;\n",
+      "src/right.ts": "export const b = 2;\n",
+      "src/barrel.ts": 'export { a } from "./left";\nexport { b } from "./right";\n',
+      "src/left.test.ts": 'import { a } from "./barrel";\na;\n',
+      "src/right.test.ts": 'import { b } from "./barrel";\nb;\n',
+    },
+    base: { "src/right.ts": "export const b = 1;\n" },
+  });
+  assert.deepEqual(run({ repoRoot: root, changed: ["src/right.ts"], readBase }).tests, ["src/right.test.ts"]);
+});
