@@ -13,12 +13,16 @@ on:
   pull_request:
     paths:
       - '.github/actions/**'
-      - '.github/workflows/self-test.yml'
+      # The workflow FILES' own shape is tested here too, and those tests are
+      # worthless if editing the file under test does not run them. This lane
+      # was filtered to `.github/actions/**` while asserting things about
+      # monorepo-tests.yml — a gate that stops running is never red.
+      - '.github/workflows/**'
   push:
     branches: [main]
     paths:
       - '.github/actions/**'
-      - '.github/workflows/self-test.yml'
+      - '.github/workflows/**'
 
 permissions:
   contents: read
@@ -72,3 +76,50 @@ jobs:
       - name: Reusable workflow references
         shell: bash
         run: node --test .github/workflows/__tests__/reusable-workflow-refs.test.mjs
+
+      # The zero-shard guard on every matrix job built from a plan output.
+      - name: Matrix zero guard
+        shell: bash
+        run: node --test .github/workflows/__tests__/matrix-zero-guard.test.mjs
+
+  # Not a script test and not a file-shape test: an assertion about GITHUB, run
+  # on GitHub, because the alternative is a comment.
+  #
+  # Three separate comments in this repo said "an empty matrix skips the lane
+  # and reports success". It does not — GitHub refuses to create the job and the
+  # run errors — and the belief survived because nothing ever executed it. The
+  # whole zero-planned-tests design in monorepo-tests.yml rests on the guard
+  # below short-circuiting BEFORE the matrix is expanded, so that ordering is
+  # asserted rather than assumed.
+  #
+  # Reads as green either way in the job list. It is the WORKFLOW that fails if
+  # the ordering is ever the other one: an expanded-then-guarded empty vector
+  # takes this run down with it, which is exactly the signal wanted.
+  empty-matrix-plan:
+    name: Empty matrix plan
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - name: Report no work, exactly as a real plan job does
+        id: plan
+        shell: bash
+        run: |
+          echo "shards=[]" >> "$GITHUB_OUTPUT"
+          echo "count=0" >> "$GITHUB_OUTPUT"
+
+  empty-matrix-guard:
+    name: Empty matrix is skipped by the guard, never expanded
+    runs-on: ubuntu-latest
+    needs: empty-matrix-plan
+    if: ${{ needs.empty-matrix-plan.outputs.count != '0' }}
+    strategy:
+      matrix:
+        shard: ${{ fromJson(needs.empty-matrix-plan.outputs.shards) }}
+    steps:
+      - name: Unreachable
+        shell: bash
+        run: |
+          echo "::error::the zero guard did not skip this job"
+          exit 1

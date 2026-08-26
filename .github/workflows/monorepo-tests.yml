@@ -405,9 +405,11 @@ env:
 jobs:
   # Mirrors integration-plan, for the same reason it exists at all: a matrix
   # computed from a raw input would emit an EMPTY list for a zero, a negative
-  # or a typo — and an empty matrix skips the lane while reporting success,
-  # the one outcome a test lane must never produce by accident. The clamp
-  # lives in a job so the matrix can only ever be [1..N].
+  # or a typo. The clamp lives in a job so the matrix can only ever be [1..N].
+  #
+  # An empty matrix does NOT skip a lane — GitHub refuses to create the job and
+  # the run ends in error. Skipping is the `count` guard on unit-tests, and the
+  # clamp is what keeps an accidental zero from ever reaching it.
   unit-plan:
     name: Unit Plan
     runs-on: ubuntu-latest
@@ -495,14 +497,23 @@ jobs:
               echo "::warning::unit-plan-command exited non-zero; using unit-shards=$SHARDS."
             fi
           fi
-          # An empty matrix skips the lane while reporting success. Reached by
-          # ACCIDENT — a miscomputed input — that is the one outcome a test
-          # lane must never produce, which is why the clamp above exists and
-          # why every failure path falls back rather than emptying. Reached
-          # DELIBERATELY, because the caller's own selector answered "this diff
-          # cannot affect a test in this lane", it is the correct outcome and
-          # the alternative is paying for runners to prove it one at a time.
+          # Zero is the caller's selector answering "this diff cannot affect
+          # a test in this lane". Reached DELIBERATELY that is the correct
+          # outcome, and the alternative is paying for runners to prove it one
+          # at a time. Reached by ACCIDENT — a miscomputed input — it is the one
+          # outcome a test lane must never produce, which is why the clamp above
+          # exists and why every failure path falls back rather than emptying.
           # The distinction is the printed reason, so print one.
+          #
+          # The matrix does not express it. An empty vector is not an empty
+          # expansion: GitHub refuses to create the job and the whole workflow
+          # ends in error. Measured on 12-apps/future-pay run 32978511016 —
+          # `Tests / Integration Tests` never created, all 30 jobs that WERE
+          # created green or skipped, and the caller's `CI Success` red with no
+          # failing test anywhere. So `shards=[]` is only ever read by a job the
+          # `count` guard has already skipped; the guard is the part a new lane
+          # has to remember, and __tests__/matrix-zero-guard.test.mjs is what
+          # remembers it.
           if [ "$COUNT" -eq 0 ]; then
             echo "::notice::unit lane: the plan command reports no work for this diff — no shard will run."
             echo "shards=[]" >> "$GITHUB_OUTPUT"
@@ -519,6 +530,20 @@ jobs:
     name: ${{ needs.unit-plan.outputs.count > 1 && format('Unit Tests · shard {0}/{1}', matrix.shard, needs.unit-plan.outputs.count) || 'Unit Tests' }}
     runs-on: ubuntu-latest
     needs: unit-plan
+    # The zero-planned-tests skip, which the matrix cannot perform: `shards=[]`
+    # is a job GitHub refuses to create, and that fails the run (see unit-plan).
+    # This `if:` uses no status function, so it is ANDed with the implicit "skip
+    # me if a dependency failed" rather than replacing it — a red unit-plan
+    # still skips this job exactly as it did before the guard existed.
+    #
+    # One consequence to know, and it is not a regression: a SKIPPED matrix job
+    # gets no matrix context, so GitHub records the check run under the raw
+    # `name:` expression instead of evaluating it, and `Tests / Unit Tests` does
+    # not report at all in the zero case. It did not report before this guard
+    # either — the job was never created — so a branch ruleset requiring that
+    # context is no worse off, but it is not better off either. If your ruleset
+    # requires it, require the caller's own aggregate job instead.
+    if: ${{ needs.unit-plan.outputs.count != '0' }}
     strategy:
       # One shard's failure must not cancel the others — a partial matrix
       # reports a partial inventory (see integration-tests).
@@ -1073,9 +1098,11 @@ jobs:
               echo "::warning::integration-plan-command exited non-zero; using integration-shards=$SHARDS."
             fi
           fi
-          # Empty by accident is the outcome a test lane must never produce;
-          # empty because the caller's selector proved there is no work is the
-          # correct one. See unit-plan for the full reasoning.
+          # Zero by accident is the outcome a test lane must never produce; zero
+          # because the caller's selector proved there is no work is the correct
+          # one, and it is the `count` guard on integration-tests — never the
+          # matrix — that performs the skip. See unit-plan for the reasoning and
+          # for the run that measured what an empty matrix really does.
           if [ "$COUNT" -eq 0 ]; then
             echo "::notice::integration lane: the plan command reports no work for this diff — no shard will run."
             echo "shards=[]" >> "$GITHUB_OUTPUT"
@@ -1092,7 +1119,9 @@ jobs:
     name: ${{ needs.integration-plan.outputs.count > 1 && format('Integration Tests · shard {0}/{1}', matrix.shard, needs.integration-plan.outputs.count) || 'Integration Tests' }}
     runs-on: ubuntu-latest
     needs: integration-plan
-    if: ${{ inputs.run-integration }}
+    # `run-integration` as before, AND the zero-planned-tests guard the matrix
+    # cannot express — see unit-tests.
+    if: ${{ inputs.run-integration && needs.integration-plan.outputs.count != '0' }}
     strategy:
       # One shard's failure must not cancel the others: a partial matrix reports
       # a partial inventory, and the point of the push safety net is a complete
