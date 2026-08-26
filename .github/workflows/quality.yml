@@ -203,6 +203,29 @@ on:
         type: string
         required: false
         default: '.e2e-content-exceptions.json'
+      # ── Timeout overrides ──────────────────────────────────────────────
+      # Every job here is bounded so a HANG fails in minutes rather than
+      # running to GitHub's six-hour default. The defaults are sized from
+      # observed maxima times generous headroom, because these bound a hang
+      # and NOT slowness — a bound tight enough to trip a slow-but-working
+      # run converts a rare infrastructure stall into routine flakiness.
+      #
+      # A consumer's suite length is the one thing this repo cannot observe,
+      # so the lanes whose cost scales with it take an override. Raise it
+      # rather than shave it; the short lanes are fixed on purpose.
+      static-gates-timeout-minutes:
+        description: >-
+          Bound for the static-gates job, which runs the whole gate set.
+        type: number
+        required: false
+        default: 45
+      e2e-timeout-minutes:
+        description: >-
+          Bound for BOTH e2e jobs (affected and reliability). Browsers make
+          these the longest lanes here.
+        type: number
+        required: false
+        default: 60
 
 # Least-privilege, enforced at the source: every job here only reads the repo.
 # Capping permissions at the workflow level means a consumer that grants more in
@@ -239,6 +262,9 @@ jobs:
   static-gates:
     name: Static Gates
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: ${{ inputs.static-gates-timeout-minutes }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1073,6 +1099,9 @@ jobs:
     name: E2E (affected only)
     if: ${{ inputs.run-affected-e2e }}
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: ${{ inputs.e2e-timeout-minutes }}
     env:
       USE_FILE_DB: '1'
       AUTH_SECRET: e2e-secret
@@ -1171,6 +1200,9 @@ jobs:
     name: E2E Reliability
     if: ${{ inputs.run-e2e-reliability }}
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: ${{ inputs.e2e-timeout-minutes }}
     env:
       # In-process PGlite test DB (matches the consumer's e2e defaults). Override
       # in the consumer if it runs e2e differently.

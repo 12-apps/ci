@@ -160,6 +160,9 @@ jobs:
     name: MCP Test Coverage
     if: ${{ inputs.run-coverage }}
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 20
     steps:
       # Full history: the ratchet diffs the branch against its merge base, which
       # a depth-1 checkout cannot compute.

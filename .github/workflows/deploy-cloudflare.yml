@@ -26,6 +26,9 @@ jobs:
   validate-secrets:
     name: Validate Secrets
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 10
     steps:
       - name: Check Cloudflare secrets
         shell: bash
@@ -44,6 +47,9 @@ jobs:
     needs: validate-secrets
     if: ${{ inputs.workers != '[]' }}
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -69,6 +75,9 @@ jobs:
     needs: validate-secrets
     if: ${{ inputs.statics != '[]' }}
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -101,6 +110,9 @@ jobs:
       !cancelled() && needs.validate-secrets.result == 'success' &&
       (needs.deploy-workers.result == 'success' || needs.deploy-pages.result == 'success')
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 10
     steps:
       - name: Trigger post-cd workflow
         uses: actions/github-script@v7

@@ -133,6 +133,9 @@ jobs:
   detect:
     name: Detect Changes
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 10
     outputs:
       changes: ${{ steps.assemble.outputs.changes }}
       matched: ${{ steps.assemble.outputs.matched }}

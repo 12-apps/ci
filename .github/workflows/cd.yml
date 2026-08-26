@@ -82,6 +82,9 @@ jobs:
     name: Discover targets
     if: github.event_name == 'push' || inputs.action != 'destroy'
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 10
     permissions:
       contents: read
       packages: read   # select-images probes that each reuse source manifest exists
@@ -160,6 +163,9 @@ jobs:
     needs: discover
     if: needs.discover.outputs.has_build_images == 'true'
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 60
     concurrency:
       group: cd-build-image-${{ github.workflow }}-${{ matrix.image }}-${{ github.ref }}
       cancel-in-progress: true
@@ -233,6 +239,9 @@ jobs:
     needs: discover
     if: needs.discover.outputs.has_reuse_images == 'true'
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 15
     # Build-phase-only cancellation — see the note on build-images. Grouped for
     # the whole lane rather than per image, since it is a single job.
     concurrency:
@@ -273,6 +282,9 @@ jobs:
     needs: discover
     if: needs.discover.outputs.has_statics == 'true'
     runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 30
     # Build-phase-only cancellation — see the note on build-images.
     concurrency:
       group: cd-build-static-${{ github.workflow }}-${{ matrix.app }}-${{ github.ref }}
