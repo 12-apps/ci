@@ -1,0 +1,145 @@
+name: 'Affected test plan'
+description: >-
+  Decide which test files a lane must run, at SYMBOL level, and write the list
+  to a JSON plan the lane then executes verbatim.
+
+  File-level affected selection asks "does this test load the changed file?".
+  On any repo with a shared entry module that question selects most of the
+  suite for almost any diff, because the entry is loaded by nearly everything —
+  whether or not the code those tests execute is different afterwards. This
+  asks "is the code reachable from this test different?" instead: it hashes
+  each exported symbol's body, keyed by NAME across the whole diff so a pure
+  relocation is not mistaken for a change, and follows an importer only when it
+  imports a symbol that actually moved.
+
+  The plan is a FILE, not a count. A plan job that answers only "how many
+  shards?" and a lane that re-derives its own selection are two implementations
+  of one decision and they drift. Publish this plan as an artifact, have the
+  lane run `.tests` from it, and there is exactly one selection per run —
+  reviewable before it executes and auditable afterwards.
+
+  Fails safe in every direction: an unreadable config, an unresolvable import,
+  an unparseable declaration or an untraceable changed path all report
+  `mode=full` so the caller runs everything. The failure this must never
+  produce is a green lane that skipped the test which would have caught the
+  bug.
+
+inputs:
+  lane:
+    description: >-
+      Which lane block of the config to use (e.g. `unit`, `integration`). An
+      unknown lane reports `mode=full` rather than selecting nothing.
+    required: true
+  base:
+    description: >-
+      Base ref or SHA to diff against. The merge base with HEAD is resolved
+      from it, so passing a branch name is fine. Fetch it first (see the
+      `fetch-base` action) — a base the checkout does not have makes the diff
+      fail, which reports `mode=full`.
+    required: true
+  config:
+    description: 'Path to the consumer''s plan config, relative to working-directory.'
+    required: false
+    default: '.affected-plan.json'
+  out:
+    description: 'Where to write the plan JSON, relative to working-directory.'
+    required: false
+    default: 'affected-plan.json'
+  max-shards:
+    description: >-
+      Ceiling on the shard count. The plan knows the exact test list, so the
+      count is computed from it rather than from a proxy — this is a cap, not a
+      target.
+    required: false
+    default: '4'
+  min-tests-per-shard:
+    description: >-
+      Below this many test files a lane stays on one runner. Every shard pays a
+      full checkout, install and setup, so splitting a handful of files costs
+      more wall-clock than it saves.
+    required: false
+    default: '40'
+  working-directory:
+    description: 'Consumer checkout root.'
+    required: false
+    default: '.'
+  upload-artifact:
+    description: >-
+      Upload the plan as a workflow artifact. On by default: the plan is the
+      record of what a run decided to test, and it is the only thing that makes
+      a narrowed lane auditable after the fact.
+    required: false
+    default: 'true'
+  artifact-name:
+    description: 'Artifact name. Include the lane when a workflow plans more than one.'
+    required: false
+    default: 'affected-plan'
+
+outputs:
+  mode:
+    description: '`narrowed`, `none`, or `full` (run everything).'
+    value: ${{ steps.plan.outputs.mode }}
+  count:
+    description: 'Number of selected test files.'
+    value: ${{ steps.plan.outputs.count }}
+  shards:
+    description: 'JSON array for a matrix, e.g. `[1,2]`. Empty `[]` when there is no work.'
+    value: ${{ steps.plan.outputs.shards }}
+  shard-total:
+    description: 'Effective shard count; `0` when the lane has nothing to run.'
+    value: ${{ steps.plan.outputs.shard-total }}
+  plan-file:
+    description: 'Absolute path to the plan JSON.'
+    value: ${{ steps.plan.outputs.plan-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Compute the affected test plan
+      id: plan
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        node "$GITHUB_ACTION_PATH/plan.mjs" \
+          --lane "${{ inputs.lane }}" \
+          --base "${{ inputs.base }}" \
+          --config "${{ inputs.config }}" \
+          --out "${{ inputs.out }}" \
+          --max-shards "${{ inputs.max-shards }}" \
+          --min-tests-per-shard "${{ inputs.min-tests-per-shard }}"
+
+    - name: Summarise the plan
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        PLAN: ${{ inputs.out }}
+        LANE: ${{ inputs.lane }}
+      run: |
+        set -euo pipefail
+        # The job summary carries the decision so a reviewer never has to open
+        # a log to learn why a lane was short.
+        {
+          echo "### ${LANE} test plan"
+          echo
+          echo "**$(jq -r .mode "$PLAN")** — $(jq -r .why "$PLAN")"
+          echo
+          echo "\`$(jq -r '.tests | length' "$PLAN")\` test file(s) · \`$(jq -r .counts.shardTotal "$PLAN")\` shard(s)"
+          if [ "$(jq -r '.tests | length' "$PLAN")" -gt 0 ]; then
+            echo
+            echo "<details><summary>Selected tests</summary>"
+            echo
+            jq -r '.tests[] | "- `\(.)`"' "$PLAN" | head -100
+            echo
+            echo "</details>"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload the plan
+      if: ${{ inputs.upload-artifact == 'true' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.working-directory }}/${{ inputs.out }}
+        if-no-files-found: error
+        retention-days: 14

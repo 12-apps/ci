@@ -328,6 +328,27 @@ on:
         type: number
         required: false
         default: 1
+      affected-plan-config:
+        description: >-
+          Path to an `affected-plan` config (see
+          `.github/actions/affected-plan`). Setting it switches BOTH test lanes
+          from the caller's own plan command to symbol-level selection, and —
+          the part that matters — makes the plan job publish the explicit list
+          of test files, which the lane then runs.
+
+          Without it, the plan job answers "how many shards?" and the lane
+          re-derives its own selection from the same diff. Those are two
+          implementations of one decision and nothing compares them: the plan
+          can size for one set of files while the lane runs another. With it
+          there is a single selection per run, uploaded as an artifact and
+          handed to the lane through `AFFECTED_PLAN_FILE`.
+
+          The caller's `unit-test-command` / `integration-command` must read
+          that variable when it is set and run exactly the `.tests` it lists.
+          Empty (default) keeps every existing caller byte-identical.
+        type: string
+        required: false
+        default: ''
       unit-plan-command:
         description: >-
           Size the unit lane from the DIFF instead of from `unit-shards`.
@@ -401,7 +422,7 @@ jobs:
       # Only a caller that SIZES the lane needs the tree. Without a plan
       # command this job stays what it was: arithmetic over an input.
       - name: Checkout
-        if: ${{ inputs.unit-plan-command != '' && github.event_name == 'pull_request' }}
+        if: ${{ (inputs.unit-plan-command != '' || inputs.affected-plan-config != '') && github.event_name == 'pull_request' }}
         uses: actions/checkout@v4
         with:
           # The caller's plan command almost certainly diffs against a merge
@@ -412,16 +433,31 @@ jobs:
       # the plan and the run resolve the SAME base — a plan sized against a
       # different one would be sizing a diff the lane never runs.
       - name: Fetch the base for affected selection
-        if: ${{ inputs.unit-plan-command != '' && github.event_name == 'pull_request' }}
+        if: ${{ (inputs.unit-plan-command != '' || inputs.affected-plan-config != '') && github.event_name == 'pull_request' }}
         uses: 12-apps/ci/.github/actions/fetch-base@v1
         with:
           base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
           fallback-branch: ${{ inputs.default-branch }}
+      - name: Compute the affected test plan
+        id: affected
+        if: ${{ inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/affected-plan@v1
+        with:
+          lane: unit
+          base: FETCH_HEAD
+          config: ${{ inputs.affected-plan-config }}
+          out: affected-plan.unit.json
+          max-shards: ${{ inputs.unit-shards }}
+          artifact-name: affected-plan-unit
+
       - name: Compute the shard list
         id: plan
         shell: bash
         env:
           SHARDS: ${{ inputs.unit-shards }}
+          # Set only when `affected-plan-config` opted this lane in; the plan
+          # then sizes the matrix from the real test list rather than a proxy.
+          PLAN_ASKED: ${{ steps.affected.outputs.shard-total }}
           # PR-ONLY, and this is the load-bearing half of the input. The push
           # run is the post-merge safety net: it skips nothing, by definition.
           # A selector asked to size a push diff has no PR base to narrow
@@ -437,7 +473,12 @@ jobs:
             SHARDS=1
           fi
           COUNT="$SHARDS"
-          if [ -n "$PLAN_CMD" ]; then
+          if [ -n "${PLAN_ASKED:-}" ] && [[ "$PLAN_ASKED" =~ ^[0-9]+$ ]]; then
+            # The affected-plan action already produced the file list, so the
+            # shard count is arithmetic over a known set rather than a guess.
+            COUNT="$PLAN_ASKED"
+            if [ "$COUNT" -gt "$SHARDS" ]; then COUNT="$SHARDS"; fi
+          elif [ -n "$PLAN_CMD" ]; then
             # Fail OPEN. Every failure mode here — a non-zero exit, a crash, a
             # non-integer — leaves the static count in force, because the
             # damage is asymmetric: a lane that runs too wide costs minutes, a
@@ -658,6 +699,17 @@ jobs:
           base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
           fallback-branch: ${{ inputs.default-branch }}
 
+      # The lane runs the plan the PLAN JOB produced — it does not re-select.
+      # One selection per run is the whole point: a lane that re-derives its own
+      # can silently disagree with the plan that sized its matrix, and nothing
+      # in the run compares the two.
+      - name: Download the affected test plan
+        if: ${{ inputs.affected-plan-config != '' && github.event_name == 'pull_request' && steps.verdict.outputs.cache-hit != 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: affected-plan-unit
+          path: .affected-plan
+
       - name: Run unit tests
         id: unit
         if: ${{ steps.verdict.outputs.cache-hit != 'true' }}
@@ -667,6 +719,9 @@ jobs:
         # empty and wrongly select nothing.
         env:
           UNIT_CMD: ${{ inputs.unit-test-command }}
+          # Non-empty only when this lane opted in. The caller's command reads
+          # it and runs exactly the `.tests` the plan lists.
+          AFFECTED_PLAN_FILE: ${{ inputs.affected-plan-config != '' && github.event_name == 'pull_request' && format('{0}/.affected-plan/affected-plan.unit.json', github.workspace) || '' }}
           UNIT_FULL_CMD: ${{ inputs.unit-full-command }}
           SHARD_INDEX: ${{ matrix.shard }}
           SHARD_TOTAL: ${{ needs.unit-plan.outputs.count }}
@@ -950,7 +1005,7 @@ jobs:
       count: ${{ steps.plan.outputs.count }}
     steps:
       - name: Checkout
-        if: ${{ inputs.integration-plan-command != '' && github.event_name == 'pull_request' }}
+        if: ${{ (inputs.integration-plan-command != '' || inputs.affected-plan-config != '') && github.event_name == 'pull_request' }}
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -959,16 +1014,31 @@ jobs:
       # the plan and the run resolve the SAME base — a plan sized against a
       # different one would be sizing a diff the lane never runs.
       - name: Fetch the base for affected selection
-        if: ${{ inputs.integration-plan-command != '' && github.event_name == 'pull_request' }}
+        if: ${{ (inputs.integration-plan-command != '' || inputs.affected-plan-config != '') && github.event_name == 'pull_request' }}
         uses: 12-apps/ci/.github/actions/fetch-base@v1
         with:
           base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
           fallback-branch: ${{ inputs.default-branch }}
+      - name: Compute the affected test plan
+        id: affected
+        if: ${{ inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/affected-plan@v1
+        with:
+          lane: integration
+          base: FETCH_HEAD
+          config: ${{ inputs.affected-plan-config }}
+          out: affected-plan.integration.json
+          max-shards: ${{ inputs.integration-shards }}
+          artifact-name: affected-plan-integration
+
       - name: Compute the shard list
         id: plan
         shell: bash
         env:
           SHARDS: ${{ inputs.integration-shards }}
+          # Set only when `affected-plan-config` opted this lane in; the plan
+          # then sizes the matrix from the real test list rather than a proxy.
+          PLAN_ASKED: ${{ steps.affected.outputs.shard-total }}
           # PR-ONLY, and this is the load-bearing half of the input. The push
           # run is the post-merge safety net: it skips nothing, by definition.
           # A selector asked to size a push diff has no PR base to narrow
@@ -984,7 +1054,12 @@ jobs:
             SHARDS=1
           fi
           COUNT="$SHARDS"
-          if [ -n "$PLAN_CMD" ]; then
+          if [ -n "${PLAN_ASKED:-}" ] && [[ "$PLAN_ASKED" =~ ^[0-9]+$ ]]; then
+            # The affected-plan action already produced the file list, so the
+            # shard count is arithmetic over a known set rather than a guess.
+            COUNT="$PLAN_ASKED"
+            if [ "$COUNT" -gt "$SHARDS" ]; then COUNT="$SHARDS"; fi
+          elif [ -n "$PLAN_CMD" ]; then
             # Fail open — see unit-plan for why the asymmetry decides this.
             if ASKED_RAW="$(bash -c "$PLAN_CMD")"; then
               ASKED="$(printf '%s' "$ASKED_RAW" | tail -n 1 | tr -d '[:space:]')"
@@ -1094,6 +1169,17 @@ jobs:
           base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
           fallback-branch: ${{ inputs.default-branch }}
 
+      # The lane runs the plan the PLAN JOB produced — it does not re-select.
+      # One selection per run is the whole point: a lane that re-derives its own
+      # can silently disagree with the plan that sized its matrix, and nothing
+      # in the run compares the two.
+      - name: Download the affected test plan
+        if: ${{ inputs.affected-plan-config != '' && github.event_name == 'pull_request' && steps.verdict.outputs.cache-hit != 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: affected-plan-integration
+          path: .affected-plan
+
       - name: Run integration tests
         id: integration
         shell: bash
@@ -1101,6 +1187,9 @@ jobs:
         # failure first). Push (safety net): full failure inventory.
         env:
           INT_CMD: ${{ inputs.integration-command }}
+          # Non-empty only when this lane opted in. The caller's command reads
+          # it and runs exactly the `.tests` the plan lists.
+          AFFECTED_PLAN_FILE: ${{ inputs.affected-plan-config != '' && github.event_name == 'pull_request' && format('{0}/.affected-plan/affected-plan.integration.json', github.workspace) || '' }}
           INT_FULL_CMD: ${{ inputs.integration-full-command }}
           SHARD_INDEX: ${{ matrix.shard }}
           SHARD_TOTAL: ${{ needs.integration-plan.outputs.count }}
