@@ -19,6 +19,18 @@
 # Environment variables:
 #   DO_API_TOKEN          - Digital Ocean API token (required)
 #   DO_SSH_PRIVATE_KEY_B64 - SSH private key base64 encoded (required)
+#   SECRETS_PROVIDER      - Where app secrets come from: doppler (default) or
+#                           none. With a provider, secrets are injected at
+#                           container start and NO secret-bearing .env is
+#                           written to the box; only a root-only (0600) service
+#                           token lands on disk. `none` generates POSTGRES_*
+#                           and AUTH_SECRET on the droplet into a root-only
+#                           .env, which is the unmanaged throwaway-box path.
+#   SECRETS_TOKEN         - The provider's service token (required unless the
+#                           provider is `none`). DOPPLER_TOKEN is accepted as a
+#                           fallback so existing callers keep working.
+#   MIGRATE_SERVICE       - compose service that runs migrations (default:
+#                           migrate). See STEP 5.
 #   GITHUB_TOKEN          - For private repositories (optional)
 #
 # Examples:
@@ -112,6 +124,38 @@ if [ -z "$REPO_URL" ]; then
     exit 1
 fi
 
+# Resolve the secrets provider. Validated HERE, before anything is created —
+# failing later would mean creating (and then tearing down) a droplet for a run
+# that could never have succeeded.
+SECRETS_PROVIDER="${SECRETS_PROVIDER:-doppler}"
+SECRETS_TOKEN="${SECRETS_TOKEN:-${DOPPLER_TOKEN:-}}"
+TOKEN_FILE="/root/.secrets-token"
+MIGRATE_SERVICE="${MIGRATE_SERVICE:-migrate}"
+
+case "$SECRETS_PROVIDER" in
+    doppler)
+        SECRETS_INSTALL="curl -Ls https://cli.doppler.com/install.sh | sh"
+        # Injects the config into the child process, which is what resolves
+        # ${VAR} interpolation in docker-compose.yml.
+        SECRETS_RUN="DOPPLER_TOKEN=\$(cat $TOKEN_FILE) doppler run --"
+        ;;
+    none)
+        SECRETS_INSTALL=""
+        SECRETS_RUN=""
+        ;;
+    *)
+        echo "Error: unknown SECRETS_PROVIDER '$SECRETS_PROVIDER' (expected: doppler, none)" >&2
+        exit 1
+        ;;
+esac
+
+if [ "$SECRETS_PROVIDER" != "none" ] && [ -z "$SECRETS_TOKEN" ]; then
+    echo "Error: SECRETS_TOKEN is required for SECRETS_PROVIDER=$SECRETS_PROVIDER" >&2
+    echo "  Doppler: doppler configs tokens create deploy --project <p> --config prd --plain" >&2
+    echo "  Or set SECRETS_PROVIDER=none for an unmanaged throwaway box." >&2
+    exit 1
+fi
+
 # Setup SSH key
 echo "$DO_SSH_PRIVATE_KEY_B64" | tr -d ' \n\r\t' | base64 -d > "$SSH_KEY_FILE"
 chmod 600 "$SSH_KEY_FILE"
@@ -200,21 +244,33 @@ fi
 echo "Repository cloned to /app"
 
 # ============================================================
-# STEP 3: Create .env file
+# STEP 3: Provision secret access
+#
+# With a provider, NO secret-bearing .env is written to the box: secrets live in
+# the provider's config and are injected at container-start time by STEP 4. Only
+# the service token lands on the droplet, root-only (0600), and it is piped over
+# ssh STDIN rather than passed as an argument — an argument is visible in the
+# remote host's process list to every user on it, for as long as the command
+# runs.
+#
+# `none` keeps the old shape for a throwaway box, with the two fixes it needed
+# anyway: the values are generated ON THE DROPLET rather than locally, so they
+# never cross the wire, and the file is 0600 rather than world-readable.
 # ============================================================
 echo ""
 echo "------------------------------------------------------------"
-echo "STEP 3/5: Configuring environment..."
+echo "STEP 3/5: Configuring secret access..."
 echo "------------------------------------------------------------"
 
-remote_exec "cat > /app/.env << 'ENVFILE'
+if [ "$SECRETS_PROVIDER" = "none" ]; then
+    remote_exec "umask 077 && cat > /app/.env << ENVFILE
 # Database
 POSTGRES_USER=app
-POSTGRES_PASSWORD=app_secret_$(openssl rand -hex 8)
+POSTGRES_PASSWORD=app_secret_\$(openssl rand -hex 8)
 POSTGRES_DB=app
 
 # Auth
-AUTH_SECRET=$(openssl rand -hex 32)
+AUTH_SECRET=\$(openssl rand -hex 32)
 AUTH_URL=http://$SERVER_IP:3000
 
 # Ports
@@ -222,9 +278,14 @@ WEB_PORT=3000
 DOCS_PORT=3001
 POSTGRES_PORT=5432
 REDIS_PORT=6379
-ENVFILE"
-
-echo "Environment configured"
+ENVFILE
+chmod 600 /app/.env"
+    echo "Environment configured (unmanaged; generated on the droplet, root-only)"
+else
+    remote_exec "$SECRETS_INSTALL"
+    printf '%s' "$SECRETS_TOKEN" | remote_exec "cat > $TOKEN_FILE && chmod 600 $TOKEN_FILE"
+    echo "$SECRETS_PROVIDER installed; service token provisioned root-only"
+fi
 
 # ============================================================
 # STEP 4: Start Docker Compose
@@ -234,12 +295,14 @@ echo "------------------------------------------------------------"
 echo "STEP 4/5: Starting Docker Compose..."
 echo "------------------------------------------------------------"
 
+# Every compose invocation goes through the provider, which is what puts the app
+# secrets in the environment without their ever being written to disk.
 if [ "$DB_ONLY" = "true" ]; then
     echo "Starting databases only..."
-    remote_exec "cd /app && docker compose up -d postgres redis"
+    remote_exec "cd /app && $SECRETS_RUN docker compose up -d postgres redis"
 else
     echo "Building and starting all services..."
-    remote_exec "cd /app && docker compose up -d --build"
+    remote_exec "cd /app && $SECRETS_RUN docker compose up -d --build"
 fi
 
 echo "Waiting for services to start (30s)..."
@@ -253,10 +316,35 @@ echo "------------------------------------------------------------"
 echo "STEP 5/5: Running migrations and health check..."
 echo "------------------------------------------------------------"
 
-# Run Prisma migrations if not db-only
+# Run migrations if not db-only.
+#
+# This step FAILS THE DEPLOY when it fails. It used to end in
+# `|| echo "Migration skipped (may not exist)"`, which meant a migration that
+# could not run -- or a migrations folder that never made it into the image --
+# reported success and the app booted against the old schema, with nothing
+# anywhere saying the migration had not run. A deploy whose schema did not move
+# is not a successful deploy.
+#
+# It also ran through the `web` service, which is the application runner: it
+# carries no migration tree and no Prisma working directory, so the command
+# could never have worked. The `|| echo` then swallowed that, so every deploy
+# reported success while applying nothing. Use the dedicated migrator service
+# instead -- built from the same artifact set precisely for this, and one-shot
+# via `run --rm`. Override the name with MIGRATE_SERVICE.
 if [ "$DB_ONLY" = "false" ]; then
-    echo "Running database migrations..."
-    remote_exec "cd /app && docker compose exec -T web npx prisma migrate deploy" || echo "Migration skipped (may not exist)"
+    if ! remote_exec "cd /app && $SECRETS_RUN docker compose --profile tools config --services 2>/dev/null | grep -qx '$MIGRATE_SERVICE'"; then
+        echo "ERROR: compose defines no '$MIGRATE_SERVICE' service, so migrations cannot run."
+        echo "       Add one (a one-shot image carrying the migration tree), or set"
+        echo "       MIGRATE_SERVICE to the name yours uses."
+        exit 1
+    fi
+
+    echo "Running database migrations via the '$MIGRATE_SERVICE' service..."
+    if ! remote_exec "cd /app && $SECRETS_RUN docker compose run --rm -T $MIGRATE_SERVICE < /dev/null"; then
+        echo "ERROR: migrations FAILED. The application would run against an unmigrated"
+        echo "       schema; deploy aborted so this is not mistaken for success."
+        exit 1
+    fi
 fi
 
 echo ""

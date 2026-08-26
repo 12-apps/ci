@@ -72,10 +72,15 @@ Creates a new droplet and deploys the app automatically using cloud-init. No SSH
 # With options
 ./deploy-cloud-init.sh -n my-app -b main
 
-# With Google OAuth
-export GOOGLE_CLIENT_ID="your-client-id"
-export GOOGLE_CLIENT_SECRET="your-client-secret"
+# With a secrets provider (the default). Secrets are injected at container
+# start; no secret-bearing .env is written to the droplet.
+export SECRETS_TOKEN="$(doppler configs tokens create deploy \
+  --project my-app --config prd --plain)"
 ./deploy-cloud-init.sh -n app-prod -b main
+
+# Unmanaged throwaway box: POSTGRES_PASSWORD / AUTH_SECRET are generated ON the
+# droplet into a root-only .env. No OAuth credentials are available this way.
+SECRETS_PROVIDER=none ./deploy-cloud-init.sh -n scratch -b main
 
 # List active droplets
 ./deploy-cloud-init.sh -l
@@ -90,6 +95,24 @@ export GOOGLE_CLIENT_SECRET="your-client-secret"
 - `-b, --branch BRANCH` - Git branch to deploy (default: main)
 - `-d, --destroy ID` - Destroy droplet by ID
 - `-l, --list` - List running droplets
+
+**Secrets:**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SECRETS_PROVIDER` | `doppler` | `doppler` or `none` |
+| `SECRETS_TOKEN` | — | the provider's service token; required unless `none` (`DOPPLER_TOKEN` is accepted as a fallback) |
+
+The service token is embedded in cloud-init user-data — unavoidably, since that
+is the only channel a fresh droplet has. User-data is served by the metadata
+endpoint to **any** process on the box, so the first thing `runcmd` does, before
+the token is written, is drop non-root egress to `169.254.169.254` and persist
+the rule across reboots. That also covers the clone URL's `GITHUB_TOKEN`.
+
+There is no `GOOGLE_CLIENT_SECRET` here any more. It could only ever have
+reached the droplet by being interpolated into user-data, which is the one place
+a secret must not go; OAuth credentials come from the provider like every other
+secret.
 
 **Endpoints (after deployment):**
 - `http://<IP>/` - Web app
