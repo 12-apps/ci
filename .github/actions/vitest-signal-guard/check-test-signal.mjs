@@ -36,12 +36,33 @@ const LANE = process.env.LANE_LABEL || 'test';
 const BYPASS_LABEL = process.env.BYPASS_LABEL || 'ci:allow-zero-tests';
 
 /**
- * Parses the top-level `tests="N"` attribute from a JUnit XML report. Vitest's
- * junit reporter emits `<testsuites tests="N">` at the root; some configs only
- * emit a flat `<testsuite tests="N">`. Handles both.
+ * How many test cases does this JUnit report account for?
+ *
+ * Three readings of the same number, cheapest first. Vitest's junit reporter
+ * puts `tests="N"` on the root `<testsuites>`; some configs only emit a flat
+ * `<testsuite tests="N">`; and a producer may declare neither, in which case
+ * the `<testcase>` elements ARE the count.
+ *
+ * That third branch is not a nicety. `node --test --test-reporter=junit` — the
+ * runner a consumer reaches for when a suite has no vitest project, e.g. root
+ * `scripts/__tests__` — emits an attribute-less `<testsuites>` and, for a file
+ * of top-level tests, puts `<testcase>` directly inside it with no
+ * `<testsuite>` wrapper anywhere. Both earlier branches miss, and the guard
+ * then reported the report UNPARSEABLE and failed a lane that had just run its
+ * tests and passed them. Measured on future-pay#1242, whose new root suite is
+ * exactly that shape:
+ *
+ *     <testsuites>
+ *       <testcase name="a source change moves the fingerprint" … />
+ *
+ * A `<testcase>` is the unit this guard exists to count, so counting them is
+ * the definition rather than a heuristic — the other two branches are summaries
+ * of it that a producer happened to compute already.
  *
  * `<testsuite\b` does not match `<testsuites` (no word boundary between `e` and
  * `s`), so the two branches cannot double-count. Do not "simplify" the boundary.
+ * The `<testcase>` branch is only reached when NEITHER matched, so it cannot
+ * double-count either.
  */
 export function parseJUnitTotals(xml) {
   const rootMatch = xml.match(/<testsuites\b[^>]*\btests=["'](\d+)["']/i);
@@ -59,6 +80,13 @@ export function parseJUnitTotals(xml) {
     matched = true;
   }
   if (matched) return { tests: summed, source: 'testsuite-sum' };
+
+  // Neither summary was declared. Count the cases themselves — self-closing
+  // `<testcase … />` and `<testcase …>…</testcase>` alike, which is why the
+  // pattern stops at the tag name rather than trying to match a closing form.
+  let cases = 0;
+  for (const _ of xml.matchAll(/<testcase\b/gi)) cases += 1;
+  if (cases > 0) return { tests: cases, source: 'testcase-count' };
 
   return null;
 }

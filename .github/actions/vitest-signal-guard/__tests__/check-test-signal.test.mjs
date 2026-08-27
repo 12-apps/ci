@@ -73,6 +73,55 @@ test('is case-insensitive on element names', () => {
   });
 });
 
+// ── node --test's junit reporter (FUT-963) ────────────────────────────────
+//
+// The bytes below are what `node --test --test-reporter=junit` really writes
+// for a file of top-level tests: an attribute-less `<testsuites>` and
+// `<testcase>` elements directly inside it, no `<testsuite>` wrapper anywhere.
+// Both summary branches miss, so before the testcase fallback this report was
+// UNPARSEABLE and failed a lane that had just run its tests and passed them.
+const NODE_TEST_JUNIT = [
+  `<?xml version="1.0" encoding="utf-8"?>`,
+  `<testsuites>`,
+  `\t<testcase name="a source change moves the fingerprint" time="0.071" classname="test"/>`,
+  `\t<testcase name="a deleted source file moves the fingerprint" time="0.073" classname="test"/>`,
+  `</testsuites>`,
+].join('\n');
+
+test("counts <testcase> when node --test declares no totals at all", () => {
+  assert.deepEqual(parseJUnitTotals(NODE_TEST_JUNIT), { tests: 2, source: 'testcase-count' });
+});
+
+test('counts a <testcase> written with a closing tag, not just self-closed', () => {
+  const xml = `<?xml version="1.0"?><testsuites><testcase name="a"><failure/></testcase></testsuites>`;
+  assert.deepEqual(parseJUnitTotals(xml), { tests: 1, source: 'testcase-count' });
+});
+
+test('a declared total always wins over counting the cases', () => {
+  // Both summary branches are shortcuts to the same number, so a producer that
+  // computed one must be believed — otherwise a report that both declares and
+  // lists would be read twice as differently as the two disagree.
+  const xml = `<?xml version="1.0"?><testsuites tests="9"><testcase name="a"/></testsuites>`;
+  assert.deepEqual(parseJUnitTotals(xml), { tests: 9, source: 'testsuites' });
+
+  const flat = `<?xml version="1.0"?><testsuite tests="4"><testcase name="a"/></testsuite>`;
+  assert.deepEqual(parseJUnitTotals(flat), { tests: 4, source: 'testsuite-sum' });
+});
+
+test('an empty report stays UNPARSEABLE — the fallback must not fail open', () => {
+  // The whole point of the guard is to notice a lane that ran nothing. A
+  // producer emitting neither a total nor a case has told us nothing, and
+  // "nothing" must keep meaning null (fail closed), never 0 (a clean verdict).
+  assert.equal(parseJUnitTotals(`<?xml version="1.0"?><testsuites></testsuites>`), null);
+});
+
+test('a genuine zero is still a zero, not an unparseable report', () => {
+  // vitest DOES declare tests="0" for an empty selection, and that must keep
+  // reaching the zero-signal branch rather than the unparseable one.
+  const empty = `<?xml version="1.0" encoding="UTF-8" ?>\n<testsuites name="vitest tests" tests="0" failures="0" errors="0" time="0">\n</testsuites>`;
+  assert.deepEqual(parseJUnitTotals(empty), { tests: 0, source: 'testsuites' });
+});
+
 test('a <testsuites> root is never double-counted by the child branch', () => {
   // `<testsuite\b` cannot match `<testsuites` — there is no word boundary
   // between `e` and `s`. If that ever "simplifies", this catches it: the root
