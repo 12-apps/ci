@@ -23,6 +23,21 @@ name: Release major tag
 # that fell behind catches up on its own without dragging the others along and
 # without this workflow needing to know why it lagged.
 #
+# WHICH majors it advances is read from `.github/majors.json` (FUT-956), not
+# from the tag list. "Every live major" was the fix for `v2` being stranded
+# while a hardcoded `v1` tracked main, and it overshot: nothing has carried a
+# breaking marker since `v2` was cut, so nothing ever stopped `v1` either, and
+# it was dragged the whole way. `@v1` was therefore not the v1 line — it was the
+# current v2 wearing a v1 label, and twenty-nine commits reached `@v1` consumers
+# with nothing to review. A major nobody is releasing on should stop moving, and
+# saying which is a decision rather than something to infer from a tag list.
+#
+# A live `vN` tag that the file names neither `supported` nor `frozen` FAILS the
+# run. Cutting a major is a deliberate act (cut-major-tag.yml, by hand), so
+# recording it is part of cutting it — and the alternative is the failure this
+# whole change is about: a new major that silently either advances or does not,
+# with nothing anywhere saying which was meant.
+#
 # Computing the target from the live tip (not the triggering commit) makes this
 # correct even when a burst of pushes causes GitHub's concurrency group to drop a
 # pending sibling run: whichever run survives still walks the full range and moves
@@ -77,10 +92,16 @@ jobs:
           # Full history + tags so we can read the majors and walk what they ship.
           fetch-depth: 0
           fetch-tags: true
-      - name: Advance each major to its newest commit with no breaking change
+      - name: Advance each supported major to its newest compatible commit
         shell: bash
         run: |
           set -euo pipefail
+          # The declared majors. jq is on every GitHub-hosted runner.
+          declared='.github/majors.json'
+          supported="$(jq -r '.supported' "$declared")"
+          mapfile -t frozen < <(jq -r '.frozen | keys[]' "$declared")
+          echo "Declared: supported=${supported}, frozen=${frozen[*]:-none}"
+          is_frozen() { local t; for t in "${frozen[@]:-}"; do [ "$t" = "$1" ] && return 0; done; return 1; }
           # Recompute from main's LIVE tip (a sibling push may be newer than the
           # commit that triggered this run). Read the freshly-fetched tip from
           # FETCH_HEAD, NOT origin/main: a bare `git fetch origin main` updates
@@ -97,21 +118,33 @@ jobs:
           majors="$(git tag -l 'v[0-9]*' | grep -E '^v[0-9]+$' | sort -V || true)"
 
           if [ -z "$majors" ]; then
-            # Bootstrap: create v1 at the tip unless the tip itself is breaking.
+            # Bootstrap: create the SUPPORTED major at the tip unless the tip
+            # itself is breaking. Hardcoding `v1` here would recreate the very
+            # tag the declaration has retired.
             if is_breaking "$tip"; then
               echo "No major tag yet and the tip is a breaking change — not creating one."
               echo "Cut the first major by hand with cut-major-tag.yml."
               exit 0
             fi
-            git tag -f v1 "$tip"
-            git push -f origin refs/tags/v1
-            echo "✓ Bootstrapped v1 -> $tip"
+            git tag -f "$supported" "$tip"
+            git push -f origin "refs/tags/${supported}"
+            echo "✓ Bootstrapped ${supported} -> $tip"
             exit 0
           fi
 
           moved=()
+          undeclared=()
           while read -r tag; do
             [ -z "$tag" ] && continue
+
+            if is_frozen "$tag"; then
+              echo "· $tag is FROZEN by .github/majors.json — left where it is."
+              continue
+            fi
+            if [ "$tag" != "$supported" ]; then
+              undeclared+=("$tag")
+              continue
+            fi
 
             # Peel to the COMMIT. A major may be annotated (cut-major-tag.yml and
             # hand-cut tags produce tag objects), in which case a bare rev-parse
@@ -142,6 +175,16 @@ jobs:
             moved+=("refs/tags/$tag")
             echo "✓ $tag -> $target"
           done <<<"$majors"
+
+          # An undeclared live major is a decision nobody recorded. Reported
+          # AFTER the walk so the supported major still ships this push's
+          # commits — the declaration being incomplete is not a reason to strand
+          # a release — and then failed, loudly, with the remedy named.
+          if [ ${#undeclared[@]} -gt 0 ]; then
+            if [ ${#moved[@]} -gt 0 ]; then git push -f origin "${moved[@]}"; fi
+            echo "::error title=Undeclared major tag::These live major tags are neither \`supported\` nor listed under \`frozen\` in .github/majors.json, so this workflow cannot know whether to advance them: ${undeclared[*]}. Add each one to that file — advancing it means making it \`supported\`, retiring it means a \`frozen\` entry with the reason."
+            exit 1
+          fi
 
           if [ ${#moved[@]} -eq 0 ]; then
             echo "No major tag moved."

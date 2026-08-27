@@ -4,6 +4,13 @@ A repo opts in by adding one caller workflow plus the per-repo config the engine
 discovers. Everything vendor-specific (descriptors, compose files, secrets,
 feature flags) stays in the consumer; the pipeline logic lives in `12-apps/ci`.
 
+> **Pin `@v2`.** It is the supported major and the only one this repo still
+> advances. `v1` is **frozen** — it still exists and still resolves, so nothing
+> pinned to it breaks, but it receives nothing new. Every example below used to
+> say `@v1`; if you copied one, migrating is a one-line change per call site and
+> the two tags resolve to the same commit as of the freeze, so a green CI run is
+> the whole proof. Background: **Versioning** in the [README](./README.md).
+
 ## 1. One-time org access (done once per `12-apps/ci`)
 
 The `12-apps/ci` repo must allow other org repos to use its reusable workflows
@@ -37,7 +44,7 @@ permissions:
 
 jobs:
   cd:
-    uses: 12-apps/ci/.github/workflows/cd.yml@v1
+    uses: 12-apps/ci/.github/workflows/cd.yml@v2
     with:
       target: ${{ inputs.target || 'all' }}
       action: ${{ inputs.action || 'deploy' }}
@@ -273,7 +280,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read   # dorny/paths-filter reads the PR's file list
-    uses: 12-apps/ci/.github/workflows/monorepo-static.yml@v1
+    uses: 12-apps/ci/.github/workflows/monorepo-static.yml@v2
     with:
       # e.g. Prisma: the generated client lives in node_modules, outside any
       # turbo output — regenerate before type-checking.
@@ -300,7 +307,7 @@ jobs:
     if: needs.static.outputs.code == 'true'
     permissions:
       contents: read
-    uses: 12-apps/ci/.github/workflows/monorepo-tests.yml@v1
+    uses: 12-apps/ci/.github/workflows/monorepo-tests.yml@v2
     with:
       pre-test-command: pnpm --filter @repo/shared-helpers prisma:generate
       pre-build-command: pnpm --filter @repo/shared-helpers prisma:generate
@@ -373,7 +380,7 @@ it wrote on the next push.
       - name: Record what failed
         if: ${{ !cancelled() && contains(join(needs.*.result, ' '), 'failure') }}
         continue-on-error: true          # describing a failure must never BE one
-        uses: 12-apps/ci/.github/actions/failure-ledger@v1
+        uses: 12-apps/ci/.github/actions/failure-ledger@v2
         with:
           mode: record
           # Only the jobs YOU define. The ones these workflows emit are already
@@ -382,7 +389,7 @@ it wrote on the next push.
 
   # The gate itself.
   static:
-    uses: 12-apps/ci/.github/workflows/monorepo-static.yml@v1
+    uses: 12-apps/ci/.github/workflows/monorepo-static.yml@v2
     # A caller must grant a SUPERSET of what the reusable workflow declares, or
     # GitHub rejects the run at startup.
     permissions:
@@ -672,7 +679,7 @@ Two consequences worth stating plainly:
 
 **A new input needs the tag that ships it.** Workflow-call inputs are
 validated against the CALLED workflow at the pinned ref, so passing
-`unit-shards` (or any newer input) while `@v1` still points before the release
+`unit-shards` (or any newer input) while `@v2` still points before the release
 that added it fails every run at startup — `startup_failure`, no jobs, no
 check runs, which on a required check reads as "waiting for status" forever.
 Land the consumer change only after the moving major tag contains the release
@@ -750,10 +757,10 @@ default branch; strict PR-time selection is only sound when something
 unconditional runs afterwards.
 
 ```yaml
-- uses: 12-apps/ci/.github/actions/fetch-base@v1
+- uses: 12-apps/ci/.github/actions/fetch-base@v2
 
 - id: plan
-  uses: 12-apps/ci/.github/actions/affected-plan@v1
+  uses: 12-apps/ci/.github/actions/affected-plan@v2
   with:
     lane: unit
     base: FETCH_HEAD
@@ -793,7 +800,7 @@ config and scripts — the workflow only orchestrates.
     # belt-and-suspenders — but keep it explicit for reviewers.)
     permissions:
       contents: read
-    uses: 12-apps/ci/.github/workflows/quality.yml@v1
+    uses: 12-apps/ci/.github/workflows/quality.yml@v2
     with:
       # Command run before the e2e reliability gate (build shared pkgs, etc.).
       pre-e2e-command: pnpm --filter @repo/shared-helpers build
@@ -1065,7 +1072,7 @@ that style for this gate, the only names that exist are `MCP Contract Gates` and
     permissions:
       contents: read
       # packages: read   # add ONLY if pnpm install pulls private GitHub Packages
-    uses: 12-apps/ci/.github/workflows/mcp-contract.yml@v1
+    uses: 12-apps/ci/.github/workflows/mcp-contract.yml@v2
     with:
       # Build the MCP package / render the OpenAPI before the gate runs.
       pre-command: pnpm --filter @repo/mcp build
@@ -1170,7 +1177,7 @@ tool fail as stale:
 ```
 
 Repos with no MCP manifest at `manifest-path` skip the job with a notice, so
-this is safe on the floating `@v1` tag. Point it elsewhere with `manifest-path`,
+this is safe on the floating `@v2` tag. Point it elsewhere with `manifest-path`,
 or opt out with `run-store-compliance: false`.
 
 Plus a committed source-of-truth pair the scripts operate on: the rendered
@@ -1204,7 +1211,7 @@ an unregistered permission).
     permissions:
       contents: read
       # packages: read   # add ONLY if pnpm install pulls private GitHub Packages
-    uses: 12-apps/ci/.github/workflows/rbac-coverage.yml@v1
+    uses: 12-apps/ci/.github/workflows/rbac-coverage.yml@v2
     with:
       # Build the RBAC package before the gate runs, if it needs one.
       pre-command: pnpm --filter @repo/rbac build
@@ -1273,7 +1280,7 @@ indistinguishable from a deliberate decision. This gate forces the distinction:
     # and NO inherited secrets.
     permissions:
       contents: read
-    uses: 12-apps/ci/.github/workflows/entitlements-coverage.yml@v1
+    uses: 12-apps/ci/.github/workflows/entitlements-coverage.yml@v2
     with:
       package-dir: apps/admin   # where entitlements:coverage is defined
       install: false            # the script is plain node with no dependencies
@@ -1369,7 +1376,7 @@ MCP Test Coverage`) so the burn-down cannot be bypassed.
     permissions:
       contents: read
       # packages: read   # add ONLY if pnpm install pulls private GitHub Packages
-    uses: 12-apps/ci/.github/workflows/mcp-test-coverage.yml@v1
+    uses: 12-apps/ci/.github/workflows/mcp-test-coverage.yml@v2
     with:
       package-dir: apps/web
       exemptions-file: apps/web/mcp/mcp-test-exemptions
@@ -1439,7 +1446,7 @@ is app-specific and stays your `smoke-script` (default `prod:smoke`).
     permissions:
       contents: read
       # packages: read   # add ONLY if pnpm install pulls private GitHub Packages
-    uses: 12-apps/ci/.github/workflows/nextjs-prod-smoke.yml@v1
+    uses: 12-apps/ci/.github/workflows/nextjs-prod-smoke.yml@v2
     with:
       pre-command: pnpm --filter @repo/shared-helpers prisma:generate
       build-command: SKIP_ENV_VALIDATION=1 USE_FILE_DB=1 pnpm turbo run build --filter=web
@@ -1506,7 +1513,8 @@ Two things to read before wiring `detect-changes.yml` in:
   naming the missing scope. A job that inherits a workflow-level
   `contents: read` is exactly that case.
 
-Both live on `@v2`; `v1` is unchanged.
+Both live on `@v2`, which is the supported major — `v1` is frozen and no longer
+advances (see **Versioning** in the README).
 
 # Keeping a bundle budget from being loosened quietly
 
@@ -1554,8 +1562,8 @@ jobs:
         with:
           fetch-depth: 0          # the guard diffs; a shallow tree has no base
       - id: base
-        uses: 12-apps/ci/.github/actions/fetch-base@v1
-      - uses: 12-apps/ci/.github/actions/bundle-ceiling-guard@v1
+        uses: 12-apps/ci/.github/actions/fetch-base@v2
+      - uses: 12-apps/ci/.github/actions/bundle-ceiling-guard@v2
         with:
           ledger: .bundle-budget.json
           base-ref: ${{ steps.base.outputs.merge-base }}
@@ -1709,7 +1717,7 @@ jobs:
     if: always()
     permissions:
       contents: read
-    uses: 12-apps/ci/.github/workflows/package-gates.yml@v1
+    uses: 12-apps/ci/.github/workflows/package-gates.yml@v2
     secrets:
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}   # only if your install resolves restricted packages
     with:
@@ -1753,7 +1761,7 @@ composite action directly instead:
 
 ```yaml
       - name: The storefront's critical path holds only what it declares
-        uses: 12-apps/ci/.github/actions/package-gates@v1
+        uses: 12-apps/ci/.github/actions/package-gates@v2
         with:
           gates: |
             The critical path holds only what it declares|pnpm quality:eager
@@ -1804,7 +1812,7 @@ that diverged 51 commits ago, and it fails the same silent way. Use the action:
       - name: Fetch the base
         id: base
         if: ${{ github.event_name == 'pull_request' }}
-        uses: 12-apps/ci/.github/actions/fetch-base@v1
+        uses: 12-apps/ci/.github/actions/fetch-base@v2
 
       - name: Build
         run: pnpm turbo run build --affected
@@ -1854,7 +1862,7 @@ permissions:
 
 jobs:
   commitlint:
-    uses: 12-apps/ci/.github/workflows/commitlint.yml@v1
+    uses: 12-apps/ci/.github/workflows/commitlint.yml@v2
 ```
 
 ## B. Both the commits and the PR title are linted
@@ -1866,7 +1874,7 @@ subject that lands on `main`, so both are checked.
 
 That subject is machine-read once it lands: semantic-release derives the version
 bump from it, and this repo's `release-major-tag.yml` decides whether to advance
-`@v1` by looking for a `!` marker or a `BREAKING CHANGE:` footer.
+the supported major by looking for a `!` marker or a `BREAKING CHANGE:` footer.
 
 ## C. Inputs
 

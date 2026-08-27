@@ -28,7 +28,7 @@ The reusable workflows run **in the caller's checkout**, so per-app descriptors
 (`apps/*/deploy/config.json`) and the GHCR image namespace (derived from
 `github.repository`) resolve to the consuming repo — nothing is hardcoded to
 `future-pay`. The engine *scripts* ship from this repo through composite actions
-(`uses: 12-apps/ci/.github/actions/discover@v1`), which is the only way a
+(`uses: 12-apps/ci/.github/actions/discover@v2`), which is the only way a
 consumer's job token can run private-repo scripts without a dedicated PAT.
 
 ## Use it from ANY organization
@@ -231,13 +231,37 @@ jobs:
 
 ## Versioning
 
-Consumers pin a moving major tag — `@v2` is current. Backwards-compatible changes
-move **every** live major; a breaking change freezes them all and the next major
-is cut by hand.
+Consumers pin a moving major tag. **`v2` is the supported one**, and it is the
+only one this repo still advances: backwards-compatible changes move it, a
+breaking change freezes it, and the next major is cut by hand.
 
-`v2` is an **additive** line: it carries everything `v1` has plus the cost and
-change-detection workflows above. Nothing in `v1` changed behaviour, so existing
-`@v1` consumers are unaffected and need not migrate.
+Which majors move is declared in **`.github/majors.json`**, read by
+`release-major-tag.yml` — and the same file is what every documented
+`uses: 12-apps/ci/…@vN` in this repo is checked against, so the pin you copy and
+the tag we release on cannot drift apart. They did.
+
+### `v1` is frozen
+
+`v1` still exists and still resolves, so nothing pinned to it breaks. It no
+longer moves.
+
+It should have stopped moving long ago. `release-major-tag.yml` advances each
+live major up to, but never across, the first breaking commit — and no commit
+has carried a `!` marker or a `BREAKING CHANGE:` footer since `v2` was cut, so
+nothing ever stopped `v1`. It was dragged along behind every v2 release until
+`v1`, `v2` and the newest point tag were **one commit**: `@v1` was not the v1
+line at all, it was the current v2 wearing a v1 label, and twenty-nine commits
+reached `@v1` consumers with nothing to review.
+
+That was invisible rather than harmful — until the first breaking change, at
+which point `v1` correctly freezes, `v2` keeps moving, and a consumer split
+across the two is running two engine versions with nothing reporting the split.
+Freezing `v1` deliberately, at the commit it already pointed to, costs its
+consumers nothing today and makes the split visible from here on.
+
+**Migrating is a one-line change per call site**: `@v1` → `@v2`. The two tags
+resolve to the same commit as of the freeze, so a consumer can do it in an
+ordinary PR and read a green CI run as the proof.
 
 ### Two kinds of tag, and which to pin
 
@@ -251,7 +275,7 @@ they answer different questions:
 | `@v2.3.1` | never | you need a ref that cannot change under you |
 
 Both are cut from the same commit; the semver tag is additive and changes
-nothing for existing `@v1` / `@v2` consumers.
+nothing for existing consumers.
 
 The bump comes from conventional commit subjects since the previous semver tag,
 using the same grammar the moving-major workflow already enforces:
@@ -269,7 +293,7 @@ repos already run.
 
 Each release carries generated notes grouped into breaking / features / fixes,
 plus a compare link. Breaking changes are called out first, with a reminder that
-`@v1` and `@v2` freeze rather than advancing across one.
+a moving major freezes rather than advancing across one.
 
 ### Cutting a major tag by hand
 
@@ -291,18 +315,26 @@ nothing to review.
 
 ### How the majors move
 
-`.github/workflows/release-major-tag.yml` re-points **every** live `vN` tag on
+`.github/workflows/release-major-tag.yml` re-points the **supported** major on
 each push to `main` — no manual force-push. Commits marked breaking (conventional
 `type!:` / `type(scope)!:` subject, or a `BREAKING CHANGE:` footer) are never
 crossed, so a breaking change auto-ships to no major; cut the next one by hand
-for those.
+for those. Immutable `vX.Y.Z` tags are never moved by this workflow; only bare
+`vN` refs are.
 
-Each major advances **independently, from wherever it currently sits**, so a
-major that fell behind catches up on its own. That matters because it didn't use
-to: the workflow advanced a hardcoded `v1`, which left `v2` frozen at the commit
-it was cut on while `@v1` kept tracking `main` — the opposite of what this
-section told you to pin. Immutable `vX.Y.Z` tags are never moved by this
-workflow; only bare `vN` refs are.
+*Which* majors move is read from `.github/majors.json` rather than from the tag
+list, and that has been wrong in both directions. It first advanced a hardcoded
+`v1`, which left `v2` frozen at the commit it was cut on while `@v1` kept
+tracking `main` — the opposite of what this section told you to pin. The fix,
+"advance every live major", then overshot the other way and dragged `v1` along
+forever, because nothing had been marked breaking since. Neither state was
+reported by anything.
+
+A tag list cannot answer this. Whether a major is still released on is a
+decision, so it is written down, and a live `vN` tag the file declares neither
+`supported` nor `frozen` **fails the run** with the remedy named. Cutting a major
+is already a deliberate act (`cut-major-tag.yml`, by hand); recording it is part
+of cutting it.
 
 ## Use it
 

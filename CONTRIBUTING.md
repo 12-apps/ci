@@ -43,13 +43,16 @@ re-runs automatically.
 
 ### Why this is not cosmetic
 
-`release-major-tag.yml` advances the moving `v1` tag by reading commit subjects.
-It stops at the first commit marked breaking — a conventional `type!:` /
-`type(scope)!:` subject, or a `BREAKING CHANGE:` footer — and freezes `v1` there.
+`release-major-tag.yml` advances the supported moving major (`v2`, declared in
+`.github/majors.json`) by reading commit subjects. It stops at the first commit
+marked breaking — a conventional `type!:` / `type(scope)!:` subject, or a
+`BREAKING CHANGE:` footer — and freezes the major there.
 
 A breaking change written **without** that marker is therefore not merely untidy:
-`v1` advances across it, and every repo pinned to `@v1` inherits the break on its
-next run with no version change to point at. Mark breaking changes explicitly:
+the major advances across it, and every repo pinned to it inherits the break on
+its next run with no version change to point at. This is not hypothetical — it is
+how `v1` came to be dragged across twenty-nine commits and end up as a duplicate
+of `v2` (see **Versioning** in the README). Mark breaking changes explicitly:
 
 ```
 feat(cd)!: require an explicit target input

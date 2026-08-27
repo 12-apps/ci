@@ -1,0 +1,20 @@
+{
+  "$comment": [
+    "Which moving major tags this repo still advances, and which it does not.",
+    "Read by .github/workflows/release-major-tag.yml (the walk) and by",
+    ".github/workflows/__tests__/major-pin-refs.test.mjs (the docs). One file,",
+    "so the release workflow and the documentation cannot disagree about which",
+    "major a consumer should be on — which is exactly what they did.",
+    "",
+    "`supported` is the major that advances AND the one every documented",
+    "`uses: 12-apps/ci/...@vN` must pin. `frozen` names the majors that stay",
+    "where they are, each with the reason. A live `vN` tag in neither is a hard",
+    "failure in release-major-tag.yml: cutting a major is a deliberate act, so",
+    "recording it here is part of cutting it, and a major nobody declared is a",
+    "major nobody decided about."
+  ],
+  "supported": "v2",
+  "frozen": {
+    "v1": "Frozen 2026-08-27 (FUT-956). release-major-tag.yml advances every live major independently and stops each before the first breaking commit — and since no commit has carried a `!` marker or a `BREAKING CHANGE:` footer since v2 was cut, nothing ever stopped v1. It was dragged the whole way, so `@v1` was not the v1 line at all: it was the current v2 wearing a v1 label, and twenty-nine commits reached `@v1` consumers with nothing to review. Freezing it at that same commit costs those consumers nothing today (the two tags resolve identically) and makes the split visible instead of silent from here on. The tag is deliberately NOT deleted: every `@v1` pin in a consumer keeps resolving exactly what it resolves now, and the migration to `@v2` is a normal PR in the consumer rather than an outage."
+  }
+}
