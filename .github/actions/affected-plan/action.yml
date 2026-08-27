@@ -129,7 +129,16 @@ runs:
             echo
             echo "<details><summary>Selected tests</summary>"
             echo
-            jq -r '.tests[] | "- `\(.)`"' "$PLAN" | head -100
+            # Sliced INSIDE jq, never `| head`. Under `set -o pipefail` head
+            # closes the pipe after 100 lines, jq dies with EPIPE, and the step
+            # exits non-zero — so a lane selecting more than 100 files failed
+            # its plan job while its own log read as a success. The plan was
+            # computed correctly by then; only the summary killed it.
+            jq -r '.tests[:100][] | "- `\(.)`"' "$PLAN"
+            if [ "$(jq -r '.tests | length' "$PLAN")" -gt 100 ]; then
+              echo
+              echo "_… and $(( $(jq -r '.tests | length' "$PLAN") - 100 )) more._"
+            fi
             echo
             echo "</details>"
           fi
