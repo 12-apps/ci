@@ -473,10 +473,30 @@ the diff:
       unit-fingerprint-command: node scripts/ci-test-fingerprint.mjs
 ```
 
-A pull-request run that PASSES records its fingerprint. A later pull-request run
-whose fingerprint matches skips the lane entirely — install, pre-test setup and
-suite alike — and reports the recorded verdict. Empty (the default) disables the
-mechanism, so callers that do not set it are unaffected.
+A pull-request run whose lane PASSES records its fingerprint. A later
+pull-request run whose fingerprint matches **creates no shard job at all** —
+the plan sizes the matrix at zero and the run reports the recorded verdict.
+Empty (the default) disables the mechanism, so callers that do not set it are
+unaffected.
+
+**No job, rather than a job that skips**, and that is worth stating because it
+used not to be. The lookup was a step inside each shard, and a step inside the
+matrix cannot stop the matrix: the plan expanded to `unit-shards`, GitHub
+created every one of those jobs, and each paid a checkout, a fingerprint and a
+cache probe — ~16s measured, billed as a whole minute — before discovering it
+had nothing to do. Four jobs per lane, eight across the two, on every push whose
+tree an earlier run had already passed. The machinery to avoid it already
+existed one layer up (`count=0` empties the matrix and no job is created); the
+fingerprint was simply computed too late to reach it.
+
+It is also what lets the skip and the **zero-test-signal guard** be on at the
+same time. A per-shard verdict cannot carry a lane-level claim — the guard
+asserts the MERGED total across shards, so a run whose signal job failed would
+still have recorded every green shard, and the next identical tree would skip
+straight past the guard on those records. The verdict is now recorded by a
+post-matrix job (`Unit Verdict` / `Integration Verdict`) that waits on the
+shards AND the signal, so the claim is lane-level and the two mechanisms stop
+being mutually exclusive.
 
 **What makes the skip sound.** The failure direction here is a green lane that
 ran nothing, so the claim a hit makes is deliberately narrow: *this exact
@@ -500,7 +520,10 @@ and the first is the consumer's responsibility:
   and `unit-test-command` are folded into the cache key beside the hash. They
   live in a workflow file, which any sane "can this change a test outcome?" rule
   ignores, so without this, editing `unit-test-command` would inherit the
-  previous command's verdict.
+  previous command's verdict. The SHARD COUNT is deliberately absent: a
+  lane-level verdict says every test the lane selected for this tree passed,
+  which is true however the set was sliced, so including the count would make
+  the skip miss on precisely the repeat pushes it exists for.
 
 Never active on `push` — the post-merge safety net exists to skip nothing.
 
@@ -690,10 +713,11 @@ workflow by SHA for the transition.
 inside the job as always; above one, each shard ships its JUnit reports as an
 artifact and a post-matrix job (`Unit Signal` / `Integration Signal`) asserts
 the MERGED total — no slice is ever inspected alone, so an empty shard of a
-narrow selection cannot redden the build. One interaction to know: with
-`unit-junit-reports` armed on a sharded unit lane, the verdict-fingerprint skip
-stands down (a per-shard record cannot carry a lane-level signal claim — the
-fingerprint step in the workflow states the full argument).
+narrow selection cannot redden the build. It composes with the
+verdict-fingerprint skip as well: the verdict is recorded post-matrix, by a job
+that waits on the signal, so the two are no longer mutually exclusive on a
+sharded lane. (They were: a per-shard record cannot carry a lane-level claim,
+and the skip stood down for it.)
 
 Two things to know before raising it:
 

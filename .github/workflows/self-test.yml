@@ -150,6 +150,21 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/retry-gate-wiring.test.mjs
 
+      # Where the verdict is looked up, and where it is recorded.
+      #
+      # Both are placement rules whose wrong answer is SILENT. A lookup inside
+      # the matrix still works — it just bills for four jobs per lane that exist
+      # only to discover they have nothing to do, which is what it did until
+      # FUT-960. A record inside the matrix still works — it just makes a
+      # lane-level claim a shard did not earn, which is why the skip had to stand
+      # down whenever the zero-test guard was armed on a sharded lane.
+      #
+      # Neither shows up as a failing job, so neither can be caught by running
+      # CI. They are asserted over the workflow text instead.
+      - name: Lane verdict wiring
+        shell: bash
+        run: node --test .github/workflows/__tests__/lane-verdict-wiring.test.mjs
+
       # What a provisioned droplet actually boots with. do-provision runs
       # scripts/ephemeral/deploy-cloud-init.sh, and every way that document can
       # be wrong is silent: the API accepts any user-data at all, the droplet
