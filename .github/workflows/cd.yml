@@ -4,7 +4,7 @@ name: CD (reusable)
 #
 #   jobs:
 #     cd:
-#       uses: 12-apps/ci/.github/workflows/cd.yml@v1
+#       uses: 12-apps/ci/.github/workflows/cd.yml@v2
 #       with: { target: all, action: deploy }
 #       secrets: inherit
 #
@@ -111,7 +111,7 @@ jobs:
       # Fully-qualified ref (NOT ./) — a reusable workflow resolves ./ against the
       # caller, so the engine action must be addressed in this repo explicitly.
       - id: d
-        uses: 12-apps/ci/.github/actions/discover@v1
+        uses: 12-apps/ci/.github/actions/discover@v2
         with:
           target: ${{ inputs.target }}
       # base_sha is passed EXPLICITLY, and that is load-bearing: turbo's --affected
@@ -127,7 +127,7 @@ jobs:
       # `COPY . .`, so it is in every build context. global_build_inputs is that
       # gate; empty means "the engine's conservative default".
       - id: plan
-        uses: 12-apps/ci/.github/actions/select-images@v1
+        uses: 12-apps/ci/.github/actions/select-images@v2
         with:
           images: ${{ steps.d.outputs.images }}
           base_sha: ${{ github.event.before }}
@@ -343,7 +343,7 @@ jobs:
       (needs.discover.outputs.has_images == 'true' || inputs.action == 'destroy') &&
       (github.event_name == 'push' ||
         inputs.target == 'all' || inputs.target == 'digitalocean')
-    uses: 12-apps/ci/.github/workflows/deploy-digitalocean.yml@v1
+    uses: 12-apps/ci/.github/workflows/deploy-digitalocean.yml@v2
     with:
       action: ${{ inputs.action }}
       image_tag: ${{ github.sha }}
@@ -366,7 +366,7 @@ jobs:
       (needs.discover.outputs.has_statics == 'true' || needs.discover.outputs.has_workers == 'true') &&
       (github.event_name == 'push' ||
         ((inputs.target == 'all' || inputs.target == 'cloudflare') && inputs.action == 'deploy'))
-    uses: 12-apps/ci/.github/workflows/deploy-cloudflare.yml@v1
+    uses: 12-apps/ci/.github/workflows/deploy-cloudflare.yml@v2
     with:
       statics: ${{ needs.discover.outputs.statics }}
       workers: ${{ needs.discover.outputs.workers }}

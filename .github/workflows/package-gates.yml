@@ -11,7 +11,7 @@ name: Package Gates (reusable)
 #       if: always()
 #       permissions:
 #         contents: read
-#       uses: 12-apps/ci/.github/workflows/package-gates.yml@v1
+#       uses: 12-apps/ci/.github/workflows/package-gates.yml@v2
 #       secrets:
 #         NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 #       with:
@@ -198,7 +198,7 @@ jobs:
       # form here was the lone exception and it only reads as correct from
       # inside this repo.
       - name: Run gates
-        uses: 12-apps/ci/.github/actions/package-gates@v1
+        uses: 12-apps/ci/.github/actions/package-gates@v2
         with:
           gates: ${{ inputs.gates }}
           working-directory: ${{ inputs.package-dir }}

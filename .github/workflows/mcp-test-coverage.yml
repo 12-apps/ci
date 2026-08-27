@@ -11,7 +11,7 @@ name: MCP Test Coverage (reusable)
 #       permissions:
 #         contents: read
 #         # packages: read   # add ONLY if pnpm install pulls private GitHub Packages
-#       uses: 12-apps/ci/.github/workflows/mcp-test-coverage.yml@v1
+#       uses: 12-apps/ci/.github/workflows/mcp-test-coverage.yml@v2
 #       with:
 #         package-dir: apps/web
 #         exemptions-file: apps/web/mcp/mcp-test-exemptions

@@ -10,7 +10,7 @@ name: Next.js Prod Smoke (reusable)
 #       permissions:
 #         contents: read
 #         # packages: read   # add ONLY if pnpm install pulls private GitHub Packages
-#       uses: 12-apps/ci/.github/workflows/nextjs-prod-smoke.yml@v1
+#       uses: 12-apps/ci/.github/workflows/nextjs-prod-smoke.yml@v2
 #       with:
 #         pre-command: pnpm --filter @repo/shared-helpers prisma:generate
 #         build-command: SKIP_ENV_VALIDATION=1 USE_FILE_DB=1 pnpm turbo run build --filter=web
@@ -248,7 +248,7 @@ jobs:
       # pglite-template-migrations; rationale lives with the action.
       - name: Cache the PGlite schema template
         if: ${{ steps.probe.outputs.present == 'true' && inputs.pglite-template-migrations != '' }}
-        uses: 12-apps/ci/.github/actions/pglite-template-cache@v1
+        uses: 12-apps/ci/.github/actions/pglite-template-cache@v2
         with:
           migrations-glob: ${{ inputs.pglite-template-migrations }}
       - name: Pre-command

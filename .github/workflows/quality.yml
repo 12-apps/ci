@@ -6,7 +6,7 @@ name: Quality (reusable)
 #     quality:
 #       needs: changes
 #       if: needs.changes.outputs.code == 'true'
-#       uses: 12-apps/ci/.github/workflows/quality.yml@v1
+#       uses: 12-apps/ci/.github/workflows/quality.yml@v2
 #       with:
 #         pre-e2e-command: pnpm --filter @repo/shared-helpers build
 #       secrets: inherit
@@ -323,7 +323,7 @@ jobs:
         run: git fetch --no-tags origin "${GITHUB_BASE_REF:-main}"
       - name: Flakiness gate (central 12-apps/ci ruleset)
         if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.src.outputs.mode == 'central' }}
-        uses: 12-apps/ci/.github/actions/flakiness-lint@v1
+        uses: 12-apps/ci/.github/actions/flakiness-lint@v2
         with:
           node-version: ${{ inputs.node-version }}
           targets: ${{ inputs.flakiness-targets }}
@@ -1136,7 +1136,7 @@ jobs:
       # install-playwright.mjs for the measured failure.
       - name: Set up Playwright
         if: ${{ inputs.install-playwright }}
-        uses: 12-apps/ci/.github/actions/setup-playwright@v1
+        uses: 12-apps/ci/.github/actions/setup-playwright@v2
       # ── Failed-first ordering (test prioritization) ───────────────────────
       # Playwright records each run's outcome in test-results/.last-run.json
       # (including the IDs of failed tests). Persisting it across runs lets the
@@ -1174,7 +1174,7 @@ jobs:
       # without: its three-dot diff against FETCH_HEAD then fails and the
       # selection widens (or, where the failure is swallowed, empties).
       - name: Fetch the base for affected selection
-        uses: 12-apps/ci/.github/actions/fetch-base@v1
+        uses: 12-apps/ci/.github/actions/fetch-base@v2
 
       - name: Run affected e2e specs
         shell: bash
@@ -1224,7 +1224,7 @@ jobs:
       # SUPERSET of the consumer's own filter (see e2e-spec-pattern) — a false
       # positive only pays the setup, the script still decides precisely.
       - name: Fetch the base for the changed-spec probe
-        uses: 12-apps/ci/.github/actions/fetch-base@v1
+        uses: 12-apps/ci/.github/actions/fetch-base@v2
 
       - name: Detect changed e2e specs
         id: changed-specs
@@ -1282,7 +1282,7 @@ jobs:
       # Same action as the reliability lane above — one place to fix the stall.
       - name: Set up Playwright
         if: ${{ steps.changed-specs.outputs.any == 'true' && inputs.install-playwright }}
-        uses: 12-apps/ci/.github/actions/setup-playwright@v1
+        uses: 12-apps/ci/.github/actions/setup-playwright@v2
       # Self-skips (exit 0) when no e2e specs changed vs the base branch — the
       # authoritative, consumer-side decision (the early exit above is only a
       # coarse superset).

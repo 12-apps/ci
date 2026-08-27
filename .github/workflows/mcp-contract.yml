@@ -9,7 +9,7 @@ name: MCP Contract (reusable)
 #       permissions:
 #         contents: read
 #         # packages: read   # add ONLY if pnpm install pulls private GitHub Packages
-#       uses: 12-apps/ci/.github/workflows/mcp-contract.yml@v1
+#       uses: 12-apps/ci/.github/workflows/mcp-contract.yml@v2
 #       with:
 #         pre-command: pnpm --filter @repo/mcp build
 #         # github-packages-scope: '@my-org'   # only if you install private GitHub Packages
@@ -412,7 +412,7 @@ jobs:
       # the cheapest gate a pnpm install + pre-command it does not need, ADDING
       # setup cost instead of removing any.
       - name: MCP store compliance
-        uses: 12-apps/ci/.github/actions/mcp-store-compliance@v1
+        uses: 12-apps/ci/.github/actions/mcp-store-compliance@v2
         with:
           manifest-path: ${{ inputs.manifest-path }}
           exceptions-path: ${{ inputs.store-exceptions-path }}
