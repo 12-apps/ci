@@ -36,33 +36,33 @@ const LANE = process.env.LANE_LABEL || 'test';
 const BYPASS_LABEL = process.env.BYPASS_LABEL || 'ci:allow-zero-tests';
 
 /**
- * How many test cases does this JUnit report account for?
+ * The number of test cases a JUnit XML report accounts for.
  *
- * Three readings of the same number, cheapest first. Vitest's junit reporter
- * puts `tests="N"` on the root `<testsuites>`; some configs only emit a flat
- * `<testsuite tests="N">`; and a producer may declare neither, in which case
- * the `<testcase>` elements ARE the count.
+ * Three shapes, tried in order, because the summary attribute is a convention
+ * rather than part of the format:
  *
- * That third branch is not a nicety. `node --test --test-reporter=junit` — the
- * runner a consumer reaches for when a suite has no vitest project, e.g. root
- * `scripts/__tests__` — emits an attribute-less `<testsuites>` and, for a file
- * of top-level tests, puts `<testcase>` directly inside it with no
- * `<testsuite>` wrapper anywhere. Both earlier branches miss, and the guard
- * then reported the report UNPARSEABLE and failed a lane that had just run its
- * tests and passed them. Measured on future-pay#1242, whose new root suite is
- * exactly that shape:
+ *   1. `<testsuites tests="N">` — what vitest's junit reporter writes.
+ *   2. `<testsuite tests="N">`, summed — what some configs write instead.
+ *   3. `<testcase>` elements, COUNTED — what is left when neither exists.
  *
- *     <testsuites>
- *       <testcase name="a source change moves the fingerprint" … />
+ * The third arrived with node:test. Its junit reporter emits `<testsuites>` with
+ * no attributes at all and puts the totals in XML COMMENTS (`<!-- tests 10 -->`),
+ * so both attribute branches miss and the guard refused the file outright:
+ * "Could not extract a `tests="N"` attribute … the junit reporter format may
+ * have changed". That is the correct fail-closed answer to a shape nobody has
+ * read, and the wrong answer to this one — the file is perfectly legible, it
+ * simply does not restate what its own elements already say.
  *
- * A `<testcase>` is the unit this guard exists to count, so counting them is
- * the definition rather than a heuristic — the other two branches are summaries
- * of it that a producer happened to compute already.
+ * Counting elements does not weaken the guard, and that is worth stating because
+ * it is the only reason this is safe to add. The claim being made is "at least
+ * one test ran", and a file with no `<testcase>` counts zero and still fails.
+ * The comments are deliberately NOT parsed: a comment is not data, and a total
+ * that disagreed with the elements beside it would be unarbitrable.
  *
  * `<testsuite\b` does not match `<testsuites` (no word boundary between `e` and
- * `s`), so the two branches cannot double-count. Do not "simplify" the boundary.
- * The `<testcase>` branch is only reached when NEITHER matched, so it cannot
- * double-count either.
+ * `s`), so the two attribute branches cannot double-count. Do not "simplify" the
+ * boundary. The element count runs only when both have already declined, so it
+ * cannot double-count either.
  */
 export function parseJUnitTotals(xml) {
   const rootMatch = xml.match(/<testsuites\b[^>]*\btests=["'](\d+)["']/i);
@@ -81,13 +81,15 @@ export function parseJUnitTotals(xml) {
   }
   if (matched) return { tests: summed, source: 'testsuite-sum' };
 
-  // Neither summary was declared. Count the cases themselves — self-closing
-  // `<testcase … />` and `<testcase …>…</testcase>` alike, which is why the
-  // pattern stops at the tag name rather than trying to match a closing form.
-  let cases = 0;
-  for (const _ of xml.matchAll(/<testcase\b/gi)) cases += 1;
+  // Neither attribute exists. Count the elements themselves — self-closing
+  // `<testcase … />` and the `<testcase>…</testcase>` form that wraps a
+  // failure or a skip alike, which is why this matches the OPENING tag rather
+  // than a whole element.
+  const cases = [...xml.matchAll(/<testcase\b/gi)].length;
   if (cases > 0) return { tests: cases, source: 'testcase-count' };
 
+  // A file with no totals and no cases says nothing. Refusing it is the point:
+  // an unreadable report must never be read as a passing lane.
   return null;
 }
 
@@ -118,8 +120,8 @@ function totalTests(reports) {
     if (totals === null) {
       fail(
         `${LANE} JUnit report unparseable`,
-        `Could not extract a \`tests="N"\` attribute from ${report}. The junit reporter ` +
-          'format may have changed; inspect the file and update parseJUnitTotals.',
+        `Found no totals and no \`<testcase>\` elements in ${report}. The junit ` +
+          'reporter format may have changed; inspect the file and update parseJUnitTotals.',
       );
     }
     total += totals.tests;
