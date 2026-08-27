@@ -80,7 +80,89 @@ const expandWorkspaces = () => {
 const dirs = expandWorkspaces();
 const rx = (source) => (source ? new RegExp(source) : null);
 const ignoreRe = rx(config.ignore);
-const untraceableRe = rx(config.untraceable);
+// A lane may ignore MORE than the repo-wide set. Prisma migrations are the
+// motivating case: they decide what the integration lane runs against a real
+// database, and they cannot reach a unit test, which mocks the client. One
+// global list cannot say both, so a lane may add to it — never subtract, since
+// a lane that ignores something the repo counts is a lane that can go green on
+// a change nothing looked at.
+const laneIgnoreRe = rx(laneConfig.ignore);
+
+/**
+ * What the graph can trace directly.
+ *
+ * `source` replaces the old `untraceable` rule, and inverts it. `untraceable`
+ * was a negative lookahead — "anything that is not a workspace .ts file" — so
+ * it swept up every JSON, every migration, every root script, and answered each
+ * with the whole suite. This states the positive instead: these extensions,
+ * under these roots. A path that is neither source, nor ignored, nor routed is
+ * UNCLASSIFIED, and the action exits non-zero naming it.
+ */
+const sourceRe = rx(config.source ?? String.raw`\.(ts|tsx|js|jsx|mjs|cjs)$`);
+const sourceRoots = config.sourceRoots ?? ["apps", "packages"];
+const isSource = (f) =>
+  Boolean(sourceRe?.test(f)) && sourceRoots.some((r) => f === r || f.startsWith(`${r}/`));
+
+/**
+ * Codegen inputs, routed to the source file that carries their whole effect.
+ * Lane entries are appended to the repo-wide ones, so a lane can add a route
+ * without restating the shared set.
+ */
+const routes = [...(config.routes ?? []), ...(laneConfig.routes ?? [])].map((r) => ({
+  match: rx(r.match),
+  entry: r.entry ? (Array.isArray(r.entry) ? r.entry : [r.entry]) : null,
+  command: r.command ?? null,
+}));
+
+/**
+ * Some inputs cannot name their entry in a regex.
+ *
+ * A catalog bump is the case: the changed path is `pnpm-workspace.yaml`, and
+ * the files that carry its effect are whichever source files import the
+ * packages whose PINS moved — knowable only by reading the diff. So a route may
+ * name a `command` instead of an `entry`, run once with every matching path,
+ * printing one entry file per line.
+ *
+ * A command that fails, or prints nothing for paths it claimed, leaves those
+ * paths unrouted — and therefore UNCLASSIFIED, which stops the run. That is
+ * deliberate: the failure mode a silent empty produces here is a lane that
+ * skips the very tests the bump was supposed to reach.
+ */
+let commandRoutes = null;
+// Resolved on FIRST USE, not at module scope: `changed`, `deleted` and
+// `mergeBase` are computed further down, and `routeOf` is only ever reached
+// from inside selectAffected, which runs after all three exist.
+const resolveCommandRoutes = () => {
+  if (commandRoutes) return commandRoutes;
+  commandRoutes = new Map();
+  const all = [...changed, ...deleted];
+  for (const r of routes) {
+    if (!r.command || !r.match) continue;
+    const hit = all.filter((f) => r.match.test(f));
+    if (hit.length === 0) continue;
+    let out = "";
+    try {
+      out = execFileSync("bash", ["-c", `${r.command} ${hit.map((f) => JSON.stringify(f)).join(" ")}`], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        env: { ...process.env, AFFECTED_PLAN_BASE: mergeBase, AFFECTED_PLAN_LANE: lane },
+      });
+    } catch (error) {
+      console.error(`::warning::route command failed for ${hit.length} path(s); they stay unclassified — ${error.message}`);
+      continue;
+    }
+    const entries = out.split("\n").map((x) => x.trim()).filter(Boolean);
+    if (entries.length === 0) continue;
+    for (const f of hit) commandRoutes.set(f, entries);
+  }
+  return commandRoutes;
+};
+
+const routeOf = (file) => {
+  const out = [...(resolveCommandRoutes().get(file) ?? [])];
+  for (const r of routes) if (r.entry && r.match?.test(file)) out.push(...r.entry);
+  return [...new Set(out)];
+};
 const testRe = rx(laneConfig.test);
 const excludeRe = rx(laneConfig.exclude);
 
@@ -140,12 +222,26 @@ const result = selectAffected({
   roots: laneConfig.roots ?? dirs,
   workspaceDirs: dirs,
   isTest: (f) => Boolean(testRe?.test(f)) && !(excludeRe?.test(f) ?? false),
-  isIgnored: (f) => Boolean(ignoreRe?.test(f)),
-  isUntraceable: (f) => Boolean(untraceableRe?.test(f)),
+  isIgnored: (f) => Boolean(ignoreRe?.test(f)) || Boolean(laneIgnoreRe?.test(f)),
+  isSource,
+  routeOf,
   aliasesFor,
 });
 
 emit({ ...result, base: mergeBase, lane, changed });
+
+// An unclassified path is the one outcome that must stop the run. Emitting
+// first means the document still lands, so the failure is inspectable: the
+// artifact names every path, not just the six the message had room for.
+if (result.mode === "unclassified") {
+  console.error(
+    `::error::affected-plan (${lane}): ${result.unclassified.length} changed path(s) match no rule.\n` +
+      result.unclassified.map((f) => `  - ${f}`).join("\n") +
+      `\nAdd each to the config as an \`ignore\` (it cannot change a ${lane} verdict), ` +
+      `a \`route\` (its effect is carried by a source file), or a \`sourceRoots\` entry (it IS source).`,
+  );
+  process.exit(1);
+}
 
 /** Write the plan file, set the action outputs, and print the summary. */
 function emit(plan) {
@@ -157,7 +253,7 @@ function emit(plan) {
   // reads afterwards, so a `1` recorded beside `shards=[]` is a record of a
   // run that did not happen.
   const shardTotal =
-    plan.mode === "none" && tests.length === 0
+    tests.length === 0
       ? 0
       : plan.mode === "full"
         ? maxShards
@@ -170,6 +266,10 @@ function emit(plan) {
     generatedFrom: "12-apps/ci .github/actions/affected-plan",
     counts: { ...(plan.stats ?? {}), selected: tests.length, shardTotal },
     changed: plan.changed ?? [],
+    // Present only on the failing mode, and complete: the log message truncates
+    // at six, the artifact does not.
+    ...(plan.unclassified ? { unclassified: plan.unclassified } : {}),
+    ...(plan.routes && Object.keys(plan.routes).length ? { routes: plan.routes } : {}),
     affectedSymbols: plan.symbols ?? {},
     tests,
     reasons: plan.reasons ?? {},

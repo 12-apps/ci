@@ -19,7 +19,7 @@ description: >-
   reviewable before it executes and auditable afterwards.
 
   Fails safe in every direction: an unreadable config, an unresolvable import,
-  an unparseable declaration or an untraceable changed path all report
+  an unparseable declaration or an unresolvable import all report
   `mode=full` so the caller runs everything. The failure this must never
   produce is a green lane that skipped the test which would have caught the
   bug.

@@ -23,7 +23,7 @@ const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "plan.mjs");
 const CONFIG = {
   workspaces: [],
   ignore: String.raw`\.md$`,
-  untraceable: String.raw`^(?!src/).*`,
+  sourceRoots: ["src"],
   lanes: { unit: { roots: ["src"], test: String.raw`\.test\.ts$` } },
 };
 
@@ -106,15 +106,31 @@ test("a narrowed plan names its tests and sizes the matrix from them", () => {
   assert.equal(document.counts.shardTotal, 1);
 });
 
-test("an untraceable path widens to full, and full takes the whole ceiling", () => {
+test("an unclassified path fails the action and names the file", () => {
+  // The behaviour this replaced: `build/x.ts` used to buy the entire suite,
+  // silently and greenly. Now the run stops and a human adds one rule.
   const { root, base } = repo(
     { "src/a.ts": "export const a = 1;\n", "src/a.test.ts": "import { a } from './a';\n", "build/x.ts": "1\n" },
     { "build/x.ts": "2\n" },
   );
-  const { document, emitted } = plan(root, base);
-  assert.equal(document.mode, "full");
-  assert.equal(emitted["shard-total"], "4");
-  assert.equal(document.counts.shardTotal, 4);
+  const { code, document } = plan(root, base);
+  assert.equal(code, 1, "an unclassified path must stop the plan job");
+  assert.equal(document.mode, "unclassified");
+  assert.deepEqual(document.unclassified, ["build/x.ts"]);
+  // The document still lands, so the artifact carries EVERY offending path
+  // rather than the handful the log message had room for.
+  assert.equal(document.counts.shardTotal, 0);
+});
+
+test("a classified non-source path is ignored, and the lane still narrows", () => {
+  const { root, base } = repo(
+    { "src/a.ts": "export const a = 1;\n", "src/a.test.ts": "import { a } from './a';\n", "notes.md": "x\n" },
+    { "notes.md": "y\n" },
+  );
+  const { code, document } = plan(root, base);
+  assert.equal(code, 0);
+  assert.equal(document.mode, "none", "an ignored-only diff selects nothing and costs no runner");
+  assert.equal(document.counts.shardTotal, 0);
 });
 
 test("an unreadable config is `full`, never a silent narrow", () => {
@@ -123,4 +139,57 @@ test("an unreadable config is `full`, never a silent narrow", () => {
   const { code, document } = plan(root, base);
   assert.equal(code, 0, "the action reports its verdict through `mode`, not an exit code");
   assert.equal(document.mode, "full");
+});
+
+test("a command route expands a path the config cannot name", () => {
+  // A catalog bump's entry is whichever source imports the bumped package —
+  // knowable only by reading the diff, so the repo supplies a command.
+  const { root, base } = repo(
+    {
+      "src/lib.ts": "export const lib = 1;\n",
+      "src/lib.test.ts": "import { lib } from './lib';\n",
+      "route.sh": "#!/bin/sh\necho src/lib.ts\n",
+      "pnpm-lock.yaml": "a\n",
+    },
+    { "pnpm-lock.yaml": "b\n" },
+  );
+  writeFileSync(
+    join(root, ".affected-plan.json"),
+    JSON.stringify({ ...CONFIG, routes: [{ match: String.raw`^pnpm-lock\.yaml$`, command: "sh route.sh" }] }),
+  );
+  const { code, document } = plan(root, base);
+  assert.equal(code, 0, "a routed lockfile must not stop the run");
+  assert.equal(document.mode, "narrowed");
+  assert.deepEqual(document.tests, ["src/lib.test.ts"]);
+  assert.deepEqual(document.routes, { "src/lib.ts": ["pnpm-lock.yaml"] });
+});
+
+test("a route command that prints nothing leaves the path UNCLASSIFIED", () => {
+  // The failure this must never take: a silent empty would skip exactly the
+  // tests the bump was meant to reach, and report success doing it.
+  const { root, base } = repo(
+    { "src/a.ts": "export const a = 1;\n", "route.sh": "#!/bin/sh\nexit 0\n", "pnpm-lock.yaml": "a\n" },
+    { "pnpm-lock.yaml": "b\n" },
+  );
+  writeFileSync(
+    join(root, ".affected-plan.json"),
+    JSON.stringify({ ...CONFIG, routes: [{ match: String.raw`^pnpm-lock\.yaml$`, command: "sh route.sh" }] }),
+  );
+  const { code, document } = plan(root, base);
+  assert.equal(code, 1);
+  assert.deepEqual(document.unclassified, ["pnpm-lock.yaml"]);
+});
+
+test("a route command that FAILS leaves the path unclassified too", () => {
+  const { root, base } = repo(
+    { "src/a.ts": "export const a = 1;\n", "pnpm-lock.yaml": "a\n" },
+    { "pnpm-lock.yaml": "b\n" },
+  );
+  writeFileSync(
+    join(root, ".affected-plan.json"),
+    JSON.stringify({ ...CONFIG, routes: [{ match: String.raw`^pnpm-lock\.yaml$`, command: "exit 7" }] }),
+  );
+  const { code, document } = plan(root, base);
+  assert.equal(code, 1, "a broken router must stop the run, never quietly select nothing");
+  assert.deepEqual(document.unclassified, ["pnpm-lock.yaml"]);
 });

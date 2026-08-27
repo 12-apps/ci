@@ -76,7 +76,8 @@ export function selectAffected(options) {
     workspaceDirs = [],
     isTest,
     isIgnored = () => false,
-    isUntraceable = () => false,
+    isSource = () => true,
+    routeOf = () => [],
     aliasesFor,
   } = options;
 
@@ -85,15 +86,67 @@ export function selectAffected(options) {
     return { mode: "none", tests: [], reasons: {}, symbols: {}, stats: { changed: 0 }, why: "every changed path is one the ignore rules prove cannot change a verdict" };
   }
 
-  const untraceable = relevant.filter(isUntraceable);
-  if (untraceable.length > 0) {
+  // ── routing: a changed file that is not source, but whose whole effect on
+  // the graph is expressed by one that is ───────────────────────────────────
+  //
+  // `full` is the answer for a path the import graph cannot account for, and it
+  // is the right answer for a lockfile: anything could move. It is the WRONG
+  // answer for a codegen INPUT, where the output is a known source file and the
+  // graph already knows how to follow it. A Prisma schema is the case that
+  // forced this — non-`.ts`, so untraceable by shape, while its only runtime
+  // effect is the surface of the generated client, which every consumer reaches
+  // through one entry module.
+  //
+  // So a routed path is REPLACED by its entry, seeded as fully changed, and the
+  // ordinary walk takes it from there. That is strictly narrower than `full`
+  // and strictly wider than ignoring it — the two things a codegen input must
+  // sit between. Routing is opt-in per repo and per lane, because only the
+  // caller knows whether its generator's output really is that one file.
+  const routedFrom = new Map();
+  const direct = [];
+  for (const file of relevant) {
+    const entries = routeOf(file);
+    if (entries.length === 0) {
+      direct.push(file);
+      continue;
+    }
+    for (const entry of entries) {
+      if (!routedFrom.has(entry)) routedFrom.set(entry, []);
+      routedFrom.get(entry).push(file);
+    }
+  }
+
+  // ── every remaining path must be SOURCE, or the plan does not know it ─────
+  //
+  // There used to be a `full` here: a path the graph could not trace made the
+  // lane run everything. It is gone, and the reason is arithmetic. `full` was
+  // reached by ANY path that was not a workspace source file — a budget JSON, a
+  // migration, a docs fixture, a root script — which on this repo's own history
+  // was 69% of commits. A selector that opts out of selecting on seven pushes
+  // in ten is not a selector, and worse, it opts out INVISIBLY: the run is
+  // green either way, so nothing ever reported the miss.
+  //
+  // The replacement is the shape this repo already uses for its burn-down
+  // ratchets: everything is classified, and an UNCLASSIFIED path is a hard
+  // failure naming the file. That inverts the failure direction — a path
+  // nobody has thought about now stops the plan job in red, where a human sees
+  // it and adds one rule, instead of quietly buying the whole suite.
+  //
+  // It is safe to fail closed here precisely because it fails LOUD. The danger
+  // `full` guarded against is a lane that runs too little while reporting
+  // success; a plan job that exits non-zero reports nothing at all.
+  const unclassified = direct.filter((f) => !isSource(f));
+  if (unclassified.length > 0) {
     return {
-      mode: FULL,
+      mode: "unclassified",
       tests: [],
       reasons: {},
       symbols: {},
-      stats: { changed: relevant.length, untraceable: untraceable.length },
-      why: `change(s) the import graph cannot account for (${untraceable.slice(0, 4).join(", ")})`,
+      unclassified,
+      stats: { changed: relevant.length, unclassified: unclassified.length },
+      why:
+        `${unclassified.length} changed path(s) match no rule — ` +
+        `classify each as ignore, route, or source: ${unclassified.slice(0, 6).join(", ")}`,
     };
   }
 
@@ -123,7 +176,7 @@ export function selectAffected(options) {
     }
     return sourceCache.get(file);
   };
-  for (const file of relevant) {
+  for (const file of direct) {
     const base = readBase(file);
     baseSources.set(file, base);
     if (base !== null) {
@@ -149,7 +202,8 @@ export function selectAffected(options) {
   /** file -> Set<symbol> | "*" */
   const affected = new Map();
   const symbolReport = {};
-  for (const file of relevant) {
+  const routeReport = {};
+  for (const file of direct) {
     if (deleted.includes(file)) {
       affected.set(file, "*");
       symbolReport[file] = ["*"];
@@ -171,6 +225,16 @@ export function selectAffected(options) {
   // comment) contributes nothing at all — but it is still a real change, so it
   // is reported rather than silently dropped.
   for (const [file, syms] of affected) if (syms !== "*" && syms.size === 0) affected.delete(file);
+
+  // Routed entries are seeded AFTER that pruning, and always as `*`: the entry
+  // file's own bytes did not move, so a symbol diff over it would find nothing
+  // and prune it away — which would silently drop the change that routed here.
+  for (const [entry, sources] of routedFrom) {
+    affected.set(entry, "*");
+    symbolReport[entry] = ["*"];
+    routeReport[entry] = sources;
+  }
+
   if (affected.size === 0) {
     return {
       mode: "none",
@@ -270,8 +334,12 @@ export function selectAffected(options) {
     tests,
     reasons,
     symbols: symbolReport,
+    // entry -> the changed non-source paths that routed to it, so a reviewer
+    // can see WHY a file nobody edited is seeded as fully changed.
+    routes: routeReport,
     stats: {
       changed: relevant.length,
+      routed: Object.keys(routeReport).length,
       affectedFiles: affected.size,
       graphFiles: files.length,
       unresolved: unresolved.length,
