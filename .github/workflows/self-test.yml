@@ -176,6 +176,20 @@ jobs:
         shell: bash
         run: node --test scripts/ephemeral/__tests__/deploy-cloud-init.test.mjs
 
+      # No shell step truncates a pipeline with `head`.
+      #
+      # `shell: bash` is `-eo pipefail`, and a composite action's `run:` MUST
+      # declare a shell — so `| head` makes the step's exit status the exit
+      # status of a producer that gets EPIPE the moment head has enough lines.
+      # The trigger is the SIZE OF THE DATA, so it passes under the limit and
+      # fails over it with nothing in the diff to say which. Measured on
+      # future-pay#1216: affected-plan's summary step killed `Tests / Unit Plan`
+      # with a correct plan already on disk, and every lane gated on that job
+      # skipped.
+      - name: Head truncation
+        shell: bash
+        run: node --test .github/workflows/__tests__/head-truncation.test.mjs
+
   # Not a script test and not a file-shape test: an assertion about GITHUB, run
   # on GitHub, because the alternative is a comment.
   #
