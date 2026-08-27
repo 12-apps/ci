@@ -11,7 +11,11 @@ inputs:
     description: >-
       Space-separated JUnit XML files and/or directories (scanned recursively
       for *.xml). Multiple paths are summed — a unit lane that runs vitest per
-      workspace package emits one report per package.
+      workspace package emits one report per package, and a suite with no vitest
+      project (root `scripts/__tests__`, say) adds one more from `node --test`.
+      Any producer is read: the totals are taken from `<testsuites tests>`, from
+      a sum over `<testsuite tests>`, or — when a producer declares neither, as
+      `node --test` does — by counting the `<testcase>` elements themselves.
     required: true
   lane:
     description: 'Lane name used in log and annotation text (e.g. unit, integration).'
