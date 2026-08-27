@@ -5,9 +5,10 @@
  * A selector has two failure modes and they are not symmetric. Running too much
  * costs minutes. Running too little produces a green check on untested code,
  * which is indistinguishable from a green check on tested code and is therefore
- * never noticed. So the widening paths (an unresolved import, an untraceable
- * path, an unparseable declaration) get as much coverage here as the narrowing
- * the whole thing exists to do.
+ * never noticed. So the widening paths (an unresolved import, an unparseable
+ * declaration) get as much coverage here as the narrowing the whole thing
+ * exists to do — and the one path that no longer widens, an UNCLASSIFIED file,
+ * is pinned to stop the run in red rather than pass quietly.
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
@@ -200,15 +201,16 @@ test("import syntax quoted INSIDE a string literal is not an edge", () => {
   assert.deepEqual(result.tests, ["src/x.test.ts"]);
 });
 
-test("an untraceable path widens to the full suite", () => {
+test("an unclassified path stops the plan instead of buying the whole suite", () => {
   const { root, readBase } = scenario({ head: { "src/x.test.ts": "" } });
   const result = run({
     repoRoot: root,
     changed: ["package.json"],
     readBase,
-    isUntraceable: (f) => f === "package.json",
+    isSource: (f) => f !== "package.json",
   });
-  assert.equal(result.mode, "full");
+  assert.equal(result.mode, "unclassified");
+  assert.deepEqual(result.unclassified, ["package.json"]);
 });
 
 test("a diff of only ignorable paths selects nothing", () => {
@@ -230,7 +232,7 @@ test("a deleted file is treated as fully affected", () => {
   });
   const result = run({ repoRoot: root, changed: [], deleted: ["src/gone.ts"], readBase });
   assert.notEqual(result.mode, "narrowed-without-the-deletion");
-  assert.ok(["none", "narrowed", "full"].includes(result.mode));
+  assert.ok(["none", "narrowed"].includes(result.mode));
 });
 
 test("a changed test file runs as itself", () => {
@@ -324,4 +326,98 @@ test("a barrel forwards only the name it forwards", () => {
     base: { "src/right.ts": "export const b = 1;\n" },
   });
   assert.deepEqual(run({ repoRoot: root, changed: ["src/right.ts"], readBase }).tests, ["src/right.test.ts"]);
+});
+
+// ── routing a codegen input ────────────────────────────────────────────────
+// `full` is right for a lockfile and wrong for a Prisma schema. These pin the
+// difference, and — the half that matters — pin that routing did not become a
+// way to make untraceable paths quietly disappear.
+
+test("a routed codegen input is traced through its entry instead of reporting full", () => {
+  const { root, readBase } = scenario({
+    head: {
+      "src/client.ts": "export function db() { return 1; }\n",
+      "src/uses-db.ts": 'import { db } from "./client";\nexport const x = db();\n',
+      "src/uses-db.test.ts": 'import { x } from "./uses-db";\n',
+      "src/elsewhere.test.ts": 'export const untouched = 1;\n',
+    },
+  });
+  const result = run({
+    repoRoot: root,
+    readBase,
+    changed: ["prisma/schema.prisma"],
+    routeOf: (f) => (f === "prisma/schema.prisma" ? ["src/client.ts"] : []),
+    isSource: (f) => /^src\/.*\.ts$/.test(f),
+  });
+
+  assert.equal(result.mode, "narrowed", "a routed path must be traced, not escalated");
+  assert.deepEqual(result.tests, ["src/uses-db.test.ts"]);
+  // The reviewer has to be able to see why a file nobody edited was seeded.
+  assert.deepEqual(result.routes, { "src/client.ts": ["prisma/schema.prisma"] });
+});
+
+test("an UNROUTED, unclassified path stops the plan", () => {
+  const { root, readBase } = scenario({ head: { "src/a.ts": "export const a = 1;\n" } });
+  const result = run({
+    repoRoot: root,
+    readBase,
+    changed: ["pnpm-lock.yaml"],
+    routeOf: () => [],
+    isSource: (f) => /^src\/.*\.ts$/.test(f),
+  });
+  assert.equal(result.mode, "unclassified");
+  assert.deepEqual(result.unclassified, ["pnpm-lock.yaml"]);
+});
+
+test("routing one path does not hide an unclassified one in the same diff", () => {
+  // The dangerous composition: a diff carrying BOTH a routed input and a real
+  // untraceable path must still widen. Routing removes its own path from the
+  // untraceable set and nothing else.
+  const { root, readBase } = scenario({ head: { "src/client.ts": "export function db() { return 1; }\n" } });
+  const result = run({
+    repoRoot: root,
+    readBase,
+    changed: ["prisma/schema.prisma", "pnpm-lock.yaml"],
+    routeOf: (f) => (f === "prisma/schema.prisma" ? ["src/client.ts"] : []),
+    isSource: (f) => /^src\/.*\.ts$/.test(f),
+  });
+  assert.equal(result.mode, "unclassified");
+  assert.deepEqual(result.unclassified, ["pnpm-lock.yaml"], "routing removes its own path and nothing else");
+});
+
+test("a routed entry is seeded as fully changed, not symbol-diffed away", () => {
+  // The entry file's own bytes did not move, so a symbol diff over it finds
+  // nothing. If routing were seeded before the byte-identical pruning, the
+  // change would be pruned and the lane would run nothing — silently.
+  const { root, readBase } = scenario({
+    head: {
+      "src/client.ts": "export function db() { return 1; }\n",
+      "src/uses-db.test.ts": 'import { db } from "./client";\n',
+    },
+    base: { "src/client.ts": "export function db() { return 1; }\n" },
+  });
+  const result = run({
+    repoRoot: root,
+    readBase,
+    changed: ["prisma/schema.prisma"],
+    routeOf: (f) => (f === "prisma/schema.prisma" ? ["src/client.ts"] : []),
+    isSource: (f) => /^src\/.*\.ts$/.test(f),
+  });
+  assert.equal(result.tests.length, 1, `expected the importer to run, got ${JSON.stringify(result.tests)}`);
+});
+
+test("a route to an entry outside the graph selects nothing and says so", () => {
+  // A typo'd entry must not read as "nothing is affected". It selects no test,
+  // and `routes` names the entry — so the plan is inspectable rather than
+  // quietly empty.
+  const { root, readBase } = scenario({ head: { "src/a.test.ts": "export const a = 1;\n" } });
+  const result = run({
+    repoRoot: root,
+    readBase,
+    changed: ["prisma/schema.prisma"],
+    routeOf: () => ["src/does-not-exist.ts"],
+    isSource: (f) => /^src\/.*\.ts$/.test(f),
+  });
+  assert.deepEqual(result.tests, []);
+  assert.deepEqual(result.routes, { "src/does-not-exist.ts": ["prisma/schema.prisma"] });
 });

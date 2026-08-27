@@ -65,7 +65,15 @@ widens to `mode=full`:
 | the diff cannot be computed | `full` |
 | a relative import does not resolve | `full` — never narrow against a graph with holes |
 | a declaration cannot be bracketed | that file reports `*` (all exports) |
-| a changed path the caller marks untraceable | `full` |
+| a changed path matching no rule | **`unclassified` — the action exits 1** |
+
+There is deliberately no `full` for an unrecognised path. It used to be the
+answer, and on the first consuming repo it fired on **69% of commits**: the old
+rule was a negative lookahead ("anything that is not a workspace `.ts` file"),
+so a budget JSON, a migration, a docs fixture and a root script all bought the
+entire suite — invisibly, because the run is green either way. Classification is
+now exhaustive and an unknown path stops the plan job in red, where somebody
+sees it and adds one rule.
 
 Pair it with a full run on the default branch. Strict PR-time selection is only
 sound when something unconditional runs afterwards.
@@ -104,7 +112,12 @@ it, and there is exactly one selection per run.
   "workspaces": ["apps/*", "packages/*"],
   "aliases": [{ "prefix": "@", "replacement": "<workspace>/src" }],
   "ignore": "\\.(md|png|svg)$|^\\.github/",
-  "untraceable": "(^|/)(package\\.json|tsconfig.*\\.json|[^/]*\\.config\\.[cm]?[jt]s)$|^pnpm-lock\\.yaml$",
+  "source": "\\.(ts|tsx|js|jsx|mjs|cjs)$",
+  "sourceRoots": ["apps", "packages", "scripts"],
+  "routes": [
+    { "match": "^packages/[^/]+/prisma/.*\\.prisma$", "entry": ["packages/prisma/src/index.ts"] },
+    { "match": "^pnpm-(lock|workspace)\\.(yaml)$", "command": "node scripts/plan-route.mjs" }
+  ],
   "lanes": {
     "unit": {
       "roots": ["apps", "packages"],
@@ -124,9 +137,16 @@ it, and there is exactly one selection per run.
 | `workspaces` | package roots; globs expanded one level. Used for `exports` resolution |
 | `aliases` | bundler aliases. `<workspace>` is replaced with the importing file's own workspace, so `@/x` resolves per app |
 | `ignore` | paths that cannot change any verdict — docs, images, CI config |
-| `untraceable` | paths whose effect the import graph cannot model — manifests, tsconfigs, lockfiles. These force `full` |
+| `source` / `sourceRoots` | what the graph traces directly. Stated positively, so anything else must be ignored or routed |
+| `routes[].match` + `.entry` | a codegen INPUT, replaced by the source file carrying its whole effect, then traced normally. A Prisma schema is the motivating case: non-`.ts`, but its only runtime effect is the generated client's surface |
+| `routes[].match` + `.command` | for an input whose entry cannot be named in a regex — a catalog bump's entry is whichever source imports the packages whose pins moved. Run once with every matching path, printing one entry per line |
+| `lanes.<name>.ignore` | added to the repo-wide `ignore` for this lane only — never subtracted. Prisma migrations are the case: they decide what integration runs against a real database and cannot reach a unit test, which mocks the client |
 | `lanes.<name>.roots` | directories to build the graph over |
 | `lanes.<name>.test` / `.exclude` | which files are this lane's tests |
+
+A route whose command fails, or prints nothing, leaves its paths **unclassified**
+rather than routed-to-nothing. A silent empty there would skip exactly the tests
+the bump was supposed to reach, and report success doing it.
 
 A package whose `exports` point at an unbuilt `dist/` falls back to `src/`,
 which is what a test run actually resolves.
