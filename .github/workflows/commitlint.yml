@@ -11,7 +11,7 @@ name: Commit messages (reusable)
 #     pull-requests: read
 #   jobs:
 #     commitlint:
-#       uses: 12-apps/ci/.github/workflows/commitlint.yml@v1
+#       uses: 12-apps/ci/.github/workflows/commitlint.yml@v2
 #
 # WHY BOTH the commits AND the PR title are linted: these repos are squash-only
 # with `squash_merge_commit_title: COMMIT_OR_PR_TITLE`, which means GitHub uses

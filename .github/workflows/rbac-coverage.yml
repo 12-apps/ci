@@ -10,7 +10,7 @@ name: RBAC Coverage (reusable)
 #       permissions:
 #         contents: read
 #         # packages: read   # add ONLY if pnpm install pulls private GitHub Packages
-#       uses: 12-apps/ci/.github/workflows/rbac-coverage.yml@v1
+#       uses: 12-apps/ci/.github/workflows/rbac-coverage.yml@v2
 #       with:
 #         pre-command: pnpm --filter @repo/rbac build   # if the RBAC pkg needs a build
 #         # github-packages-scope: '@my-org'            # only for private GitHub Packages

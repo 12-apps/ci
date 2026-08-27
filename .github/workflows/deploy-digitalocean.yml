@@ -63,7 +63,7 @@ jobs:
       # Engine lives in 12-apps/ci; this composite ships scripts/ephemeral/deploy-cloud-init.sh
       # so consumer repos never vendor it. Secrets pass as inputs (composites have no secrets ctx).
       - name: Create droplet + initial deploy
-        uses: 12-apps/ci/.github/actions/do-provision@v1
+        uses: 12-apps/ci/.github/actions/do-provision@v2
         with:
           do_api_token: ${{ secrets.DO_API_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}

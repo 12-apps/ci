@@ -9,7 +9,7 @@ name: Entitlement-Gate Coverage (reusable)
 #       if: needs.changes.outputs.code == 'true'
 #       permissions:
 #         contents: read
-#       uses: 12-apps/ci/.github/workflows/entitlements-coverage.yml@v1
+#       uses: 12-apps/ci/.github/workflows/entitlements-coverage.yml@v2
 #       with:
 #         package-dir: apps/admin   # where entitlements:coverage is defined
 #         install: false            # the script is plain node with no deps

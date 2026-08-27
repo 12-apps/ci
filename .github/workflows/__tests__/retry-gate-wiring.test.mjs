@@ -30,10 +30,9 @@ import { test } from "node:test";
 // Dependency-free (node: builtins, raw-text scan), matching its neighbours:
 // they run in self-test.yml's `action-scripts` job, which has no install step.
 
-const STATIC_WORKFLOW = path.join(
-  fileURLToPath(new URL("../", import.meta.url)),
-  "monorepo-static.yml",
-);
+const WORKFLOWS = fileURLToPath(new URL("../", import.meta.url));
+const STATIC_WORKFLOW = path.join(WORKFLOWS, "monorepo-static.yml");
+const MAJORS = path.join(WORKFLOWS, "../majors.json");
 
 /** The jobs that must not start when the gate reproduced a failure. */
 const GATED = ["lint", "type-check", "actionlint"];
@@ -102,8 +101,22 @@ test("the probe is the shared action, by its full path", () => {
   // probe specifically is the shared action rather than a consumer command,
   // which is the whole point of the move — the job-name table it reads is a set
   // of strings THESE workflows own.
+  //
+  // The major is READ from `.github/majors.json`, not spelled here. It was
+  // spelled here, as `@v1`, and that is the same hardcoded-tag rot FUT-959 was
+  // about one level down: this assertion would have gone red on the sweep that
+  // moved the pin and invited someone to "fix" it by editing the digit, which
+  // buys nothing and rots again at the next major. major-pin-refs.test.mjs
+  // already enforces that the pin IS the supported major; this one only cares
+  // that the probe is the shared action addressed by full path.
+  const supported = JSON.parse(
+    readFileSync(MAJORS, "utf8"),
+  ).supported;
   const gate = jobs().get("retry-gate");
-  assert.match(gate.body, /uses:\s*12-apps\/ci\/\.github\/actions\/failure-ledger@v1/);
+  assert.match(
+    gate.body,
+    new RegExp(String.raw`uses:\s*12-apps/ci/\.github/actions/failure-ledger@${supported}\b`),
+  );
   assert.match(gate.body, /mode:\s*probe/);
 });
 

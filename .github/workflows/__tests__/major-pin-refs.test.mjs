@@ -4,8 +4,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-// Every `uses: 12-apps/ci/...@vN` this repo DOCUMENTS must pin the major this
-// repo actually supports.
+// Every `uses: 12-apps/ci/...@vN` this repo DOCUMENTS **or EXECUTES** must pin
+// the major this repo actually supports.
 //
 // The two drifted apart and nothing noticed (FUT-956). `release-major-tag.yml`
 // advanced every live major independently, stopping each before the first
@@ -33,21 +33,70 @@ import { test } from "node:test";
 // sweep that could not tell a policy sentence from a copyable pin would make
 // documenting the policy impossible. Only a REFERENCE — `12-apps/ci/…@vN` — is
 // something a reader pastes into their own workflow.
+//
+// WHY THE YAML HALF EXISTS (FUT-959). This swept markdown only for its first
+// day, on the reasoning above — a pin is "something a reader pastes". That
+// scoping was wrong in the expensive direction: this repo's workflows reference
+// their OWN actions by full path and tag, roughly thirty times, and those are
+// not documentation. They are what runs.
+//
+// So `monorepo-tests.yml@v2` called `fetch-base@v1`, `affected-plan@v1`,
+// `vitest-signal-guard@v1` and `pglite-template-cache@v1`; `cd.yml@v2` called
+// `deploy-digitalocean.yml@v1` and `deploy-cloudflare.yml@v1`. A consumer that
+// had dutifully moved every outer pin to `@v2` was still executing v1 code for
+// every nested action, and the only place it showed was `referenced_workflows`
+// on a run nobody reads. Observed on future-pay's CD run for 2f1c9586:
+// `cd.yml@v2 -> 62785ff` sitting beside `deploy-cloudflare.yml@v1 -> 0d76e66`.
+//
+// The consequence is the one this whole file exists to prevent. Freeze `v1`,
+// advance `v2` with a rewritten action, and a `@v2` consumer keeps running the
+// frozen one — the upgrade silently does not happen, and nothing is red.
+//
+// An EXECUTED pin is therefore checked harder than a documented one: a wrong
+// doc misleads a reader who can see the file, a wrong `uses:` misroutes a run
+// that reports success either way.
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 const DECLARED = path.join(REPO, ".github/majors.json");
 
-/** Directories with nothing a consumer would copy a pin out of. */
+/** Directories with nothing a consumer would copy or run a pin out of. */
 const SKIP = new Set(["node_modules", ".git"]);
 
-/** Every markdown file in the repo. */
-function markdownFiles(dir = REPO) {
+/** Every file under `dir` whose name satisfies `keep`. */
+function filesWhere(keep, dir = REPO) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     if (SKIP.has(entry.name)) return [];
     const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) return markdownFiles(full);
-    return entry.isFile() && entry.name.endsWith(".md") ? [full] : [];
+    if (entry.isDirectory()) return filesWhere(keep, full);
+    return entry.isFile() && keep(entry.name) ? [full] : [];
   });
+}
+
+/** Every markdown file in the repo — the pins a reader COPIES. */
+const markdownFiles = () => filesWhere((n) => n.endsWith(".md"));
+
+/**
+ * Every workflow and action definition — the pins this repo RUNS.
+ *
+ * Both directories, because the two reference each other: a reusable workflow
+ * names an action, and a composite action can name another. Scanning only
+ * `workflows/` would leave the second kind unchecked.
+ */
+const yamlFiles = () => [
+  ...filesWhere((n) => /\.ya?ml$/.test(n), path.join(REPO, ".github/workflows")),
+  ...filesWhere((n) => /\.ya?ml$/.test(n), path.join(REPO, ".github/actions")),
+];
+
+/** `file:line  ref` for every pin in `files` that is not on the supported major. */
+function offendersIn(files) {
+  const offenders = [];
+  for (const file of files) {
+    const rel = path.relative(REPO, file);
+    for (const { line, ref, major } of majorPins(readFileSync(file, "utf8"))) {
+      if (major !== declared.supported) offenders.push(`${rel}:${line}  ${ref}`);
+    }
+  }
+  return offenders;
 }
 
 /**
@@ -138,15 +187,7 @@ test("majorPins ignores prose about a tag and other repos' actions", () => {
 // --- the sweep -------------------------------------------------------------
 
 test("every documented pin is on the supported major", () => {
-  const offenders = [];
-
-  for (const file of markdownFiles()) {
-    const rel = path.relative(REPO, file);
-    for (const { line, ref, major } of majorPins(readFileSync(file, "utf8"))) {
-      if (major !== declared.supported) offenders.push(`${rel}:${line}  ${ref}`);
-    }
-  }
-
+  const offenders = offendersIn(markdownFiles());
   assert.deepEqual(
     offenders,
     [],
@@ -154,6 +195,23 @@ test("every documented pin is on the supported major", () => {
       "but these documented references pin a different one. A reader copies " +
       "whichever page they opened, so a doc on the wrong major puts a consumer " +
       "on a tag this repo may stop advancing:\n  " +
+      offenders.join("\n  "),
+  );
+});
+
+test("every pin this repo EXECUTES is on the supported major", () => {
+  // The half that misroutes a run rather than a reader (FUT-959). A reusable
+  // workflow on `@v2` that calls its own action at a frozen `@v1` runs v1 code
+  // for that step, reports success, and shows the split only in
+  // `referenced_workflows` on a run nobody opens.
+  const offenders = offendersIn(yamlFiles());
+  assert.deepEqual(
+    offenders,
+    [],
+    `.github/majors.json says the supported major is \`${declared.supported}\`, ` +
+      "but these live `uses:` references pin a different one. A consumer that " +
+      "moved every outer pin still executes the frozen major through each of " +
+      "these, and nothing anywhere reports it:\n  " +
       offenders.join("\n  "),
   );
 });
@@ -169,6 +227,26 @@ test("the sweep actually reads this repo's documentation", () => {
   const names = pinned.map((f) => path.relative(REPO, f));
   assert.ok(names.includes("README.md"), `README.md documents no pin; saw ${names}`);
   assert.ok(names.includes("CONSUMING.md"), `CONSUMING.md documents no pin; saw ${names}`);
+});
+
+test("the sweep actually reads this repo's own workflows", () => {
+  // The same silent direction, over the half that runs. This is the assertion
+  // that would have failed on the day the YAML sweep did not exist — the walk
+  // saw zero executed pins because it was never looking at them.
+  const files = yamlFiles();
+  assert.ok(files.length >= 15, `expected the sweep to see the workflows, saw ${files.length}`);
+
+  const pins = files.flatMap((f) =>
+    majorPins(readFileSync(f, "utf8")).map((p) => ({ ...p, file: path.relative(REPO, f) })),
+  );
+  assert.ok(pins.length >= 20, `expected the repo's self-references, saw ${pins.length}`);
+
+  // Named because they are the ones that were wrong, and the ones whose being
+  // wrong is least visible: a nested ACTION call inside a reusable workflow.
+  const named = new Set(pins.map((p) => p.file));
+  for (const f of [".github/workflows/monorepo-tests.yml", ".github/workflows/cd.yml"]) {
+    assert.ok(named.has(f), `${f} references no 12-apps/ci pin; the sweep is blind to it`);
+  }
 });
 
 test("the declaration is where release-major-tag.yml reads it from", () => {

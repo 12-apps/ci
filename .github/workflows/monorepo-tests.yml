@@ -19,7 +19,7 @@ name: Monorepo Tests
 #   tests:
 #     needs: [static]
 #     if: needs.static.outputs.code == 'true'
-#     uses: 12-apps/ci/.github/workflows/monorepo-tests.yml@v1
+#     uses: 12-apps/ci/.github/workflows/monorepo-tests.yml@v2
 
 on:
   workflow_call:
@@ -468,14 +468,14 @@ jobs:
       # different one would be sizing a diff the lane never runs.
       - name: Fetch the base for affected selection
         if: ${{ (inputs.unit-plan-command != '' || inputs.affected-plan-config != '') && github.event_name == 'pull_request' }}
-        uses: 12-apps/ci/.github/actions/fetch-base@v1
+        uses: 12-apps/ci/.github/actions/fetch-base@v2
         with:
           base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
           fallback-branch: ${{ inputs.default-branch }}
       - name: Compute the affected test plan
         id: affected
         if: ${{ inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
-        uses: 12-apps/ci/.github/actions/affected-plan@v1
+        uses: 12-apps/ci/.github/actions/affected-plan@v2
         with:
           lane: unit
           base: FETCH_HEAD
@@ -754,7 +754,7 @@ jobs:
       - name: Fetch the base for affected selection
         id: base
         if: ${{ github.event_name == 'pull_request' && steps.verdict.outputs.cache-hit != 'true' }}
-        uses: 12-apps/ci/.github/actions/fetch-base@v1
+        uses: 12-apps/ci/.github/actions/fetch-base@v2
         with:
           base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
           fallback-branch: ${{ inputs.default-branch }}
@@ -841,7 +841,7 @@ jobs:
               && inputs.unit-junit-reports != ''
               && needs.unit-plan.outputs.count == 1
               && !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label) }}
-        uses: 12-apps/ci/.github/actions/vitest-signal-guard@v1
+        uses: 12-apps/ci/.github/actions/vitest-signal-guard@v2
         with:
           reports: ${{ inputs.unit-junit-reports }}
           lane: unit
@@ -955,7 +955,7 @@ jobs:
           pattern: unit-junit-a${{ github.run_attempt }}-*
           path: junit-signal
       - name: Verify the unit lane executed at least one test
-        uses: 12-apps/ci/.github/actions/vitest-signal-guard@v1
+        uses: 12-apps/ci/.github/actions/vitest-signal-guard@v2
         with:
           reports: junit-signal
           lane: unit
@@ -1017,7 +1017,7 @@ jobs:
       - name: Fetch the base for turbo --affected
         id: base
         if: ${{ github.event_name == 'pull_request' }}
-        uses: 12-apps/ci/.github/actions/fetch-base@v1
+        uses: 12-apps/ci/.github/actions/fetch-base@v2
         with:
           # Mid-stack, GITHUB_BASE_REF is only the layer below, so --affected
           # would skip everything the lower layers touched.
@@ -1084,14 +1084,14 @@ jobs:
       # different one would be sizing a diff the lane never runs.
       - name: Fetch the base for affected selection
         if: ${{ (inputs.integration-plan-command != '' || inputs.affected-plan-config != '') && github.event_name == 'pull_request' }}
-        uses: 12-apps/ci/.github/actions/fetch-base@v1
+        uses: 12-apps/ci/.github/actions/fetch-base@v2
         with:
           base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
           fallback-branch: ${{ inputs.default-branch }}
       - name: Compute the affected test plan
         id: affected
         if: ${{ inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
-        uses: 12-apps/ci/.github/actions/affected-plan@v1
+        uses: 12-apps/ci/.github/actions/affected-plan@v2
         with:
           lane: integration
           base: FETCH_HEAD
@@ -1200,7 +1200,7 @@ jobs:
       # rationale (and why a stale restore is harmless) lives with the action.
       - name: Cache the PGlite schema template
         if: ${{ inputs.pglite-template-migrations != '' }}
-        uses: 12-apps/ci/.github/actions/pglite-template-cache@v1
+        uses: 12-apps/ci/.github/actions/pglite-template-cache@v2
         with:
           migrations-glob: ${{ inputs.pglite-template-migrations }}
 
@@ -1240,7 +1240,7 @@ jobs:
       - name: Fetch the base for affected selection
         id: base
         if: ${{ github.event_name == 'pull_request' }}
-        uses: 12-apps/ci/.github/actions/fetch-base@v1
+        uses: 12-apps/ci/.github/actions/fetch-base@v2
         with:
           base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
           fallback-branch: ${{ inputs.default-branch }}
@@ -1305,7 +1305,7 @@ jobs:
               && inputs.integration-junit-reports != ''
               && needs.integration-plan.outputs.count == 1
               && !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label) }}
-        uses: 12-apps/ci/.github/actions/vitest-signal-guard@v1
+        uses: 12-apps/ci/.github/actions/vitest-signal-guard@v2
         with:
           reports: ${{ inputs.integration-junit-reports }}
           lane: integration
@@ -1372,7 +1372,7 @@ jobs:
           pattern: integration-junit-a${{ github.run_attempt }}-*
           path: junit-signal
       - name: Verify the integration lane executed at least one test
-        uses: 12-apps/ci/.github/actions/vitest-signal-guard@v1
+        uses: 12-apps/ci/.github/actions/vitest-signal-guard@v2
         with:
           reports: junit-signal
           lane: integration

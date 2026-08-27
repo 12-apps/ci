@@ -585,7 +585,7 @@ jobs:
       # calls, and only a push following a RED one buys a toolchain.
       - name: Look for a ledger from this branch's last run
         id: ledger
-        uses: 12-apps/ci/.github/actions/failure-ledger@v1
+        uses: 12-apps/ci/.github/actions/failure-ledger@v2
         with:
           mode: probe
           quarantine-file: ${{ inputs.retry-gate-quarantine-file }}
@@ -699,7 +699,7 @@ jobs:
       - name: Fetch the base for turbo --affected
         id: base
         if: ${{ github.event_name == 'pull_request' }}
-        uses: 12-apps/ci/.github/actions/fetch-base@v1
+        uses: 12-apps/ci/.github/actions/fetch-base@v2
 
       - name: Point turbo --affected at the base
         if: ${{ github.event_name == 'pull_request' }}
