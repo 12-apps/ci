@@ -452,11 +452,22 @@ jobs:
       # input, so the job names and the guard conditions describe the matrix
       # that actually ran.
       count: ${{ steps.plan.outputs.count }}
+      # The lane verdict key this run computed, handed to the post-matrix
+      # recorder. Passed rather than recomputed: two computations of one key are
+      # two things that can disagree, and a recorder writing a DIFFERENT key
+      # from the one the next run looks up is a skip that silently never happens.
+      fingerprint: ${{ steps.fingerprint.outputs.value }}
     steps:
       # Only a caller that SIZES the lane needs the tree. Without a plan
       # command this job stays what it was: arithmetic over an input.
+      # Also checked out for the verdict lookup below: the caller's fingerprint
+      # command hashes the TREE, so there has to be one.
       - name: Checkout
-        if: ${{ (inputs.unit-plan-command != '' || inputs.affected-plan-config != '') && github.event_name == 'pull_request' }}
+        if: >-
+          ${{ (inputs.unit-plan-command != ''
+              || inputs.affected-plan-config != ''
+              || inputs.unit-fingerprint-command != '')
+              && github.event_name == 'pull_request' }}
         uses: actions/checkout@v4
         with:
           # The caller's plan command almost certainly diffs against a merge
@@ -484,6 +495,85 @@ jobs:
           max-shards: ${{ inputs.unit-shards }}
           artifact-name: affected-plan-unit
 
+      # ── Has this exact tree already passed THIS LANE? (opt-in) ─────────────
+      # The verdict lookup lives HERE, ahead of sizing, rather than inside each
+      # shard — and that placement is the whole point.
+      #
+      # A step inside the matrix cannot stop the matrix. The plan expanded to
+      # `unit-shards`, GitHub created every one of those jobs, and each paid a
+      # checkout, a fingerprint and a cache probe (~16s measured, billed as a
+      # whole minute) before discovering it had nothing to do. Four jobs per
+      # lane, eight across the two, on every push whose tree an earlier run had
+      # already passed. The machinery to avoid that already existed one layer up
+      # — `count=0` empties the matrix and no job is created at all — the
+      # fingerprint was simply computed too late to reach it.
+      #
+      # It is also the placement that makes the skip compose with the zero-test
+      # guard. A per-shard verdict cannot carry a LANE-level claim: the guard
+      # asserts the MERGED total over every shard, so a run whose signal job
+      # failed would still have recorded each green shard, and the next
+      # identical tree would skip straight past the guard on those records. The
+      # per-shard step stands itself down for exactly that reason whenever
+      # `unit-junit-reports` is armed on a sharded lane. Recorded by the
+      # post-matrix `Unit Verdict` job instead, the claim is lane-level —
+      # written only when the shards AND the signal passed — so the two mechanisms
+      # stop being mutually exclusive.
+      #
+      # Runs with no toolchain, on the runner's system Node: the caller's command
+      # is dependency-free by contract, which is what keeps a miss free.
+      - name: Fingerprint the test-relevant tree
+        id: fingerprint
+        # PR-only. The push run is the post-merge safety net; it skips nothing,
+        # by definition, and must never consult a recorded verdict.
+        if: >-
+          ${{ inputs.unit-fingerprint-command != ''
+              && github.event_name == 'pull_request' }}
+        shell: bash
+        env:
+          FP_CMD: ${{ inputs.unit-fingerprint-command }}
+          # Folded into the KEY rather than the hash. These decide what the lane
+          # RUNS and they live in a workflow file, which a sane "can this change
+          # a test outcome?" rule ignores — so without them, editing
+          # unit-test-command would inherit the previous command's verdict.
+          #
+          # The SHARD COUNT is deliberately absent. A lane-level verdict says
+          # "every test this lane selects for this tree passed", and that is true
+          # however the set was sliced — so a plan that sizes 2 today must still
+          # be answerable by a run that sized 4 yesterday. Including the count
+          # would make the skip miss on precisely the pushes it exists for.
+          LANE_NODE: ${{ inputs.node-version }}
+          LANE_PRE: ${{ inputs.pre-test-command }}
+          LANE_CMD: ${{ inputs.unit-test-command }}
+        run: |
+          set -o pipefail
+          # NOT `set -e`: every failure here must fall through to an empty
+          # fingerprint, which disables the lookup and runs the lane. An
+          # optimisation that cannot answer must answer "run it".
+          fp="$(bash -c "$FP_CMD")" || fp=""
+          fp="$(printf '%s' "$fp" | tr -d '[:space:]')"
+          if ! printf '%s' "$fp" | grep -Eq '^[0-9a-f]{32,128}$'; then
+            echo "::warning::unit-fingerprint-command produced no usable hash — running the lane."
+            echo "value=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          lane="$(printf '%s\0%s\0%s\0%s' \
+            "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" "$FP_CMD" \
+            | sha256sum | cut -c1-16)"
+          echo "value=${lane}-${fp}" >> "$GITHUB_OUTPUT"
+          echo "unit lane verdict key: ${lane}-${fp}"
+
+      # `lookup-only` — the entry's EXISTENCE is the whole message, so nothing is
+      # downloaded. No `restore-keys`: a prefix match would answer for a
+      # DIFFERENT tree, which is the one mistake this must not make.
+      - name: Look up a recorded lane verdict
+        id: verdict
+        if: ${{ steps.fingerprint.outputs.value != '' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: .unit-lane-verdict
+          key: unit-lane-${{ steps.fingerprint.outputs.value }}
+          lookup-only: true
+
       - name: Compute the shard list
         id: plan
         shell: bash
@@ -499,6 +589,11 @@ jobs:
           # empty the matrix of the one run whose whole purpose is to miss
           # nothing. Sizing is an optimisation; the safety net is not.
           PLAN_CMD: ${{ github.event_name == 'pull_request' && inputs.unit-plan-command || '' }}
+          # A recorded LANE verdict for this exact tree: every test this lane
+          # selects has already passed it, so there is no work and no job needs
+          # to exist. Read here rather than inside a shard because a step inside
+          # the matrix cannot stop the matrix — see the lookup above.
+          VERDICT_HIT: ${{ steps.verdict.outputs.cache-hit }}
         run: |
           set -uo pipefail
           # Clamp rather than trust: a bad INPUT must never reach the matrix.
@@ -546,8 +641,24 @@ jobs:
           # `count` guard has already skipped; the guard is the part a new lane
           # has to remember, and __tests__/matrix-zero-guard.test.mjs is what
           # remembers it.
+          # A reused verdict empties the matrix, and the ORDER matters: this runs
+          # after the plan has sized the lane, so the log still records what the
+          # diff WOULD have cost. It is also deliberately last, so a plan that
+          # already answered 0 keeps its own, more specific, reason.
+          if [ "$VERDICT_HIT" = "true" ]; then
+            echo "::notice::unit lane: this tree is byte-identical, in every path that can affect a test, to one an earlier PASSING run of this lane already covered. No shard will run."
+            {
+              echo "### Unit Tests — reused an earlier verdict"
+              echo
+              echo "No counted file differs from a tree this lane has already passed on,"
+              echo "so no shard was created. Change any counted file and the lane runs again."
+            } >> "$GITHUB_STEP_SUMMARY"
+            COUNT=0
+          fi
           if [ "$COUNT" -eq 0 ]; then
-            echo "::notice::unit lane: the plan command reports no work for this diff — no shard will run."
+            if [ "$VERDICT_HIT" != "true" ]; then
+              echo "::notice::unit lane: the plan command reports no work for this diff — no shard will run."
+            fi
             echo "shards=[]" >> "$GITHUB_OUTPUT"
           else
             echo "shards=$(seq "$COUNT" | jq -cRn '[inputs | tonumber]')" >> "$GITHUB_OUTPUT"
@@ -961,6 +1072,64 @@ jobs:
           lane: unit
           bypass-label: ${{ inputs.allow-zero-tests-label }}
 
+
+  # ── Record the lane's verdict, and ONLY a passing one ────────────────────────
+  # Post-matrix, because the claim is LANE-level: "every test this lane selected
+  # for this tree passed". A shard cannot make that claim about the lane, which
+  # is why the per-shard record stands itself down whenever the zero-test guard
+  # is armed on a sharded lane — and why the skip and the guard could not both
+  # be on until the record moved here.
+  #
+  # Three ways to leave no record, all of them deliberate:
+  #   - a FAILED shard          → `needs.unit-tests.result` is not success;
+  #   - a FAILED signal job     → the merged total ran no test, so the lane
+  #                               proved nothing worth reusing;
+  #   - a CANCELLED run         → `!cancelled()` never fires. This is the case
+  #                               that actually bites: the recommended caller
+  #                               sets `cancel-in-progress: true` for PRs, so two
+  #                               quick pushes kill the first run mid-suite.
+  #
+  # A run that SKIPPED the lane on an existing verdict records nothing either —
+  # `unit-tests` is skipped, not successful — so the key is written by the run
+  # that earned it and never refreshed by the runs that reuse it.
+  unit-verdict:
+    name: Unit Verdict
+    runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 10
+    needs: [unit-plan, unit-tests, unit-signal]
+    if: >-
+      ${{ !cancelled()
+          && github.event_name == 'pull_request'
+          && needs.unit-plan.outputs.fingerprint != ''
+          && needs.unit-tests.result == 'success'
+          && needs.unit-signal.result != 'failure'
+          && needs.unit-signal.result != 'cancelled' }}
+    steps:
+      - name: Note what passed
+        shell: bash
+        # Content is diagnostic only — the KEY carries the meaning, and
+        # `lookup-only` means no reader ever downloads this.
+        env:
+          VERDICT_KEY: unit-lane-${{ needs.unit-plan.outputs.fingerprint }}
+          SHARDS: ${{ needs.unit-plan.outputs.count }}
+        run: |
+          set -euo pipefail
+          mkdir -p .unit-lane-verdict
+          {
+            echo "commit=$GITHUB_SHA"
+            echo "run=$GITHUB_RUN_ID attempt=$GITHUB_RUN_ATTEMPT"
+            echo "shards=$SHARDS"
+            echo "key=$VERDICT_KEY"
+          } > .unit-lane-verdict/passed
+
+      - name: Save the lane verdict
+        uses: actions/cache/save@v4
+        with:
+          path: .unit-lane-verdict
+          key: unit-lane-${{ needs.unit-plan.outputs.fingerprint }}
+
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -1072,9 +1241,20 @@ jobs:
       shards: ${{ steps.plan.outputs.shards }}
       # The effective count — see unit-plan.
       count: ${{ steps.plan.outputs.count }}
+      # The lane verdict key this run computed, handed to the post-matrix
+      # recorder. Passed rather than recomputed: two computations of one key are
+      # two things that can disagree, and a recorder writing a DIFFERENT key
+      # from the one the next run looks up is a skip that silently never happens.
+      fingerprint: ${{ steps.fingerprint.outputs.value }}
     steps:
+      # Also checked out for the verdict lookup below: the caller's fingerprint
+      # command hashes the TREE, so there has to be one.
       - name: Checkout
-        if: ${{ (inputs.integration-plan-command != '' || inputs.affected-plan-config != '') && github.event_name == 'pull_request' }}
+        if: >-
+          ${{ (inputs.integration-plan-command != ''
+              || inputs.affected-plan-config != ''
+              || inputs.integration-fingerprint-command != '')
+              && github.event_name == 'pull_request' }}
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -1100,6 +1280,85 @@ jobs:
           max-shards: ${{ inputs.integration-shards }}
           artifact-name: affected-plan-integration
 
+      # ── Has this exact tree already passed THIS LANE? (opt-in) ─────────────
+      # The verdict lookup lives HERE, ahead of sizing, rather than inside each
+      # shard — and that placement is the whole point.
+      #
+      # A step inside the matrix cannot stop the matrix. The plan expanded to
+      # `integration-shards`, GitHub created every one of those jobs, and each paid a
+      # checkout, a fingerprint and a cache probe (~16s measured, billed as a
+      # whole minute) before discovering it had nothing to do. Four jobs per
+      # lane, eight across the two, on every push whose tree an earlier run had
+      # already passed. The machinery to avoid that already existed one layer up
+      # — `count=0` empties the matrix and no job is created at all — the
+      # fingerprint was simply computed too late to reach it.
+      #
+      # It is also the placement that makes the skip compose with the zero-test
+      # guard. A per-shard verdict cannot carry a LANE-level claim: the guard
+      # asserts the MERGED total over every shard, so a run whose signal job
+      # failed would still have recorded each green shard, and the next
+      # identical tree would skip straight past the guard on those records. The
+      # per-shard step stands itself down for exactly that reason whenever
+      # `integration-junit-reports` is armed on a sharded lane. Recorded by the
+      # post-matrix `Integration Verdict` job instead, the claim is lane-level —
+      # written only when the shards AND the signal passed — so the two mechanisms
+      # stop being mutually exclusive.
+      #
+      # Runs with no toolchain, on the runner's system Node: the caller's command
+      # is dependency-free by contract, which is what keeps a miss free.
+      - name: Fingerprint the test-relevant tree
+        id: fingerprint
+        # PR-only. The push run is the post-merge safety net; it skips nothing,
+        # by definition, and must never consult a recorded verdict.
+        if: >-
+          ${{ inputs.integration-fingerprint-command != ''
+              && github.event_name == 'pull_request' }}
+        shell: bash
+        env:
+          FP_CMD: ${{ inputs.integration-fingerprint-command }}
+          # Folded into the KEY rather than the hash. These decide what the lane
+          # RUNS and they live in a workflow file, which a sane "can this change
+          # a test outcome?" rule ignores — so without them, editing
+          # integration-test-command would inherit the previous command's verdict.
+          #
+          # The SHARD COUNT is deliberately absent. A lane-level verdict says
+          # "every test this lane selects for this tree passed", and that is true
+          # however the set was sliced — so a plan that sizes 2 today must still
+          # be answerable by a run that sized 4 yesterday. Including the count
+          # would make the skip miss on precisely the pushes it exists for.
+          LANE_NODE: ${{ inputs.node-version }}
+          LANE_PRE: ${{ inputs.pre-test-command }}
+          LANE_CMD: ${{ inputs.integration-test-command }}
+        run: |
+          set -o pipefail
+          # NOT `set -e`: every failure here must fall through to an empty
+          # fingerprint, which disables the lookup and runs the lane. An
+          # optimisation that cannot answer must answer "run it".
+          fp="$(bash -c "$FP_CMD")" || fp=""
+          fp="$(printf '%s' "$fp" | tr -d '[:space:]')"
+          if ! printf '%s' "$fp" | grep -Eq '^[0-9a-f]{32,128}$'; then
+            echo "::warning::integration-fingerprint-command produced no usable hash — running the lane."
+            echo "value=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          lane="$(printf '%s\0%s\0%s\0%s' \
+            "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" "$FP_CMD" \
+            | sha256sum | cut -c1-16)"
+          echo "value=${lane}-${fp}" >> "$GITHUB_OUTPUT"
+          echo "integration lane verdict key: ${lane}-${fp}"
+
+      # `lookup-only` — the entry's EXISTENCE is the whole message, so nothing is
+      # downloaded. No `restore-keys`: a prefix match would answer for a
+      # DIFFERENT tree, which is the one mistake this must not make.
+      - name: Look up a recorded lane verdict
+        id: verdict
+        if: ${{ steps.fingerprint.outputs.value != '' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: .integration-lane-verdict
+          key: integration-lane-${{ steps.fingerprint.outputs.value }}
+          lookup-only: true
+
       - name: Compute the shard list
         id: plan
         shell: bash
@@ -1115,6 +1374,11 @@ jobs:
           # empty the matrix of the one run whose whole purpose is to miss
           # nothing. Sizing is an optimisation; the safety net is not.
           PLAN_CMD: ${{ github.event_name == 'pull_request' && inputs.integration-plan-command || '' }}
+          # A recorded LANE verdict for this exact tree: every test this lane
+          # selects has already passed it, so there is no work and no job needs
+          # to exist. Read here rather than inside a shard because a step inside
+          # the matrix cannot stop the matrix — see the lookup above.
+          VERDICT_HIT: ${{ steps.verdict.outputs.cache-hit }}
         run: |
           set -uo pipefail
           # Clamp rather than trust: a bad INPUT must never reach the matrix.
@@ -1147,8 +1411,24 @@ jobs:
           # one, and it is the `count` guard on integration-tests — never the
           # matrix — that performs the skip. See unit-plan for the reasoning and
           # for the run that measured what an empty matrix really does.
+          # A reused verdict empties the matrix, and the ORDER matters: this runs
+          # after the plan has sized the lane, so the log still records what the
+          # diff WOULD have cost. It is also deliberately last, so a plan that
+          # already answered 0 keeps its own, more specific, reason.
+          if [ "$VERDICT_HIT" = "true" ]; then
+            echo "::notice::integration lane: this tree is byte-identical, in every path that can affect a test, to one an earlier PASSING run of this lane already covered. No shard will run."
+            {
+              echo "### Integration Tests — reused an earlier verdict"
+              echo
+              echo "No counted file differs from a tree this lane has already passed on,"
+              echo "so no shard was created. Change any counted file and the lane runs again."
+            } >> "$GITHUB_STEP_SUMMARY"
+            COUNT=0
+          fi
           if [ "$COUNT" -eq 0 ]; then
-            echo "::notice::integration lane: the plan command reports no work for this diff — no shard will run."
+            if [ "$VERDICT_HIT" != "true" ]; then
+              echo "::notice::integration lane: the plan command reports no work for this diff — no shard will run."
+            fi
             echo "shards=[]" >> "$GITHUB_OUTPUT"
           else
             echo "shards=$(seq "$COUNT" | jq -cRn '[inputs | tonumber]')" >> "$GITHUB_OUTPUT"
@@ -1377,3 +1657,43 @@ jobs:
           reports: junit-signal
           lane: integration
           bypass-label: ${{ inputs.allow-zero-tests-label }}
+
+  # ── Record the lane's verdict, and ONLY a passing one ────────────────────────
+  # The integration twin of `unit-verdict` above, and the argument is identical:
+  # the claim is LANE-level, so it is made after the matrix and after the signal
+  # job, by a run that earned it rather than by one reusing it. See that job.
+  integration-verdict:
+    name: Integration Verdict
+    runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 10
+    needs: [integration-plan, integration-tests, integration-signal]
+    if: >-
+      ${{ !cancelled()
+          && github.event_name == 'pull_request'
+          && needs.integration-plan.outputs.fingerprint != ''
+          && needs.integration-tests.result == 'success'
+          && needs.integration-signal.result != 'failure'
+          && needs.integration-signal.result != 'cancelled' }}
+    steps:
+      - name: Note what passed
+        shell: bash
+        env:
+          VERDICT_KEY: integration-lane-${{ needs.integration-plan.outputs.fingerprint }}
+          SHARDS: ${{ needs.integration-plan.outputs.count }}
+        run: |
+          set -euo pipefail
+          mkdir -p .integration-lane-verdict
+          {
+            echo "commit=$GITHUB_SHA"
+            echo "run=$GITHUB_RUN_ID attempt=$GITHUB_RUN_ATTEMPT"
+            echo "shards=$SHARDS"
+            echo "key=$VERDICT_KEY"
+          } > .integration-lane-verdict/passed
+
+      - name: Save the lane verdict
+        uses: actions/cache/save@v4
+        with:
+          path: .integration-lane-verdict
+          key: integration-lane-${{ needs.integration-plan.outputs.fingerprint }}
