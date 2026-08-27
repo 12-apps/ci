@@ -13,6 +13,13 @@ on:
   pull_request:
     paths:
       - '.github/actions/**'
+      # The docs and the major declaration are asserted here too (FUT-956), so
+      # an edit to either has to run those assertions. Same rule the comment
+      # below records for the workflow files: a gate filtered out of the edits
+      # it exists to catch is a gate that stops running, and a gate that stops
+      # running is never red.
+      - '**.md'
+      - '.github/majors.json'
       # The workflow FILES' own shape is tested here too, and those tests are
       # worthless if editing the file under test does not run them. This lane
       # was filtered to `.github/actions/**` while asserting things about
@@ -29,6 +36,8 @@ on:
       - '.github/actions/**'
       - '.github/workflows/**'
       - 'scripts/ephemeral/**'
+      - '**.md'
+      - '.github/majors.json'
 
 permissions:
   contents: read
@@ -100,6 +109,23 @@ jobs:
       - name: Matrix zero guard
         shell: bash
         run: node --test .github/workflows/__tests__/matrix-zero-guard.test.mjs
+
+      # The pin a reader copies, against the major this repo actually supports.
+      #
+      # These drifted apart and nothing compared them: README.md said `@v2` in
+      # ten places while CONSUMING.md said `@v1` in twenty, so a consumer's pin
+      # depended on which page they opened. Harmless only while the two tags are
+      # the same commit — which they were, because release-major-tag.yml dragged
+      # `v1` along behind every v2 release. The moment a breaking change lands,
+      # `v1` freezes, `v2` keeps moving, and a consumer split across the two runs
+      # two engine versions with nothing reporting it.
+      #
+      # Green in both wrong directions without this: the docs cannot be red, and
+      # a tag that quietly stopped being the one anybody releases on cannot
+      # either.
+      - name: Documented major pins
+        shell: bash
+        run: node --test .github/workflows/__tests__/major-pin-refs.test.mjs
 
       # Every job these workflows DEFINE is bounded by `timeout-minutes`.
       #

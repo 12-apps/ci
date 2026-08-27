@@ -73,10 +73,10 @@ sound when something unconditional runs afterwards.
 ## Usage
 
 ```yaml
-- uses: 12-apps/ci/.github/actions/fetch-base@v1
+- uses: 12-apps/ci/.github/actions/fetch-base@v2
 
 - id: plan
-  uses: 12-apps/ci/.github/actions/affected-plan@v1
+  uses: 12-apps/ci/.github/actions/affected-plan@v2
   with:
     lane: unit
     base: FETCH_HEAD
