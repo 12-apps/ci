@@ -129,23 +129,15 @@ runs:
             echo
             echo "<details><summary>Selected tests</summary>"
             echo
-            # Sliced IN jq rather than piped through `head`.
-            #
-            # This step runs under `set -euo pipefail`, and `head -100` closes
-            # the pipe as soon as it has its hundred lines — so jq is killed by
-            # SIGPIPE, exits 141, and `pipefail` fails the whole step. The plan
-            # itself had already been computed and written correctly; only the
-            # summary blew up. So the action failed on exactly the runs with the
-            # most to report, and every lane gated on it was skipped.
-            #
-            # Slicing needs no second process, so there is no pipe to break, and
-            # the truncation stops being incidental: the count below says what
-            # was left out rather than the list simply stopping at 100.
+            # Sliced INSIDE jq, never `| head`. Under `set -o pipefail` head
+            # closes the pipe after 100 lines, jq dies with EPIPE, and the step
+            # exits non-zero — so a lane selecting more than 100 files failed
+            # its plan job while its own log read as a success. The plan was
+            # computed correctly by then; only the summary killed it.
             jq -r '.tests[:100][] | "- `\(.)`"' "$PLAN"
-            omitted="$(jq -r '[(.tests | length) - 100, 0] | max' "$PLAN")"
-            if [ "$omitted" -gt 0 ]; then
+            if [ "$(jq -r '.tests | length' "$PLAN")" -gt 100 ]; then
               echo
-              echo "_… and ${omitted} more not listed._"
+              echo "_… and $(( $(jq -r '.tests | length' "$PLAN") - 100 )) more._"
             fi
             echo
             echo "</details>"

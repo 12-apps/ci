@@ -84,7 +84,7 @@ jobs:
         run: |
           IP=$(curl -sk "https://api.digitalocean.com/v2/droplets?name=$DROPLET_NAME" \
             -H "Authorization: Bearer $DO_API_TOKEN" \
-            | jq -r '.droplets[0].networks.v4[] | select(.type=="public") | .ip_address' | head -1)
+            | jq -r 'first(.droplets[0].networks.v4[] | select(.type=="public") | .ip_address)')
           {
             echo "## Droplet provisioned 🚀"
             echo ""
