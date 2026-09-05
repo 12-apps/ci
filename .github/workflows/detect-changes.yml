@@ -335,7 +335,7 @@ jobs:
         # Skipped on a stacked pull request — the step above did it with a base
         # dorny would have ignored.
         if: ${{ !inputs.force-all && steps.base.outputs.from-stack != 'true' }}
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
         with:
           filters: ${{ inputs.path-filters }}
           base: ${{ steps.base.outputs.value }}

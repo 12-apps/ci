@@ -413,6 +413,17 @@ on:
         required: false
         default: 60
 
+# Least-privilege, enforced at the source: every job here checks out the repo,
+# installs, and runs tests or a build. None of them writes anything back to
+# GitHub, so read access to the contents is the whole requirement.
+#
+# Capping at the workflow level means a consumer that grants more in a combined
+# CI file cannot leak that privilege into this reusable workflow — the effective
+# grant is the intersection. Until now this file declared nothing, so it ran at
+# whatever the caller happened to grant.
+permissions:
+  contents: read
+
 # Authenticate npm installs for consumers with RESTRICTED packages. Workflow-
 # level so every `pnpm install` in this file sees it; the consumer's .npmrc is
 # what turns the variable into a registry credential (see the NPM_TOKEN secret
@@ -788,7 +799,7 @@ jobs:
             echo "so the suite was not re-run."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         if: ${{ steps.verdict.outputs.cache-hit != 'true' }}
         with:
           run_install: false
@@ -1144,7 +1155,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           run_install: false
 
@@ -1460,7 +1471,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           run_install: false
 

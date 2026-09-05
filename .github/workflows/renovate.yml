@@ -1,0 +1,132 @@
+name: Renovate
+
+# Keeps the SHA-pinned third-party actions moving.
+#
+# The pins exist because a mutable tag on a credential-handling action lets the
+# publisher retarget it at code nobody here reviewed — and from the shared
+# engine that reaches every consumer at once. But a pin nothing maintains is
+# just a freeze with better manners: it stops tracking upstream fixes, including
+# the security ones the pin was taken out for. `renovate.json` scopes this run
+# to exactly the six pinned actions, which arrive as ONE grouped PR whose own CI
+# run is the evidence the bump is safe.
+#
+# Renovate rewrites the SHA and the trailing `# vX.Y.Z` comment together, so the
+# comment cannot drift away from the commit it names.
+#
+# TOKEN REQUIREMENT — read before wondering why no PR appears:
+#   A PR authored with this workflow's own GITHUB_TOKEN triggers NO
+#   pull_request workflows (GitHub's recursion guard), so the bump would arrive
+#   with ZERO check runs — and an unverified bump of a credential-handling
+#   action is strictly worse than a stale one. So this job requires a
+#   `RENOVATE_TOKEN` repo secret: a fine-grained PAT or GitHub App installation
+#   token with, on this repository, Contents: write, Pull requests: write and
+#   Commit statuses: read.
+#
+#   Until that secret exists the job stands down GREEN, with a warning naming
+#   the remedy. A red job on every scheduled run is how people learn to ignore
+#   CI, and "not set up yet" is not a failure.
+#
+#   Commit statuses is the one that is easy to miss and fails LATE. Renovate
+#   reads a bump branch's commit statuses before deciding whether to re-open a
+#   PR for a branch that has none. Missing, that call 403s AFTER the branch is
+#   pushed: the bump exists on origin, no PR is ever opened, and the run is
+#   green. It is preflighted below rather than discovered on whichever morning
+#   somebody closes a bump PR unmerged. (Measured in the consumer repo, where
+#   this cost five months of silently stranded bumps.)
+on:
+  schedule:
+    # Monday mornings UTC. These six actions release on the order of weeks, and
+    # a grouped PR that lands more often than it is reviewed is noise.
+    - cron: "30 7 * * 1"
+  workflow_dispatch: {}
+
+# Renovate itself authenticates with RENOVATE_TOKEN, not with this token. What
+# GITHUB_TOKEN is used for here is the preflight probe below, which reads this
+# repository's own commit statuses.
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: renovate
+
+jobs:
+  renovate:
+    name: Open/refresh the pinned-actions bump PR
+    runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to GitHub's six-hour
+    # default; see job-timeouts.test.mjs. Generous on purpose: this bounds a
+    # hang, not a slow run.
+    timeout-minutes: 30
+    steps:
+      # Everything Renovate needs, checked BEFORE it runs, so a credential that
+      # is present-but-insufficient is a red run carrying its own fix rather
+      # than a WARN in the tail of a green one.
+      - name: Preflight the credentials Renovate needs
+        id: preflight
+        env:
+          RENOVATE_TOKEN: ${{ secrets.RENOVATE_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${RENOVATE_TOKEN}" ]; then
+            echo "::warning title=RENOVATE_TOKEN not configured::The pinned third-party actions cannot be bumped without it (a GITHUB_TOKEN-authored PR would get zero check runs, and an unverified bump of a credential-handling action is worse than a stale one). Add a RENOVATE_TOKEN repo secret — fine-grained PAT with Contents: write, Pull requests: write and Commit statuses: read on this repo — and the next run takes it from there. Exiting green; see the header comment in .github/workflows/renovate.yml."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
+          # Probing the endpoint is the only honest test — a PAT does not expose
+          # its own permission set to itself.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${RENOVATE_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/statuses")
+
+          # Any non-200 is a failure, not just the under-scoped ones. 403 is
+          # "token lacks the scope" and 404 is "token cannot see the repo", but
+          # 401 is "token is expired or revoked" — which is exactly the
+          # present-but-useless credential this preflight exists to catch, and
+          # treating everything-but-403/404 as OK let it through to fail late.
+          if [ "$code" != "200" ]; then
+            echo "::error title=RENOVATE_TOKEN cannot read commit statuses::GET /repos/${GITHUB_REPOSITORY}/commits/<sha>/statuses returned ${code} (401 = expired or revoked, 403 = missing scope, 404 = repo not visible to this token). Renovate reads a bump branch's commit statuses before it opens the PR, so with this call failing it pushes the branch and then throws — a green run that opens nothing. Fix: the fine-grained PAT behind the RENOVATE_TOKEN secret needs Contents: write, Pull requests: write and Commit statuses: read on this repository."
+            exit 1
+          fi
+
+          echo "Preflight OK (statuses endpoint returned ${code})."
+
+      - name: Set up Node
+        if: steps.preflight.outputs.configured == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # `npx renovate@<major>` rather than renovatebot/github-action, matching
+      # the consumer repo's job. It also keeps this PR honest: adding a seventh
+      # third-party action — one that takes RENOVATE_TOKEN — to the change whose
+      # entire subject is narrowing third-party action trust would be an odd
+      # trade. There is no lockfile in this repo, so unlike the consumer's job
+      # this one needs no pnpm and no npm credential.
+      - name: Run self-hosted Renovate
+        if: steps.preflight.outputs.configured == 'true'
+        env:
+          RENOVATE_TOKEN: ${{ secrets.RENOVATE_TOKEN }}
+          # Read-only fallback for changelog/release-notes fetching, so the
+          # grouped PR's body links what actually changed between two SHAs —
+          # which is the whole reviewable content of a pin bump.
+          GITHUB_COM_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RENOVATE_REPOSITORIES: ${{ github.repository }}
+          # The committed renovate.json is the single source of truth for scope.
+          RENOVATE_ONBOARDING: "false"
+          RENOVATE_REQUIRE_CONFIG: "required"
+          LOG_LEVEL: info
+        # Pinned to the CURRENT major. npm marks every older renovate major
+        # deprecated ("versions older than the latest major are unsupported"),
+        # and a workflow whose whole argument is that a pin nothing maintains
+        # becomes a freeze should not itself sit three unsupported majors back.
+        # Renovate cannot bump this line for us — `enabledManagers` is
+        # github-actions only — so it is a hand-managed number, noted here so
+        # the next person knows it is theirs to move. 44.x needs Node ^24.11,
+        # which the setup-node step above provides.
+        run: npx --yes renovate@44

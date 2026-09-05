@@ -48,6 +48,25 @@ on:
         required: false
         default: main
 
+# Least-privilege, enforced at the source. Two scopes, both read-only:
+#   - contents: the droplet shallow-syncs the consumer's repo for its compose
+#     file and nginx config, using GITHUB_TOKEN as the clone credential.
+#   - packages: the same token is what the box logs in to GHCR with, and the
+#     images it pulls are private. Dropping this scope does not fail the job —
+#     it 403s the `docker compose pull` on the far side of an ssh session.
+# Read, not write: this adapter only ever PULLS images. Building and pushing
+# them is cd.yml's build-images job, which holds `packages: write` itself.
+# `trigger-post-cd` declares its own `actions: write` for the same reason as in
+# the Cloudflare adapter.
+#
+# Capping at the workflow level means a consumer that grants more in a combined
+# CI file cannot leak that privilege into this reusable workflow — the effective
+# grant is the intersection. Until now this file declared nothing, so it ran at
+# whatever the caller happened to grant.
+permissions:
+  contents: read
+  packages: read
+
 jobs:
   provision:
     name: Provision droplet
@@ -152,32 +171,65 @@ jobs:
           fi
       - name: Guard — DEPLOY_HOST must be set
         if: steps.supersede.outputs.skip != 'true'
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
         run: |
-          if [ -z "${{ vars.DEPLOY_HOST }}" ]; then
+          if [ -z "$DEPLOY_HOST" ]; then
             echo "::error::DEPLOY_HOST variable is not set. Run cd.yml with action=provision (target=digitalocean) first, then add the DEPLOY_HOST repo variable."
             exit 1
           fi
       - name: Setup SSH key
         if: steps.supersede.outputs.skip != 'true'
+        # Through `env:` rather than interpolated into the script body. An
+        # expression is pasted in as TEXT before bash sees the line, so a value
+        # containing a quote or a newline is parsed as script; read from the
+        # environment it is only ever data. `printf '%s'` rather than `echo` for
+        # the same reason — echo mangles a value that starts with `-`.
+        env:
+          DO_SSH_PRIVATE_KEY_B64: ${{ secrets.DO_SSH_PRIVATE_KEY_B64 }}
         run: |
-          echo "${{ secrets.DO_SSH_PRIVATE_KEY_B64 }}" | tr -d ' \n\r\t' | base64 -d > /tmp/do_key
+          printf '%s' "$DO_SSH_PRIVATE_KEY_B64" | tr -d ' \n\r\t' | base64 -d > /tmp/do_key
           chmod 600 /tmp/do_key
       - name: Pull prebuilt images and (re)start over SSH
         if: steps.supersede.outputs.skip != 'true'
+        # Every value the remote script needs arrives through `env:` and is then
+        # written onto that script's OWN stdin as a variable assignment. It used
+        # to be passed positionally to `ssh … 'bash -s' -- "$TOKEN" …`, and a
+        # positional argument lands in the remote host's process argument list:
+        # readable by any local user through `ps` for the life of the session,
+        # and captured by anything on the box that samples the process table.
+        # The design goal the block below states — no secret-bearing .env is
+        # written to the droplet — held, but the tokens still reached the box by
+        # a route that logged them.
+        #
+        # Stdin is the right channel precisely because this whole script already
+        # IS the remote stdin: `bash -s` reads its program from there, so the
+        # assignments are simply the first lines of that program. They never
+        # appear in argv, in the environment of any other process, or on disk.
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_NS: ${{ inputs.image_namespace }}
+          REPO_HTTPS: ${{ github.server_url }}/${{ github.repository }}.git
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
         run: |
-          ssh -i /tmp/do_key -o StrictHostKeyChecking=no -o LogLevel=ERROR \
-            root@${{ vars.DEPLOY_HOST }} 'bash -s' -- \
-            "${{ secrets.GITHUB_TOKEN }}" \
-            "${{ github.actor }}" \
-            "${{ inputs.image_tag }}" \
-            "${{ inputs.image_namespace }}" \
-            "${{ github.server_url }}/${{ github.repository }}.git" \
-            "${{ secrets.DOPPLER_TOKEN }}" <<'REMOTE'
+          # `%q` shell-quotes each value, so a token containing whitespace or a
+          # quote is still one assignment on the far side rather than a syntax
+          # error — or an injection. An unset IMAGE_NS/DOPPLER_TOKEN becomes a
+          # literal '' here, which is what the guards below already expect.
+          {
+            printf 'GH_TOKEN=%q\n'      "$GH_TOKEN"
+            printf 'GH_ACTOR=%q\n'      "$GH_ACTOR"
+            printf 'IMAGE_TAG=%q\n'     "$IMAGE_TAG"
+            printf 'IMAGE_NS=%q\n'      "$IMAGE_NS"
+            printf 'REPO_HTTPS=%q\n'    "$REPO_HTTPS"
+            printf 'DOPPLER_TOKEN=%q\n' "$DOPPLER_TOKEN"
+            cat <<'REMOTE'
           set -euo pipefail
-          # DOPPLER_TOKEN is the only optional trailing arg (ssh drops it if unset
-          # → default-expand). Every secret comes from the Doppler config, so no
-          # other credential needs to be passed to the box.
-          GH_TOKEN="$1"; GH_ACTOR="$2"; IMAGE_TAG="$3"; IMAGE_NS="${4:-}"; REPO_HTTPS="$5"; DOPPLER_TOKEN="${6:-}"
+          # Every secret comes from the Doppler config, so no credential beyond
+          # DOPPLER_TOKEN itself needs to reach the box.
           if [ -z "$DOPPLER_TOKEN" ]; then
             echo "::error::DOPPLER_TOKEN secret is required — this adapter injects all secrets from the Doppler config." >&2
             exit 1
@@ -307,14 +359,19 @@ jobs:
             fi
           fi
           REMOTE
+          } | ssh -i /tmp/do_key -o StrictHostKeyChecking=no -o LogLevel=ERROR \
+                root@"$DEPLOY_HOST" 'bash -s'
       - name: Summary
         if: steps.supersede.outputs.skip != 'true'
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
         run: |
           {
             echo "## Redeployed ✅"
             echo ""
-            echo "**Image tag:** \`${{ inputs.image_tag }}\`"
-            echo "**URL:** http://${{ vars.DEPLOY_HOST }}/"
+            echo "**Image tag:** \`${IMAGE_TAG}\`"
+            echo "**URL:** http://${DEPLOY_HOST}/"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # Smoke/integration/e2e against the live droplet (parity with the Cloudflare

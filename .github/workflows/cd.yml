@@ -72,6 +72,20 @@ on:
         required: false
         default: ''
 
+# Least-privilege, enforced at the source, and this file is the one place the
+# default has to be the FLOOR rather than the ceiling: three of its jobs need a
+# write scope and two of them hand their grant to a nested reusable workflow.
+# So the workflow-level default is the read-only minimum, and every job that
+# needs more declares it — including the two vendor-adapter call jobs, whose
+# block is what the called workflow is capped by (see the note on each).
+#
+# Capping at the workflow level means a consumer that grants more in a combined
+# CI file cannot leak that privilege into this reusable workflow — the effective
+# grant is the intersection. Until now this file declared nothing, so it ran at
+# whatever the caller happened to grant.
+permissions:
+  contents: read
+
 jobs:
   # ---------------------------------------------------------------------------
   # Discover deploy targets from the caller's descriptors → build/deploy matrices,
@@ -178,9 +192,9 @@ jobs:
         include: ${{ fromJson(needs.discover.outputs.build_images) }}
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -200,7 +214,7 @@ jobs:
       # and every Dockerfile that does not ask for the secret ignores it
       # entirely. Nothing about a particular consumer's app is encoded here.
       - name: Build & push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -252,7 +266,7 @@ jobs:
       packages: write
     steps:
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -280,6 +294,15 @@ jobs:
   build-static:
     name: Build static · ${{ matrix.app }}
     needs: discover
+    # `packages: read` because this job runs the CONSUMER's install and then the
+    # consumer's build command, and a consumer whose install resolves private
+    # GitHub Packages needs it. It used to inherit whatever the caller granted
+    # (future-pay grants `packages: write`), so declaring nothing here would take
+    # the scope away and 404 that install inside a DEPLOY. Read, not write:
+    # nothing here publishes.
+    permissions:
+      contents: read
+      packages: read
     if: needs.discover.outputs.has_statics == 'true'
     runs-on: ubuntu-latest
     # Bound so a HANG fails in minutes instead of running to
@@ -295,7 +318,7 @@ jobs:
         include: ${{ fromJson(needs.discover.outputs.statics) }}
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -343,6 +366,19 @@ jobs:
       (needs.discover.outputs.has_images == 'true' || inputs.action == 'destroy') &&
       (github.event_name == 'push' ||
         inputs.target == 'all' || inputs.target == 'digitalocean')
+    # The grant handed to the CALLED workflow — a nested reusable workflow is
+    # capped by the calling job, so this block is deploy-digitalocean.yml's
+    # ceiling and has to cover every scope its jobs declare:
+    #   - contents: read   — the droplet shallow-syncs the repo over GITHUB_TOKEN
+    #   - packages: read   — the same token logs the box in to GHCR to PULL the
+    #                        private images; build/push privilege stays above.
+    #   - actions:  write  — its trigger-post-cd dispatches post-cd.yml
+    # Without this block the job would inherit the workflow default above and cap
+    # the adapter at `contents: read`, which 403s the image pull and the dispatch.
+    permissions:
+      contents: read
+      packages: read
+      actions: write
     uses: 12-apps/ci/.github/workflows/deploy-digitalocean.yml@v2
     with:
       action: ${{ inputs.action }}
@@ -366,6 +402,14 @@ jobs:
       (needs.discover.outputs.has_statics == 'true' || needs.discover.outputs.has_workers == 'true') &&
       (github.event_name == 'push' ||
         ((inputs.target == 'all' || inputs.target == 'cloudflare') && inputs.action == 'deploy'))
+    # The grant handed to the CALLED workflow — see the note on `digitalocean`.
+    # `packages: read` is for the adapter's worker build, which runs the
+    # consumer's `pnpm install`; wrangler itself authenticates to Cloudflare with
+    # its own API token, and the only GitHub WRITE here is the post-cd dispatch.
+    permissions:
+      contents: read
+      packages: read
+      actions: write
     uses: 12-apps/ci/.github/workflows/deploy-cloudflare.yml@v2
     with:
       statics: ${{ needs.discover.outputs.statics }}

@@ -20,6 +20,10 @@ on:
       # running is never red.
       - '**.md'
       - '.github/majors.json'
+      # Renovate's scope decides which pins keep moving, and a pin that stops
+      # moving is a freeze — the exact failure the pinning was taken out to
+      # avoid. Without this line an edit to renovate.json runs no test at all.
+      - 'renovate.json'
       # The workflow FILES' own shape is tested here too, and those tests are
       # worthless if editing the file under test does not run them. This lane
       # was filtered to `.github/actions/**` while asserting things about
@@ -38,6 +42,7 @@ on:
       - 'scripts/ephemeral/**'
       - '**.md'
       - '.github/majors.json'
+      - 'renovate.json'
 
 permissions:
   contents: read
@@ -137,6 +142,32 @@ jobs:
       - name: Job timeouts
         shell: bash
         run: node --test .github/workflows/__tests__/job-timeouts.test.mjs
+
+      # Every workflow here declares a top-level `permissions:` block, and every
+      # nested reusable call declares its own.
+      #
+      # Same reason as the timeouts above: a CONSUMER cannot fix this. A reusable
+      # workflow with no block runs at whatever the caller's job grants, so the
+      # gap is invisible from the consuming repo (its own call looks correctly
+      # pinned) and invisible here (nothing is red). Eleven workflows declared a
+      # block and six did not, and the six were the test lanes and both deploy
+      # adapters. A workflow added without one is now red before it ships.
+      - name: Workflow permissions
+        shell: bash
+        run: node --test .github/workflows/__tests__/workflow-permissions.test.mjs
+
+      # No run: script pastes a secret — or an attacker-writable context — into
+      # its own source.
+      #
+      # The failure this catches is not a broken run; it is a working one that
+      # leaks. deploy-digitalocean.yml passed two tokens positionally to
+      # `ssh … 'bash -s' --`, which put them in the REMOTE host's process table
+      # for the life of the session, while the block's own comment correctly
+      # stated that no secret-bearing .env was written. Both were true. Nothing
+      # about it was ever red.
+      - name: Run-body interpolation
+        shell: bash
+        run: node --test .github/workflows/__tests__/run-body-interpolation.test.mjs
 
       # The retry gate's hold on lint/type-check/actionlint.
       #

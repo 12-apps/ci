@@ -274,6 +274,28 @@ on:
           Never empty — falls back to `[]`.
         value: ${{ jobs.changes.outputs.scripts }}
 
+# Least-privilege, enforced at the source: the default is the read-only floor,
+# and the two jobs that need more declare it themselves.
+#
+#   - `changes` adds `pull-requests: read` — dorny/paths-filter reads the PR's
+#     file list from the API on a pull_request event, and without it the filter
+#     sees nothing and every downstream lane is selected off an empty change set.
+#   - `retry-gate` adds `actions: read` to reach the previous run's ledger.
+#
+# Deliberately NOT both at workflow level. `lint`, `type-check` and `actionlint`
+# run `pnpm install` over the CONSUMER's dependency tree and then a
+# consumer-supplied command; handing those a token that can read private pull
+# request bodies and diffs is the opposite of what this file is for. A job block
+# REPLACES this one rather than adding to it, so each scope stays on the single
+# job that uses it.
+#
+# Note for callers: a caller must grant a SUPERSET of every scope declared
+# anywhere in here — job blocks included — or GitHub rejects the run at startup.
+# So a caller of this workflow needs contents + pull-requests + actions, which is
+# what CONSUMING.md documents.
+permissions:
+  contents: read
+
 # Authenticate npm installs for consumers with RESTRICTED packages. Workflow-
 # level so every `pnpm install` in this file sees it; the consumer's .npmrc is
 # what turns the variable into a registry credential (see the NPM_TOKEN secret
@@ -294,6 +316,13 @@ env:
 
 jobs:
   changes:
+    # `pull-requests: read` is for dorny/paths-filter, which reads the PR's file
+    # list from the API rather than from the checkout. Without it the filter
+    # returns nothing and every downstream lane is selected off an empty change
+    # set — green, fast, and testing nothing.
+    permissions:
+      contents: read
+      pull-requests: read
     name: Detect Changes
     runs-on: ubuntu-latest
     # Bound so a HANG fails in minutes instead of running to
@@ -509,7 +538,7 @@ jobs:
             >> "$GITHUB_OUTPUT"
 
       - name: Check for code changes
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
         id: filter
         # Skipped on a stacked pull request — the step above did it with a base
         # dorny would have ignored.
@@ -590,7 +619,7 @@ jobs:
           mode: probe
           quarantine-file: ${{ inputs.retry-gate-quarantine-file }}
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         if: ${{ steps.ledger.outputs.any == 'true' }}
         with:
           run_install: false
@@ -649,7 +678,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           run_install: false
 
@@ -752,7 +781,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           run_install: false
 

@@ -270,7 +270,7 @@ jobs:
         with:
           # Full history: several gates diff the branch against its merge base.
           fetch-depth: 0
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           run_install: false
       - uses: actions/setup-node@v4
@@ -1112,7 +1112,7 @@ jobs:
         with:
           # Full history so the selector can diff the branch against its base.
           fetch-depth: 0
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           run_install: false
       - uses: actions/setup-node@v4
@@ -1258,7 +1258,7 @@ jobs:
             echo "any=false" >> "$GITHUB_OUTPUT"
             echo "no e2e specs changed vs base — skipping toolchain setup and reliability run."
           fi
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         if: ${{ steps.changed-specs.outputs.any == 'true' }}
         with:
           run_install: false
