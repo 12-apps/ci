@@ -176,7 +176,7 @@ MAX_ATTEMPTS=60
 ATTEMPT=0
 
 while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-    if ssh -i "$SSH_KEY_FILE" -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes root@$SERVER_IP "echo ready" 2>/dev/null; then
+    if ssh -i "$SSH_KEY_FILE" -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=10 root@$SERVER_IP "echo ready" 2>/dev/null; then
         echo "SSH is ready!"
         break
     fi
@@ -193,7 +193,7 @@ fi
 echo "Waiting for cloud-init to complete..."
 
 for i in {1..30}; do
-    if ssh -i "$SSH_KEY_FILE" -o StrictHostKeyChecking=no -o BatchMode=yes root@$SERVER_IP "test -f /tmp/cloud-init-done" 2>/dev/null; then
+    if ssh -i "$SSH_KEY_FILE" -o StrictHostKeyChecking=no -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=10 root@$SERVER_IP "test -f /tmp/cloud-init-done" 2>/dev/null; then
         echo "Cloud-init complete!"
         break
     fi

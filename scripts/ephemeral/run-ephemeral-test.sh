@@ -81,12 +81,12 @@ trap cleanup EXIT
 # Helper for remote execution (uses SSH key)
 remote_exec() {
     local ip=$(jq -r '.ip' "$SERVER_INFO_FILE")
-    ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -i "$SSH_KEY_FILE" root@$ip "$@"
+    ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i "$SSH_KEY_FILE" root@$ip "$@"
 }
 
 remote_exec_quiet() {
     local ip=$(jq -r '.ip' "$SERVER_INFO_FILE")
-    ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o BatchMode=yes -i "$SSH_KEY_FILE" root@$ip "$@" 2>/dev/null
+    ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i "$SSH_KEY_FILE" root@$ip "$@" 2>/dev/null
 }
 
 # ============================================================

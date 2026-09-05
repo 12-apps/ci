@@ -36,8 +36,8 @@ echo ""
 
 if [ -n "$1" ]; then
     # Run command
-    ssh -i "$SSH_KEY_FILE" -o StrictHostKeyChecking=no root@$SERVER_IP "$@"
+    ssh -i "$SSH_KEY_FILE" -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 root@$SERVER_IP "$@"
 else
     # Interactive session
-    ssh -i "$SSH_KEY_FILE" -o StrictHostKeyChecking=no root@$SERVER_IP
+    ssh -i "$SSH_KEY_FILE" -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 root@$SERVER_IP
 fi
