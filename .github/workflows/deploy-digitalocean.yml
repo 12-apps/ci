@@ -359,7 +359,30 @@ jobs:
             fi
           fi
           REMOTE
+          # KEEPALIVE, and it is the whole reason this step stopped dying.
+          #
+          # The entire deploy — pull, rollout, healthcheck wait, demo seed —
+          # rides one ssh session, and long stretches of it produce no output.
+          # Without `ServerAliveInterval` nothing travels the connection during
+          # those stretches, something in the path reaps it as idle, and the
+          # step dies on `client_loop: send disconnect: Broken pipe`, exit 255,
+          # after a deploy that had usually already succeeded.
+          #
+          # Measured across four failures in 12-apps/future-pay, each one the
+          # same error preceded by silence: 265s and 269s (both mid demo-seed),
+          # and 307s in the gap between the last image pull and the rollout.
+          #
+          # That last one is why this belongs HERE rather than in the remote
+          # script. Three consumer-side fixes answered the first two by making
+          # `demo:reset` chatter — a timer, then a worker thread, then an
+          # EAGAIN-tolerant writer. Each was correct and none generalised: they
+          # keep ONE phase noisy, so the drop simply moved to the next silent
+          # phase. The transport is the only layer that covers all of them.
+          #
+          # 30s × 10 also keeps failure detection honest: a genuinely dead peer
+          # is dropped after ~5 minutes rather than held to the job's 45.
           } | ssh -i /tmp/do_key -o StrictHostKeyChecking=no -o LogLevel=ERROR \
+                -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
                 root@"$DEPLOY_HOST" 'bash -s'
       - name: Summary
         if: steps.supersede.outputs.skip != 'true'

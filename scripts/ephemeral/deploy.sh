@@ -211,7 +211,7 @@ trap cleanup EXIT
 # Remote execution helper
 remote_exec() {
     local ip=$(jq -r '.ip' "$SERVER_INFO_FILE")
-    ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -i "$SSH_KEY_FILE" root@$ip "$@"
+    ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i "$SSH_KEY_FILE" root@$ip "$@"
 }
 
 # ============================================================

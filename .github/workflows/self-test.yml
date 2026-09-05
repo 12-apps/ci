@@ -110,6 +110,19 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/reusable-workflow-refs.test.mjs
 
+      # Every ssh invocation carries a keepalive.
+      #
+      # A deploy holds one ssh session across pull, rollout and fixture seed,
+      # and goes quiet for minutes at a time inside it. Without
+      # `ServerAliveInterval` the idle connection is reaped and the step dies
+      # on a broken pipe — four times in a consumer, three of them answered by
+      # making one phase of the REMOTE script chatter, which only moved the
+      # silence somewhere else. This is the transport-level rule those fixes
+      # kept missing, and it is one option a new ssh line gets copied without.
+      - name: SSH keepalive
+        shell: bash
+        run: node --test .github/workflows/__tests__/ssh-keepalive.test.mjs
+
       # The zero-shard guard on every matrix job built from a plan output.
       - name: Matrix zero guard
         shell: bash
