@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Deploy app descriptor (apps/*/deploy/config.json)",
-  "description": "Declares how one app deploys: a name + one or more vendor targets. Discovered by scripts/deploy/discover.sh.",
+  "description": "Declares how one app deploys: a name + one or more vendor targets. Discovered by this engine's discover action (12-apps/ci: scripts/deploy/discover.sh).",
   "type": "object",
   "additionalProperties": false,
   "required": ["name", "targets"],
