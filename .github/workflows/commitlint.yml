@@ -57,6 +57,18 @@ on:
         required: false
         default: false
 
+# Least-privilege, enforced at the source: the one job here checks out the repo
+# and runs commitlint over a commit range. The PR TITLE it also lints arrives in
+# the event payload (`github.event.pull_request.title`), not from the API, so no
+# pull-requests scope is required to read it.
+#
+# Capping at the workflow level means a consumer that grants more in a combined
+# CI file cannot leak that privilege into this reusable workflow — the effective
+# grant is the intersection. Until now this file declared nothing, so it ran at
+# whatever the caller happened to grant.
+permissions:
+  contents: read
+
 jobs:
   commitlint:
     name: Conventional commits

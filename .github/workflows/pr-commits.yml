@@ -24,4 +24,11 @@ permissions:
 
 jobs:
   commitlint:
+    # Stated at the call site rather than inherited: a job-level block REPLACES
+    # the workflow default, so a nested call's grant has to be a decision here
+    # and not a side effect of editing the block above. `contents: read` is
+    # exactly what commitlint.yml declares, so this changes nothing today — it
+    # is what keeps that true.
+    permissions:
+      contents: read
     uses: ./.github/workflows/commitlint.yml
