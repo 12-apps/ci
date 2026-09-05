@@ -294,6 +294,15 @@ jobs:
   build-static:
     name: Build static · ${{ matrix.app }}
     needs: discover
+    # `packages: read` because this job runs the CONSUMER's install and then the
+    # consumer's build command, and a consumer whose install resolves private
+    # GitHub Packages needs it. It used to inherit whatever the caller granted
+    # (future-pay grants `packages: write`), so declaring nothing here would take
+    # the scope away and 404 that install inside a DEPLOY. Read, not write:
+    # nothing here publishes.
+    permissions:
+      contents: read
+      packages: read
     if: needs.discover.outputs.has_statics == 'true'
     runs-on: ubuntu-latest
     # Bound so a HANG fails in minutes instead of running to
@@ -394,11 +403,12 @@ jobs:
       (github.event_name == 'push' ||
         ((inputs.target == 'all' || inputs.target == 'cloudflare') && inputs.action == 'deploy'))
     # The grant handed to the CALLED workflow — see the note on `digitalocean`.
-    # No packages scope: wrangler authenticates to Cloudflare with its own API
-    # token, so the only GitHub write this adapter makes is its trigger-post-cd
-    # dispatch.
+    # `packages: read` is for the adapter's worker build, which runs the
+    # consumer's `pnpm install`; wrangler itself authenticates to Cloudflare with
+    # its own API token, and the only GitHub WRITE here is the post-cd dispatch.
     permissions:
       contents: read
+      packages: read
       actions: write
     uses: 12-apps/ci/.github/workflows/deploy-cloudflare.yml@v2
     with:

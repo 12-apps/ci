@@ -81,7 +81,12 @@ export function jobsOf(source) {
   const jobs = [];
   for (let i = start + 1; i < lines.length; i += 1) {
     if (/^[^\s#]/.test(lines[i])) break;
-    const key = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(lines[i]);
+    // `[ \t]*(?:#.*)?$` rather than `\s*$`: a trailing comment on a job key
+    // (`  deploy:   # the vendor adapter`) otherwise fails to match, so no job
+    // record is created and every following line is appended to the PREVIOUS
+    // job — handing it that job's `timeout-minutes` and hiding an unbounded job
+    // from this sweep. Found by an adversarial pass in FUT-1276.
+    const key = /^ {2}([A-Za-z0-9_-]+):[ \t]*(?:#.*)?$/.exec(lines[i]);
     if (key) jobs.push({ name: key[1], line: i + 1, body: [] });
     else if (jobs.length > 0) jobs.at(-1).body.push(lines[i]);
   }

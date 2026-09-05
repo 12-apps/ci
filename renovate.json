@@ -28,5 +28,8 @@
     }
   ],
   "lockFileMaintenance": { "enabled": false },
-  "dependencyDashboard": true
+  "dependencyDashboard": false,
+  "description": [
+    "The dashboard is OFF because it cannot exist here: Issues are disabled on this repository (`has_issues: false`), so Renovate would try to find-or-create the dashboard issue on every run and log a warning it can never clear — noise sitting on top of the warnings that matter. Explicitly false rather than absent, because `config:recommended` pulls in `:dependencyDashboard` and would turn it back on. The consumer repo hit exactly this and removed it for the same reason. If Issues are ever enabled here, delete this line AND add `Issues: write` to the RENOVATE_TOKEN scopes listed in the workflow."
+  ]
 }

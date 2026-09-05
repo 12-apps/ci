@@ -84,8 +84,13 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/statuses")
 
-          if [ "$code" = "403" ] || [ "$code" = "404" ]; then
-            echo "::error title=RENOVATE_TOKEN cannot read commit statuses::GET /repos/${GITHUB_REPOSITORY}/commits/<sha>/statuses returned ${code}. Renovate reads a bump branch's commit statuses before it opens the PR, so with this permission missing it pushes the branch and then throws — a green run that opens nothing. Fix: edit the fine-grained PAT behind the RENOVATE_TOKEN secret and add repository permission 'Commit statuses: Read'."
+          # Any non-200 is a failure, not just the under-scoped ones. 403 is
+          # "token lacks the scope" and 404 is "token cannot see the repo", but
+          # 401 is "token is expired or revoked" — which is exactly the
+          # present-but-useless credential this preflight exists to catch, and
+          # treating everything-but-403/404 as OK let it through to fail late.
+          if [ "$code" != "200" ]; then
+            echo "::error title=RENOVATE_TOKEN cannot read commit statuses::GET /repos/${GITHUB_REPOSITORY}/commits/<sha>/statuses returned ${code} (401 = expired or revoked, 403 = missing scope, 404 = repo not visible to this token). Renovate reads a bump branch's commit statuses before it opens the PR, so with this call failing it pushes the branch and then throws — a green run that opens nothing. Fix: the fine-grained PAT behind the RENOVATE_TOKEN secret needs Contents: write, Pull requests: write and Commit statuses: read on this repository."
             exit 1
           fi
 
@@ -116,4 +121,12 @@ jobs:
           RENOVATE_ONBOARDING: "false"
           RENOVATE_REQUIRE_CONFIG: "required"
           LOG_LEVEL: info
-        run: npx --yes renovate@41
+        # Pinned to the CURRENT major. npm marks every older renovate major
+        # deprecated ("versions older than the latest major are unsupported"),
+        # and a workflow whose whole argument is that a pin nothing maintains
+        # becomes a freeze should not itself sit three unsupported majors back.
+        # Renovate cannot bump this line for us — `enabledManagers` is
+        # github-actions only — so it is a hand-managed number, noted here so
+        # the next person knows it is theirs to move. 44.x needs Node ^24.11,
+        # which the setup-node step above provides.
+        run: npx --yes renovate@44

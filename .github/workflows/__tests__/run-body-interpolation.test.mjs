@@ -83,13 +83,21 @@ function sourceFiles() {
  * indentation rule is the parser.
  */
 export function runBodies(source) {
-  const lines = source.split("\n");
+  const lines = source.replace(/\r\n/g, "\n").split("\n");
   const found = [];
   for (let i = 0; i < lines.length; i += 1) {
-    const m = /^(\s*)(?:- )?run:(.*)$/.exec(lines[i]);
+    // `script:` too — actions/github-script takes a JS block scalar under
+    // `with:`, and an expression pasted into it is the same class of defect as
+    // one pasted into a shell body. This repo has two such steps.
+    const m = /^(\s*(?:-\s+)?)(run|script):(.*)$/.exec(lines[i]);
     if (!m) continue;
+    // The indent is the column of the KEY, never of the leading dash. On
+    // `      - run: |` the dash sits at 6 and the key at 8, and sibling keys of
+    // the step (`env:`, `with:`) sit at 8 too — so measuring from the dash made
+    // the body scan swallow the step's own `env:` block, and the test then
+    // flagged the exact remediation its failure message prescribes.
     const indent = m[1].length;
-    const inline = m[2].trim();
+    const inline = m[3].trim();
     if (inline && !/^[|>]/.test(inline)) {
       found.push({ line: i + 1, body: inline });
       continue;
@@ -174,12 +182,37 @@ test("no run: script interpolates a secret or an attacker-writable context", () 
   );
 });
 
+/**
+ * Does this shell body run `ssh` with arguments handed to the REMOTE command?
+ *
+ * Written against the shapes, not against one spelling. The first version
+ * matched `'bash -s' --` literally, and five realistic rewrites of the very line
+ * this repo deleted walked straight past it — `bash -s --` unquoted, `'bash -se'`,
+ * `'bash' -s`, `sh -s`, and the deleted line with the `--` simply removed.
+ *
+ * Line continuations are folded first, because the original was written across
+ * seven of them.
+ */
+export function sshArgvRisk(body) {
+  const flat = body.replace(/\\\n\s*/g, " ");
+  return flat
+    .split("\n")
+    .filter((l) => /(^|[\s;|&(])ssh\s/.test(l))
+    .some(
+      (l) =>
+        // an explicit `--` separator, whatever the remote command is quoted like
+        /\s--\s+\S/.test(l) ||
+        // or an argument after a stdin-reading shell (`-s`), which is the same
+        // thing without the separator
+        /\s-s\w*\b[^|]*?["']?\$/.test(l),
+    );
+}
+
 test("no ssh invocation passes an expression as a positional argument", () => {
   // The specific shape the rule above generalises: `ssh host 'bash -s' -- "$X"`
   // puts X in the REMOTE process table. Secrets belong on that script's stdin.
   const offenders = scripts
-    .filter((s) => /\bssh\b/.test(s.body))
-    .filter((s) => /'bash -s'\s*--/.test(s.body) || /"bash -s"\s*--/.test(s.body))
+    .filter((s) => sshArgvRisk(s.body))
     .map((s) => `${s.file}:${s.line}`);
 
   assert.deepEqual(

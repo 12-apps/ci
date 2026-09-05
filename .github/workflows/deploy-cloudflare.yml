@@ -24,7 +24,9 @@ on:
 
 # Least-privilege, enforced at the source. The deploys authenticate to Cloudflare
 # with CLOUDFLARE_API_TOKEN, not with GITHUB_TOKEN, so nothing here needs a write
-# scope on GitHub. `trigger-post-cd` is the exception — createWorkflowDispatch
+# scope on GitHub. `packages: read` is the ceiling for `deploy-workers`, which
+# runs the CONSUMER's `pnpm install` — a consumer resolving private GitHub
+# Packages needs it, and it is read-only for everyone else. `trigger-post-cd` is the exception — createWorkflowDispatch
 # needs `actions: write` — and it declares that itself, so the one write scope in
 # this file stays on the one job that uses it.
 #
@@ -34,6 +36,7 @@ on:
 # whatever the caller happened to grant.
 permissions:
   contents: read
+  packages: read
 
 jobs:
   validate-secrets:

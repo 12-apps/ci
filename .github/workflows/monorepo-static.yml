@@ -274,22 +274,27 @@ on:
           Never empty — falls back to `[]`.
         value: ${{ jobs.changes.outputs.scripts }}
 
-# Least-privilege, enforced at the source. Two scopes, both read-only:
-#   - contents: every job checks out the repo.
-#   - pull-requests: the `changes` job's paths-filter reads the PR's file list
-#     from the API on a pull_request event; without it the filter sees nothing
-#     and every downstream lane is selected off an empty change set.
-# `retry-gate` needs `actions: read` on top of these to reach the previous run's
-# ledger, and declares that itself — a job block REPLACES this one rather than
-# adding to it, so the scope stays on the single job that uses it.
+# Least-privilege, enforced at the source: the default is the read-only floor,
+# and the two jobs that need more declare it themselves.
 #
-# Capping at the workflow level means a consumer that grants more in a combined
-# CI file cannot leak that privilege into this reusable workflow — the effective
-# grant is the intersection. Until now this file declared nothing, so it ran at
-# whatever the caller happened to grant.
+#   - `changes` adds `pull-requests: read` — dorny/paths-filter reads the PR's
+#     file list from the API on a pull_request event, and without it the filter
+#     sees nothing and every downstream lane is selected off an empty change set.
+#   - `retry-gate` adds `actions: read` to reach the previous run's ledger.
+#
+# Deliberately NOT both at workflow level. `lint`, `type-check` and `actionlint`
+# run `pnpm install` over the CONSUMER's dependency tree and then a
+# consumer-supplied command; handing those a token that can read private pull
+# request bodies and diffs is the opposite of what this file is for. A job block
+# REPLACES this one rather than adding to it, so each scope stays on the single
+# job that uses it.
+#
+# Note for callers: a caller must grant a SUPERSET of every scope declared
+# anywhere in here — job blocks included — or GitHub rejects the run at startup.
+# So a caller of this workflow needs contents + pull-requests + actions, which is
+# what CONSUMING.md documents.
 permissions:
   contents: read
-  pull-requests: read
 
 # Authenticate npm installs for consumers with RESTRICTED packages. Workflow-
 # level so every `pnpm install` in this file sees it; the consumer's .npmrc is
@@ -311,6 +316,13 @@ env:
 
 jobs:
   changes:
+    # `pull-requests: read` is for dorny/paths-filter, which reads the PR's file
+    # list from the API rather than from the checkout. Without it the filter
+    # returns nothing and every downstream lane is selected off an empty change
+    # set — green, fast, and testing nothing.
+    permissions:
+      contents: read
+      pull-requests: read
     name: Detect Changes
     runs-on: ubuntu-latest
     # Bound so a HANG fails in minutes instead of running to

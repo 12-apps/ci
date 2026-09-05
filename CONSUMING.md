@@ -391,9 +391,13 @@ it wrote on the next push.
   static:
     uses: 12-apps/ci/.github/workflows/monorepo-static.yml@v2
     # A caller must grant a SUPERSET of what the reusable workflow declares, or
-    # GitHub rejects the run at startup.
+    # GitHub rejects the run at startup. That means every scope declared ANYWHERE
+    # in the called workflow, job blocks included — here: `contents` (all jobs),
+    # `pull-requests` (the `changes` job's paths-filter) and `actions` (the retry
+    # gate's ledger probe).
     permissions:
       contents: read
+      pull-requests: read
       actions: read
     with:
       retry-gate-command: node scripts/ci-retry-gate.mjs
