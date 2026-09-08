@@ -1,0 +1,588 @@
+# ---------------------------------------------------------------------------
+# Expo / React Native Android APK — the artefact somebody installs (reusable).
+#
+# Extracted from 12-apps/future-pay's `motoboy-apk.yml` (FUT-1452), which built
+# the courier app's APK. Nothing here is courier-specific any more: the app's
+# workspace, its paths, the artifact and release names and the ABI set are all
+# caller inputs, so a second Expo app costs a ~15-line caller instead of a
+# second copy of this file.
+#
+# A consuming repo adds:
+#
+#   name: Motoboy APK
+#   on:
+#     pull_request:
+#       paths: ['apps/motoboy/**', 'packages/spa-shared/**', '.github/workflows/motoboy-apk.yml']
+#     push:
+#       branches: [main]
+#       paths: ['apps/motoboy/**', 'packages/spa-shared/**', '.github/workflows/motoboy-apk.yml']
+#     workflow_dispatch:
+#       inputs:
+#         abis: { required: false, default: 'arm64-v8a,armeabi-v7a' }
+#   permissions:
+#     contents: write      # the release job needs it; the ceiling below narrows it
+#   jobs:
+#     apk:
+#       uses: 12-apps/ci/.github/workflows/expo-apk.yml@v2
+#       with:
+#         app: motoboy
+#         app-path: apps/motoboy
+#         artifact-name: paladira-entregas-apk
+#         asset-name: paladira-entregas.apk
+#         release-title: Paladira Entregas
+#         release-tag: motoboy-latest
+#         abis: ${{ inputs.abis || 'arm64-v8a,armeabi-v7a' }}
+#       secrets: inherit
+#
+# Runs in the CALLER's checkout, so `app-path`, the lockfile and the workspace
+# scripts resolve to the consuming repo.
+#
+# ## Why a workflow and not the Dockerfile
+#
+# Every other app in these repos deploys as a container, and the obvious move is
+# an `apps/<app>/Dockerfile` with an Android SDK stage. It was rejected for one
+# reason: a CD pipeline runs on `main`, so a Dockerfile-built APK is UNVERIFIABLE
+# until after the merge that ships it. This runs on the pull request, so the
+# build that produces the APK is the build a reviewer can read.
+#
+# ## Signing, and what it costs to get it wrong
+#
+# Android refuses to install an unsigned APK, and it refuses to UPGRADE one
+# whose signature changed. So a keystore generated per run would install fine
+# the first time and then fail every update with a message
+# (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`) that names nothing a user can act on.
+#
+# The job always builds the RELEASE variant; the keystore only decides who
+# signs it. With `KEYSTORE_BASE64` present that is the repo's own key — one
+# stable identity, upgradable for ever. Without it the Expo template signs
+# release with the universal debug key: installable by sideload. The summary
+# says which it produced rather than leaving it to be inferred.
+#
+# "Not upgradable" is the wrong shorthand for the unsigned case and worth being
+# precise about: the Expo template debug key is the UNIVERSAL Android debug
+# certificate (`CN=Android Debug`, byte-identical in every prebuild), so two
+# consecutive keystore-less builds DO upgrade each other fine. What cannot be
+# upgraded is the step ACROSS identities — a phone holding a debug-signed build
+# refuses a repo-signed one, and vice versa. So a fleet should move to the repo
+# keystore before anyone installs from a link they will later be asked to update.
+#
+# It must NOT fall back to `assembleDebug`, however tempting the name is: React
+# Native does not bundle JavaScript into debuggable variants, so that APK
+# installs and then red-boxes looking for a dev server. Argued at the Assemble
+# step, with the plugin lines that decide it.
+# ---------------------------------------------------------------------------
+name: Expo APK (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: 'Workspace name, as `pnpm --filter` resolves it (e.g. motoboy).'
+        type: string
+        required: true
+      app-path:
+        description: 'Repo-relative path of the app workspace (e.g. apps/motoboy).'
+        type: string
+        required: true
+      artifact-name:
+        description: 'Name of the uploaded run artifact holding the APK.'
+        type: string
+        required: true
+      asset-name:
+        description: >-
+          Filename the release asset is published under. Carries no version on
+          purpose — the version is what would move the URL, and a link you have
+          to re-copy after every build is the thing the release job avoids.
+        type: string
+        required: true
+      release-title:
+        description: 'Human name used in the release title (e.g. Paladira Entregas).'
+        type: string
+        required: false
+        default: ''
+      release-tag:
+        description: 'Fixed tag the newest build of the default branch is published under.'
+        type: string
+        required: false
+        default: ''
+      abis:
+        description: >-
+          Android ABIs to build, comma-separated. The default is phones only;
+          add x86_64 for a desktop emulator. `x86`/`x86_64` are emulator ABIs
+          and cost ~159s of CMake on a build whose output somebody installs on
+          a phone — measured on future-pay run 34231179841.
+        type: string
+        required: false
+        default: 'arm64-v8a,armeabi-v7a'
+      node-version:
+        description: 'Node version for every job.'
+        type: string
+        required: false
+        default: '24'
+      java-version:
+        description: >-
+          JDK for Gradle. 17 is what React Native 0.86's Gradle plugin expects;
+          21 works and 11 does not, so it is pinned rather than left to the
+          runner default.
+        type: string
+        required: false
+        default: '17'
+      publish-release:
+        description: >-
+          Publish the APK to a GitHub Release under `release-tag`, giving one
+          URL that never moves. Never runs on a pull request whatever this says.
+        type: boolean
+        required: false
+        default: true
+    secrets:
+      NPM_TOKEN:
+        description: >-
+          npm token for consumers whose installs resolve RESTRICTED packages.
+          Optional: absent, NODE_AUTH_TOKEN resolves empty and installs stay
+          anonymous. Takes effect only when the consumer's committed .npmrc
+          reads ${NODE_AUTH_TOKEN}.
+        required: false
+      KEYSTORE_BASE64:
+        description: 'base64 of the release keystore. Absent, release is signed with the universal debug key.'
+        required: false
+      KEYSTORE_PASSWORD:
+        required: false
+      KEY_ALIAS:
+        required: false
+      KEY_PASSWORD:
+        required: false
+
+# A CEILING, not a grant — it cannot give a job anything the caller withheld.
+permissions:
+  contents: read
+
+jobs:
+  # ── Why the app's own checks run HERE as well as in a unit lane ──────────
+  #
+  # An Expo app tests on jest-expo, so it has no `vitest.config.*`, and a
+  # monorepo unit lane that selects on vitest configs will not lint or typecheck
+  # it. A repo-wide `turbo run test` does reach it — but the package script
+  # usually carries `--passWithNoTests` so the repo-wide run never breaks on it,
+  # which also means a suite that stopped collecting passes there in silence.
+  #
+  # So this job is the app's own floor: lint, types, and a test run that asserts
+  # the COUNT rather than the exit code.
+  checks:
+    name: Lint, types and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_USERCONFIG: ${{ github.workspace }}/.npmrc
+
+      - name: Lint
+        env:
+          APP: ${{ inputs.app }}
+        run: pnpm --filter "$APP" run lint
+
+      - name: Types
+        env:
+          APP: ${{ inputs.app }}
+        run: pnpm --filter "$APP" run check-types
+
+      # `--passWithNoTests` in the package script would let a VANISHED suite
+      # pass here, silently — the one failure this job exists to catch — so the
+      # count is asserted rather than the exit code.
+      - name: Tests
+        env:
+          APP: ${{ inputs.app }}
+          APP_PATH: ${{ inputs.app-path }}
+        run: |
+          set -euo pipefail
+          pnpm --filter "$APP" exec jest --ci --json --outputFile=jest-results.json
+          node -e '
+            const path = process.env.APP_PATH;
+            const r = require(`${process.cwd()}/${path}/jest-results.json`);
+            if (r.numTotalTests < 1) {
+              console.error(`The ${path} suite reported ${r.numTotalTests} tests. A green run over zero tests is this job failing, not passing.`);
+              process.exit(1);
+            }
+            console.log(`${path}: ${r.numPassedTests}/${r.numTotalTests} tests passed`);
+          '
+
+  apk:
+    name: Build the APK
+    runs-on: ubuntu-latest
+    # A gradle build is ~13 minutes. Spending it on a tree that does not lint,
+    # typecheck or pass its own tests buys nothing a reviewer wants.
+    needs: checks
+    timeout-minutes: 45
+    # JOB level, not step level. A step's own `env:` is not in scope for that
+    # step's `if:`, so the keystore check has to read a value that already
+    # exists when the condition is evaluated.
+    env:
+      KEYSTORE: ${{ secrets.KEYSTORE_BASE64 }}
+      ABIS: ${{ inputs.abis }}
+      APP: ${{ inputs.app }}
+      APP_PATH: ${{ inputs.app-path }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_USERCONFIG: ${{ github.workspace }}/.npmrc
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+
+      # `android/` is NOT committed — it is generated from app.json, so the
+      # package id, the icons and the version have exactly one source of truth.
+      - name: Generate the native project
+        run: pnpm --filter "$APP" prebuild
+
+      # ── The Gradle caches ───────────────────────────────────────────────
+      #
+      # Without these a build reports `N actionable tasks: N executed` — nothing
+      # reused, because nothing was kept. Measured on future-pay run
+      # 34231179841: ~70s of configuration and dependency resolution before the
+      # first task line, then ~133s of `compileKotlin`/`jar` recompiling the RN
+      # and Expo Gradle plugins from source.
+      #
+      # RESTORED ON EVERY RUN, SAVED ONLY FROM A PUSH, and the asymmetry is the
+      # point. A save on every pull request would write a ~500MB entry per
+      # lockfile hash into a 10GB repo-wide budget the consumer's other lanes
+      # also draw on, and GitHub evicts by least-recent-use — so PR churn would
+      # quietly push out caches those lanes depend on. The default branch keeps
+      # the shared entry warm, and a PR restores it through the prefix key even
+      # when its own lockfile moved.
+      #
+      # Three paths, not `~/.gradle` wholesale: `caches/journal-1` and the
+      # per-version metadata directories are rewritten every build, so including
+      # them makes a cache that never hits the same key twice.
+      #
+      # Placed AFTER prebuild deliberately — `android/` is generated, so the
+      # Gradle files the key hashes do not exist until it has run.
+      - name: Restore the Gradle caches
+        id: gradle-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/caches/build-cache-1
+            ~/.gradle/wrapper/dists
+          key: >-
+            ${{ inputs.app }}-gradle-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml',
+            format('{0}/android/gradle/wrapper/gradle-wrapper.properties', inputs.app-path),
+            format('{0}/android/**/*.gradle', inputs.app-path)) }}
+          restore-keys: |
+            ${{ inputs.app }}-gradle-${{ runner.os }}-
+
+      # The keystore, when the repo has one. `base64 -d` writes it beside the
+      # Gradle project; the credentials reach Gradle as properties rather than
+      # as a committed `gradle.properties`, so nothing secret lands on disk in a
+      # readable form.
+      #
+      # The path is exported ABSOLUTE, and that is not tidiness. AGP resolves
+      # `android.injected.signing.store.file` with the APP MODULE's
+      # `project.file()`, not the root project's — the generated
+      # `android/app/build.gradle` shows the same convention one line away, in
+      # `signingConfigs.debug { storeFile file('debug.keystore') }`, which means
+      # `android/app/debug.keystore`. So a relative `app/release.keystore` would
+      # be looked for at `android/app/app/release.keystore` and the build would
+      # fail on a missing file with the keystore sitting right there.
+      - name: Restore the signing key
+        id: signing
+        if: ${{ env.KEYSTORE != '' }}
+        run: |
+          set -euo pipefail
+          KEYSTORE_PATH="$GITHUB_WORKSPACE/$APP_PATH/android/app/release.keystore"
+          printf '%s' "$KEYSTORE" | base64 -d > "$KEYSTORE_PATH"
+          test -s "$KEYSTORE_PATH"
+          echo "keystore=$KEYSTORE_PATH" >> "$GITHUB_OUTPUT"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      # ── Always `assembleRelease`, even with no keystore ──────────────────
+      #
+      # Building DEBUG when no keystore is set produces an APK that cannot run.
+      # React Native's Gradle plugin does not bundle JavaScript into debuggable
+      # variants — `ReactExtension.kt:105` defaults `debuggableVariants` to
+      # `["debug", "debugOptimized"]`, and its own comment says those "will not
+      # be bundled (the bundle file will not be created and won't be copied
+      # over)"; `TaskConfiguration.kt:65` registers `createBundle…JsAndAssets`
+      # only `if (!isDebuggableVariant)`. So `app-debug.apk` carries no
+      # `index.android.bundle`: it installs, opens, and red-boxes looking for a
+      # Metro dev server on the developer's LAN.
+      #
+      # The release variant bundles, and it is still installable without a
+      # keystore: the generated `android/app/build.gradle` gives its `release`
+      # buildType `signingConfig signingConfigs.debug`, so an unconfigured
+      # release is signed with the universal debug key. That loses the upgrade
+      # path and nothing else, which is the trade the summary reports.
+      - name: Assemble
+        id: assemble
+        env:
+          SIGNED: ${{ steps.signing.outputs.signed }}
+          KEYSTORE_PATH: ${{ steps.signing.outputs.keystore }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        working-directory: ${{ inputs.app-path }}/android
+        run: |
+          set -euo pipefail
+          # ALWAYS the release variant. The keystore decides who SIGNS it, never
+          # which variant is built — see the note above the step.
+          #
+          # `--build-cache` is what makes the restored `build-cache-1` directory
+          # do anything: without it Gradle neither reads nor writes task
+          # outputs, and the cache step above would carry a directory that stays
+          # empty for ever.
+          ARGS=(assembleRelease --no-daemon --build-cache "-PreactNativeArchitectures=$ABIS")
+          if [ "${SIGNED:-}" = "true" ]; then
+            ARGS+=(
+              -Pandroid.injected.signing.store.file="$KEYSTORE_PATH"
+              -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD"
+              -Pandroid.injected.signing.key.alias="$KEY_ALIAS"
+              -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
+            )
+            echo "flavour=release, signed with the repo keystore — upgradable" >> "$GITHUB_OUTPUT"
+          else
+            echo "flavour=release, signed with the universal debug key — installable; a later switch to the repo keystore needs a reinstall" >> "$GITHUB_OUTPUT"
+          fi
+          # Kept so the next step can assert what Gradle actually DID. `set -o
+          # pipefail` is already on, so a failing build still fails the step
+          # through the pipe. Gradle's stdout carries task names and timings,
+          # never the signing properties — those are arguments, not output.
+          ./gradlew "${ARGS[@]}" | tee "$RUNNER_TEMP/gradle.log"
+          echo "apk=app/build/outputs/apk/release/app-release.apk" >> "$GITHUB_OUTPUT"
+
+      # A build that produced nothing must not report success. Gradle can exit 0
+      # having skipped the packaging task on a warm or partially-restored cache,
+      # and the upload step below is happy with an empty glob.
+      - name: Prove the APK exists, and that it is the one that was asked for
+        env:
+          APK: ${{ steps.assemble.outputs.apk }}
+          FLAVOUR: ${{ steps.assemble.outputs.flavour }}
+          CACHE_KEY: ${{ steps.gradle-cache.outputs.cache-matched-key }}
+        working-directory: ${{ inputs.app-path }}/android
+        run: |
+          set -euo pipefail
+          test -s "$APK"
+          SIZE=$(du -h "$APK" | cut -f1)
+
+          WANTED=$(printf '%s' "$ABIS" | tr ',' '\n' | sed '/^$/d' | sort -u)
+
+          # ── What the user gets ───────────────────────────────────────────
+          # The packaged `lib/<abi>/` set, which is what decides whether the
+          # file installs on a given phone. An APK carrying no native libraries
+          # at all would be a far worse failure than a slow build, so an empty
+          # set is an error rather than a vacuous pass.
+          #
+          # `NF>=3 && $3 != ""` keeps only real FILES: a zip may carry the bare
+          # `lib/` directory entry, whose second field is empty, and letting it
+          # through compares "" against every ABI name and fails a correct
+          # build. It did, on the first draft of this step.
+          PACKAGED=$(unzip -Z1 "$APK" 'lib/*' 2>/dev/null | awk -F/ 'NF>=3 && $3 != "" {print $2}' | sort -u || true)
+          if [ -z "$PACKAGED" ]; then
+            echo "The APK carries no lib/<abi>/ entries at all. A React Native release build must." >&2
+            exit 1
+          fi
+          if [ "$PACKAGED" != "$WANTED" ]; then
+            echo "Asked for ABIs [$(echo "$WANTED" | paste -sd,)] but the APK carries [$(echo "$PACKAGED" | paste -sd,)]." >&2
+            exit 1
+          fi
+
+          # ── That the time was actually SAVED ─────────────────────────────
+          # The check above passes whether or not the excluded ABIs were built,
+          # because packaging is filtered at the app module while the CMake work
+          # happens per library. So if `expo-modules-core` ever stopped honouring
+          # `reactNativeArchitectures` the APK would still look right and the
+          # ~159s this exists to save would quietly come back. Read the task
+          # names Gradle actually ran instead of trusting the artefact.
+          BUILT=$(grep -oE '^> Task :[^ ]*[Cc]Make[^ ]*\[[a-z0-9_-]+\]' "$RUNNER_TEMP/gradle.log" \
+            | grep -oE '\[[a-z0-9_-]+\]$' | tr -d '[]' | sort -u || true)
+          # An EMPTY `BUILT` would make the stray check below pass without
+          # checking anything — a missing gradle.log, or a Gradle release that
+          # renames its task lines, and this silently stops guarding for ever
+          # while staying green. A React Native release build always compiles
+          # native code, so finding none means the reader broke, not that the
+          # work vanished.
+          if [ -z "$BUILT" ]; then
+            echo "Found no CMake task lines in $RUNNER_TEMP/gradle.log." >&2
+            echo "The ABI check cannot pass on an empty reading — fix the log or the pattern." >&2
+            exit 1
+          fi
+          STRAY=$(comm -23 <(printf '%s\n' "$BUILT") <(printf '%s\n' "$WANTED"))
+          if [ -n "$STRAY" ]; then
+            echo "Gradle ran native builds for ABIs outside the requested set: $(echo "$STRAY" | paste -sd,)." >&2
+            echo "reactNativeArchitectures is no longer cutting the work it is set to cut." >&2
+            exit 1
+          fi
+
+          {
+            echo "### ${APP} APK"
+            echo ""
+            echo "- **${FLAVOUR}**"
+            echo "- \`${APK}\` — ${SIZE}"
+            echo "- ABIs: \`$(echo "$PACKAGED" | paste -sd,)\`"
+            echo "- Gradle cache: \`${CACHE_KEY:-none — cold build}\`"
+            echo ""
+            echo "Download it from this run's artifacts, then open it on an Android phone."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Only from a push, and only when the exact key was not already there —
+      # see the restore step for why a per-PR save would evict the consumer's
+      # other caches. Deliberately NOT `if: always()`: a build that failed should
+      # not have its half-written task outputs kept and handed to the next run.
+      - name: Save the Gradle caches
+        if: ${{ github.event_name == 'push' && steps.gradle-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/caches/build-cache-1
+            ~/.gradle/wrapper/dists
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.app-path }}/android/${{ steps.assemble.outputs.apk }}
+          if-no-files-found: error
+          retention-days: 30
+
+  # ── The link ────────────────────────────────────────────────────────────
+  #
+  # A run ARTIFACT is not a link you can send anybody: it expires, it arrives as
+  # a zip rather than an APK, and its URL is per-run, so it moves every build.
+  # This job puts the same file on a GitHub Release under a fixed tag, which
+  # gives one URL that never changes.
+  #
+  # A SEPARATE job rather than a step on `apk`, and the reason is the token.
+  # `contents: write` is what publishing needs, and a job-level grant is the only
+  # way to keep it off the pull-request runs — a step guarded by `if:` still
+  # executes inside a job whose token can write. The cost is one artifact
+  # download; the benefit is that a PR from anywhere can never move the link.
+  #
+  # If the consuming repo is PRIVATE the asset is too: the URL serves anyone with
+  # repo access and 404s for everyone else. Getting it to somebody outside the
+  # team needs a public host, which is a separate change.
+  release:
+    name: Publish the APK link
+    # Never on a pull request: a PR that could overwrite the download would let
+    # any branch decide what "the app" is.
+    if: ${{ inputs.publish-release && github.event_name != 'pull_request' && inputs.release-tag != '' }}
+    needs: apk
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: dist
+
+      # `download-artifact` restores whatever basename the upload had
+      # (`app-release.apk`). Renaming here is what fixes the public URL, so it
+      # is done once, by name, rather than left to whatever gradle emitted.
+      - name: Name the file the way the link names it
+        id: apk
+        env:
+          ASSET_NAME: ${{ inputs.asset-name }}
+          APP_PATH: ${{ inputs.app-path }}
+        run: |
+          set -euo pipefail
+          FOUND=$(find dist -name '*.apk' -print -quit)
+          test -n "$FOUND"
+          mv "$FOUND" "$ASSET_NAME"
+          test -s "$ASSET_NAME"
+          {
+            echo "size=$(du -h "$ASSET_NAME" | cut -f1)"
+            echo "version=$(node -p "require('./${APP_PATH}/app.json').expo.version")"
+          } >> "$GITHUB_OUTPUT"
+
+      # Update in place when the release exists, create it otherwise. Never
+      # delete-and-recreate: that churns the tag, and anyone who bookmarked the
+      # URL between the delete and the create gets a 404.
+      - name: Publish
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release-tag }}
+          TITLE: ${{ inputs.release-title }}
+          ASSET_NAME: ${{ inputs.asset-name }}
+          VERSION: ${{ steps.apk.outputs.version }}
+          SIZE: ${{ steps.apk.outputs.size }}
+        run: |
+          set -euo pipefail
+          NOTES=$(printf '%s\n' \
+            "**$TITLE $VERSION** — $SIZE" \
+            "" \
+            "Built from \`${GITHUB_SHA}\` on $(date -u +'%Y-%m-%d %H:%M UTC')." \
+            "" \
+            "## Install on Android" \
+            "" \
+            "1. Open this page on the phone and download the \`.apk\`." \
+            "2. Android will ask to allow installs from your browser — allow it once." \
+            "3. Open the downloaded file." \
+            "" \
+            "The app shows its own version on screen, so somebody can read back" \
+            "which build they are holding." \
+            "" \
+            "This tag always points at the newest build of the default branch, so" \
+            "the download URL never changes.")
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ASSET_NAME" --clobber
+            gh release edit "$TAG" --title "$TITLE $VERSION" --notes "$NOTES" --prerelease
+          else
+            gh release create "$TAG" "$ASSET_NAME" \
+              --title "$TITLE $VERSION" --notes "$NOTES" --prerelease
+          fi
+          echo "url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ASSET_NAME}" >> "$GITHUB_OUTPUT"
+
+      # Asserted rather than assumed: `gh release upload` can succeed against a
+      # release whose asset never replaced the old one, and the whole point of
+      # this job is that the URL serves the build that just ran.
+      - name: Prove the link serves this build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release-tag }}
+          TITLE: ${{ inputs.release-title }}
+          ASSET_NAME: ${{ inputs.asset-name }}
+          VERSION: ${{ steps.apk.outputs.version }}
+          SIZE: ${{ steps.apk.outputs.size }}
+          URL: ${{ steps.publish.outputs.url }}
+        run: |
+          set -euo pipefail
+          PUBLISHED=$(gh release view "$TAG" --json assets \
+            --jq ".assets[] | select(.name == \"$ASSET_NAME\") | .size")
+          LOCAL=$(stat -c%s "$ASSET_NAME")
+          echo "published $PUBLISHED bytes, built $LOCAL bytes"
+          test "$PUBLISHED" = "$LOCAL"
+          {
+            echo "### The link"
+            echo ""
+            echo "[Download $TITLE $VERSION]($URL) — $SIZE"
+            echo ""
+            echo "Open it on an Android phone. This URL is stable — it always serves the newest build of the default branch."
+          } >> "$GITHUB_STEP_SUMMARY"
