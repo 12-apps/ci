@@ -267,12 +267,18 @@ jobs:
       # and Expo Gradle plugins from source.
       #
       # RESTORED ON EVERY RUN, SAVED ONLY FROM A PUSH, and the asymmetry is the
-      # point. A save on every pull request would write a ~500MB entry per
-      # lockfile hash into a 10GB repo-wide budget the consumer's other lanes
-      # also draw on, and GitHub evicts by least-recent-use — so PR churn would
-      # quietly push out caches those lanes depend on. The default branch keeps
-      # the shared entry warm, and a PR restores it through the prefix key even
-      # when its own lockfile moved.
+      # point. Measured on future-pay run 34268966864, the first push that ever
+      # took this branch: the entry is **~844MB** (885,261,206 bytes sent). A
+      # save on every pull request would write one of those per lockfile hash
+      # into a 10GB repo-wide budget the consumer's other lanes also draw on,
+      # and GitHub evicts by least-recent-use — so twelve PR pushes would fill
+      # it alone and quietly evict the caches those lanes depend on. The default
+      # branch keeps one shared entry warm, and a PR restores it through the
+      # prefix key even when its own lockfile moved.
+      #
+      # (An earlier draft of this comment said ~500MB. That was an estimate, and
+      # it was wrong by 70% — the 482MB it came from is `actions/setup-node`'s
+      # pnpm store, a different cache restored earlier in the same job.)
       #
       # Three paths, not `~/.gradle` wholesale: `caches/journal-1` and the
       # per-version metadata directories are rewritten every build, so including
