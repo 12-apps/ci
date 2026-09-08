@@ -32,7 +32,33 @@
 #         release-title: Paladira Entregas
 #         release-tag: motoboy-latest
 #         abis: ${{ inputs.abis || 'arm64-v8a,armeabi-v7a' }}
-#       secrets: inherit
+#       secrets:
+#         NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+#         KEYSTORE_BASE64: ${{ secrets.MOTOBOY_KEYSTORE_BASE64 }}
+#         KEYSTORE_PASSWORD: ${{ secrets.MOTOBOY_KEYSTORE_PASSWORD }}
+#         KEY_ALIAS: ${{ secrets.MOTOBOY_KEY_ALIAS }}
+#         KEY_PASSWORD: ${{ secrets.MOTOBOY_KEY_PASSWORD }}
+#
+# ## Map the secrets; do not `inherit` them unless the names already match
+#
+# The example above spells every secret out, and an earlier draft of it said
+# `secrets: inherit` instead. That is wrong for any consumer whose secrets are
+# namespaced, and future-pay's are: it holds `MOTOBOY_KEYSTORE_BASE64` while
+# this workflow declares `KEYSTORE_BASE64`. `inherit` passes secrets BY NAME,
+# so it would hand over four EMPTY values — the `Restore the signing key` step's
+# `if: env.KEYSTORE != ''` would not fire, and the build would publish a
+# DEBUG-SIGNED APK.
+#
+# Nothing goes red when that happens. The APK installs. What it costs arrives
+# later: the step from a debug-signed build across to a repo-signed one is
+# `INSTALL_FAILED_UPDATE_INCOMPATIBLE`, i.e. a reinstall for every rider who
+# already has the app. And a consumer that holds no keystore yet cannot even
+# observe the bug — the debug branch is what runs either way, so it stays
+# invisible until somebody adds the keystore and it silently keeps not being
+# used.
+#
+# `secrets: inherit` is correct only where the consumer's names are already the
+# ones declared below.
 #
 # Runs in the CALLER's checkout, so `app-path`, the lockfile and the workspace
 # scripts resolve to the consuming repo.
