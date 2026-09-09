@@ -89,6 +89,7 @@ sound when something unconditional runs afterwards.
     lane: unit
     base: FETCH_HEAD
     artifact-name: affected-plan-unit
+    # explain: 'false'   # per-file attribution is ON by default
 
 - name: Run exactly what the plan chose
   if: steps.plan.outputs.mode != 'none'
@@ -104,6 +105,37 @@ The plan is a **file**, not a count. A plan job that answers only "how many
 shards?" while the lane re-derives its own selection is two implementations of
 one decision, and they drift. Publish the plan, have the lane run `.tests` from
 it, and there is exactly one selection per run.
+
+## Why each test was selected (`explain`)
+
+A narrowed lane is a claim, and until you can read the argument behind it you
+cannot disagree with it. The plan has always recorded the walk — for every
+selected test, the file that imported it, on which line, back to the change —
+and for a long time it printed nothing but the filenames. So the widest
+selections, the ones actually worth arguing with, were the least explicable.
+
+`explain` (on by default; set `explain: 'false'` for a quiet log) prints both
+views to the log and to the job summary:
+
+```
+[cost] apps/client/src/pages/account/compras/detalhe/index.tsx → 57 test file(s)
+[cost] apps/client/src/lib/storefront-copy.en-US.ts → 39 test file(s)
+
+[explain] apps/client/src/__tests__/checkout.test.tsx ← apps/client/src/App.tsx:44 ← apps/client/src/routes.tsx:10 ← apps/client/src/pages/account/compras/detalhe/index.tsx:104
+[explain] apps/client/src/__tests__/account-settings.test.tsx → changed file — runs as itself
+```
+
+`[explain]` answers *why is THIS test running* — read it right to left: the
+changed file, each hop that carried it, the test at the end. `[cost]` answers
+*what is this diff costing me*, ordered by how many test files each changed file
+dragged in.
+
+The second one is the one that changes what you do. In the run above, two files
+account for 96 of 118 selected tests, and both are barrels: `routes.tsx` (which
+`App.tsx` imports, and nearly every client test mounts `App`) and a copy module
+re-exported through one index. A lane that feels like it runs everything usually
+has one or two of these, and no amount of selector tuning fixes them — splitting
+the barrel does.
 
 ## Config — `.affected-plan.json`
 

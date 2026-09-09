@@ -22,6 +22,7 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
+import { explainByChange, explainByTest } from "./lib/explain.mjs";
 import { selectAffected } from "./lib/select.mjs";
 
 const argv = process.argv.slice(2);
@@ -37,6 +38,12 @@ const configPath = resolve(repoRoot, arg("config", ".affected-plan.json"));
 const outPath = resolve(repoRoot, arg("out", `affected-plan.${lane}.json`));
 const maxShards = Number(arg("max-shards", "4")) || 4;
 const perShard = Number(arg("min-tests-per-shard", "40")) || 40;
+// Per-file attribution in the LOG. The plan artifact always carries `reasons`;
+// this decides whether a reader has to download it to see them. Default ON:
+// the failure this whole action exists to prevent is a selection nobody can
+// argue with, and the cost of the cure is some lines in a log nobody reads
+// unless a lane looks wrong.
+const explain = arg("explain", "true") !== "false";
 
 const git = (args) => execFileSync("git", args, { cwd: repoRoot, encoding: "utf8" }).trim();
 
@@ -294,6 +301,15 @@ function emit(plan) {
   }
   console.error(`[affected-plan] ${plan.lane ?? lane}: ${plan.mode} — ${plan.why}`);
   console.error(`[affected-plan] ${tests.length} test file(s), ${shards.length} shard(s) → ${outPath}`);
-  for (const test of tests.slice(0, 25)) console.error(`    • ${test}`);
-  if (tests.length > 25) console.error(`    …and ${tests.length - 25} more (full list in the plan artifact)`);
+
+  // The chain, not just the name. `• apps/web/.../route.test.ts` says a file
+  // was selected; it never says by WHAT, which is the only question a reviewer
+  // arguing with a wide lane actually has.
+  if (explain && tests.length > 0) {
+    for (const line of explainByChange(document.reasons)) console.error(line);
+    for (const line of explainByTest(document.reasons, { limit: 200 })) console.error(line);
+  } else {
+    for (const test of tests.slice(0, 25)) console.error(`    • ${test}`);
+    if (tests.length > 25) console.error(`    …and ${tests.length - 25} more (full list in the plan artifact)`);
+  }
 }
