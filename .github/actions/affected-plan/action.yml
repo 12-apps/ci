@@ -74,6 +74,15 @@ inputs:
     description: 'Artifact name. Include the lane when a workflow plans more than one.'
     required: false
     default: 'affected-plan'
+  explain:
+    description: >-
+      Print the per-file attribution — the import chain that reached each
+      selected test, and what each changed file cost in test files — to the log
+      and the job summary. On by default: the plan has always recorded this and
+      never showed it, so the widest, most expensive selections were the ones
+      nobody could argue with. Set to 'false' for a quiet log.
+    required: false
+    default: 'true'
 
 outputs:
   mode:
@@ -107,7 +116,8 @@ runs:
           --config "${{ inputs.config }}" \
           --out "${{ inputs.out }}" \
           --max-shards "${{ inputs.max-shards }}" \
-          --min-tests-per-shard "${{ inputs.min-tests-per-shard }}"
+          --min-tests-per-shard "${{ inputs.min-tests-per-shard }}" \
+          --explain "${{ inputs.explain }}"
 
     - name: Summarise the plan
       shell: bash
@@ -143,6 +153,32 @@ runs:
             echo "</details>"
           fi
         } >> "$GITHUB_STEP_SUMMARY"
+
+    # WHY each of them, not just which. The plan has recorded the import chain
+    # that reached every selected test since this action was written; until now
+    # the only way to read it was to download the artifact and parse JSON.
+    - name: Explain the plan
+      if: ${{ inputs.explain == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        PLAN: ${{ inputs.out }}
+        EXPLAIN_LIB: ${{ github.action_path }}/lib/explain.mjs
+      run: |
+        set -euo pipefail
+        node -e '
+          const { readFileSync, appendFileSync } = require("node:fs");
+          const { pathToFileURL } = require("node:url");
+          // A bare absolute path is not a valid specifier for dynamic import;
+          // it has to be a URL, and on the runner it always is one.
+          import(pathToFileURL(process.env.EXPLAIN_LIB).href).then(({ explainSummary }) => {
+            const plan = JSON.parse(readFileSync(process.env.PLAN, "utf8"));
+            const block = explainSummary(plan.reasons);
+            if (block.length) appendFileSync(process.env.GITHUB_STEP_SUMMARY, block.join("\n") + "\n");
+          });
+        '
+      # Through the environment so the action path is not interpolated into JS.
+
 
     - name: Upload the plan
       if: ${{ inputs.upload-artifact == 'true' }}
