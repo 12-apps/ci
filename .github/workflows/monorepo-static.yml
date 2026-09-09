@@ -693,10 +693,27 @@ jobs:
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
 
-      # Cross-run turbo cache: a later commit on the same PR replays unchanged
-      # packages instead of re-running them.
+      # RESTORE ONLY — the save is a separate, conditional step below.
+      #
+      # `actions/cache@v4` saves in a post step whenever the exact key MISSED,
+      # and the exact key is the commit sha, which by construction has never
+      # been seen before. So every commit uploaded a fresh ~1 GB entry under a
+      # key nothing would ever ask for again: measured on a future-pay Build
+      # job, 10s to restore ~995 MB by prefix and 31s to write the ~1 GB nobody
+      # reads — 41s of a 100s job.
+      #
+      # It is not only the seconds. Four turbo namespaces at ~1 GB is ~4 GB
+      # written per commit against a 10 GB repository ceiling with LRU
+      # eviction, so a couple of pushes evict every other cache in the
+      # repository — the vitest results the failed-first ordering needs, the
+      # pnpm store, the PGlite template — and each of those then pays a cold
+      # restore of its own.
+      #
+      # The prefix restore is unchanged and still does the work: a PR gets the
+      # newest entry the default branch wrote, and turbo's own content hashes
+      # decide what inside it is reusable. What a PR no longer does is WRITE.
       - name: Restore turbo cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .turbo
           key: turbo-lint-${{ github.sha }}
@@ -762,6 +779,20 @@ jobs:
             pnpm turbo run lint 2>&1 | tee lint.log
           fi
 
+      # Write only off a pull request. The default branch's entry is what every
+      # PR restores by prefix, so it is the only one worth the upload — and it
+      # is written once a day now rather than once a merge (future-pay
+      # FUT-1501), which is the cadence the ceiling can actually hold.
+      #
+      # No status function: a lane that failed has nothing worth publishing as
+      # the branch's warm state.
+      - name: Save turbo cache
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .turbo
+          key: turbo-lint-${{ github.sha }}
+
   type-check:
     name: Type Check
     runs-on: ubuntu-latest
@@ -808,8 +839,27 @@ jobs:
           set -o pipefail
           bash -c "$PRE_CMD" 2>&1 | tee pre-typecheck.log
 
+      # RESTORE ONLY — the save is a separate, conditional step below.
+      #
+      # `actions/cache@v4` saves in a post step whenever the exact key MISSED,
+      # and the exact key is the commit sha, which by construction has never
+      # been seen before. So every commit uploaded a fresh ~1 GB entry under a
+      # key nothing would ever ask for again: measured on a future-pay Build
+      # job, 10s to restore ~995 MB by prefix and 31s to write the ~1 GB nobody
+      # reads — 41s of a 100s job.
+      #
+      # It is not only the seconds. Four turbo namespaces at ~1 GB is ~4 GB
+      # written per commit against a 10 GB repository ceiling with LRU
+      # eviction, so a couple of pushes evict every other cache in the
+      # repository — the vitest results the failed-first ordering needs, the
+      # pnpm store, the PGlite template — and each of those then pays a cold
+      # restore of its own.
+      #
+      # The prefix restore is unchanged and still does the work: a PR gets the
+      # newest entry the default branch wrote, and turbo's own content hashes
+      # decide what inside it is reusable. What a PR no longer does is WRITE.
       - name: Restore turbo cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .turbo
           key: turbo-typecheck-${{ github.sha }}
@@ -835,6 +885,20 @@ jobs:
           else
             pnpm turbo run check-types 2>&1 | tee typecheck.log
           fi
+
+      # Write only off a pull request. The default branch's entry is what every
+      # PR restores by prefix, so it is the only one worth the upload — and it
+      # is written once a day now rather than once a merge (future-pay
+      # FUT-1501), which is the cadence the ceiling can actually hold.
+      #
+      # No status function: a lane that failed has nothing worth publishing as
+      # the branch's warm state.
+      - name: Save turbo cache
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .turbo
+          key: turbo-typecheck-${{ github.sha }}
 
   actionlint:
     name: Actionlint
