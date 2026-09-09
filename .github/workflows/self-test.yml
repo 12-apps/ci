@@ -169,6 +169,20 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/workflow-permissions.test.mjs
 
+      # A turbo cache restores on every run and writes on none of the pull
+      # requests. `actions/cache@v4` saves in a post step whenever the exact key
+      # missed, and every turbo key is the commit sha — so the combined action
+      # wrote a fresh ~1 GB entry per commit under a key nothing would ever read.
+      # Four namespaces is ~4 GB a commit against a 10 GB ceiling with LRU, which
+      # evicted every OTHER cache in the consuming repository.
+      #
+      # Both directions are silent: the combined action back means slower CI and
+      # a thrashing ceiling with nothing red, and a lost `restore-keys` means
+      # every restore misses and every lane runs cold, also with nothing red.
+      - name: Turbo cache writes
+        shell: bash
+        run: node --test .github/workflows/__tests__/turbo-cache-writes.test.mjs
+
       # No run: script pastes a secret — or an attacker-writable context — into
       # its own source.
       #
