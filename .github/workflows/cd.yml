@@ -14,7 +14,8 @@ name: CD (reusable)
 # discover composite action, so consumers vendor nothing. See CONSUMING.md.
 #
 # Per-vendor deploys are flag-gated by the consumer's repo Variables
-# ENABLE_DEPLOY_DIGITALOCEAN / ENABLE_DEPLOY_CLOUDFLARE.
+# ENABLE_DEPLOY_DIGITALOCEAN / ENABLE_DEPLOY_CLOUDFLARE / ENABLE_DEPLOY_AWS.
+# AWS is explicit (`target: aws`) and consumes an already-published ECR digest.
 
 on:
   workflow_call:
@@ -31,15 +32,31 @@ on:
         required: false
     inputs:
       target:
-        description: 'Which target(s) to act on: all | digitalocean | cloudflare'
+        description: 'all | digitalocean | cloudflare | aws (explicit, prebuilt ECR only)'
         type: string
         required: false
         default: all
       action:
-        description: 'deploy | provision | destroy (DigitalOcean honors all three)'
+        description: 'deploy | provision | destroy; AWS: plan | provision | status | deploy | rollback (no destroy)'
         type: string
         required: false
         default: deploy
+      aws_engine_ref:
+        description: Tested immutable 12-apps/ci commit SHA, required for target aws
+        type: string
+        default: ''
+      aws_image:
+        description: Already-published ECR repository@sha256 digest, required for AWS deploy
+        type: string
+        default: ''
+      aws_template:
+        description: Consumer-owned CloudFormation template path, only for AWS plan/provision
+        type: string
+        default: ''
+      aws_parameters:
+        description: Consumer-owned non-secret CloudFormation parameter JSON path
+        type: string
+        default: ''
       reuse_unaffected_images:
         description: >-
           Retag unaffected images from the previous commit instead of rebuilding
@@ -94,7 +111,7 @@ jobs:
   # ---------------------------------------------------------------------------
   discover:
     name: Discover targets
-    if: github.event_name == 'push' || inputs.action != 'destroy'
+    if: inputs.target != 'aws' && (github.event_name == 'push' || inputs.action != 'destroy')
     runs-on: ubuntu-latest
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
@@ -355,6 +372,33 @@ jobs:
   # either can be empty on a given commit. Each is therefore gated with the same
   # "if that lane had work, it must have SUCCEEDED" shape. A failed retag is
   # exactly as fatal as a failed build: the tag would not exist.
+  aws:
+    name: AWS prebuilt artifact
+    if: inputs.target == 'aws' && vars.ENABLE_DEPLOY_AWS == 'true'
+    permissions:
+      contents: read
+      id-token: write
+      actions: write
+    uses: 12-apps/ci/.github/workflows/deploy-aws.yml@v2
+    with:
+      action: ${{ inputs.action }}
+      engine_ref: ${{ inputs.aws_engine_ref }}
+      region: ${{ vars.AWS_REGION }}
+      expected_account: ${{ vars.AWS_EXPECTED_ACCOUNT }}
+      role_arn: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+      stack: ${{ vars.AWS_DEPLOY_STACK }}
+      image: ${{ inputs.aws_image }}
+      template: ${{ inputs.aws_template }}
+      parameters: ${{ inputs.aws_parameters }}
+      container: ${{ vars.AWS_CONTAINER_NAME || 'application' }}
+      mount: ${{ vars.AWS_DATA_MOUNT || '/srv/application/data' }}
+      destination: ${{ vars.AWS_DATA_DESTINATION || '/var/lib/application' }}
+      ready_file: ${{ vars.AWS_READY_FILE || '/var/lib/12-apps-controller-ready' }}
+      port: ${{ vars.AWS_APP_PORT || '8787' }}
+      health: ${{ vars.AWS_HEALTH_PATH || '/readyz' }}
+      environment: ${{ vars.AWS_DEPLOY_ENVIRONMENT || 'production' }}
+      post_cd_workflow: ${{ vars.AWS_POST_CD_WORKFLOW }}
+
   digitalocean:
     name: DigitalOcean
     needs: [discover, build-images, reuse-images]

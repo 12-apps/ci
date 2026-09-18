@@ -1,0 +1,67 @@
+name: AWS immutable container deployment
+description: Guarded AWS CLI and SSM rollout of a prebuilt ECR digest. No source builds or implicit provisioning.
+inputs:
+  action:
+    description: plan | provision | status | deploy | rollback
+    default: deploy
+  region:
+    description: Explicit AWS region
+    required: true
+  expected_account:
+    description: Expected 12-digit AWS account, checked with STS
+    required: true
+  stack:
+    description: CloudFormation stack tagged ManagedBy=12-apps-ci
+    required: true
+  image:
+    description: Prebuilt immutable ECR repository@sha256 digest; required for deploy
+    default: ''
+  template:
+    description: Consumer-owned CloudFormation template; used only by plan/provision
+    default: ''
+  parameters:
+    description: Consumer-owned non-secret CloudFormation parameter JSON file
+    default: ''
+  container:
+    default: application
+    description: Docker container name
+  mount:
+    default: /srv/application/data
+    description: Existing encrypted EBS-backed data directory owned by UID1000
+  destination:
+    default: /var/lib/application
+    description: Container data mount path
+  ready_file:
+    default: /var/lib/12-apps-controller-ready
+    description: Root-owned marker created after verified controller bootstrap
+  port:
+    default: '8787'
+    description: Loopback application port
+  health:
+    default: /readyz
+    description: Application readiness endpoint returning JSON ok=true after checking durable dependencies
+  timeout:
+    default: '180'
+    description: Readiness timeout in seconds (10–600)
+runs:
+  using: composite
+  steps:
+    - name: Guard and operate on the selected stack
+      shell: bash
+      env:
+        DEPLOY_ACTION: ${{ inputs.action }}
+        DEPLOY_REGION: ${{ inputs.region }}
+        DEPLOY_ACCOUNT: ${{ inputs.expected_account }}
+        DEPLOY_STACK: ${{ inputs.stack }}
+        DEPLOY_IMAGE: ${{ inputs.image }}
+        DEPLOY_TEMPLATE: ${{ inputs.template }}
+        DEPLOY_PARAMETERS: ${{ inputs.parameters }}
+        DEPLOY_CONTAINER: ${{ inputs.container }}
+        DEPLOY_MOUNT: ${{ inputs.mount }}
+        DEPLOY_DESTINATION: ${{ inputs.destination }}
+        DEPLOY_READY_FILE: ${{ inputs.ready_file }}
+        DEPLOY_PORT: ${{ inputs.port }}
+        DEPLOY_HEALTH: ${{ inputs.health }}
+        DEPLOY_TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        bash "$GITHUB_ACTION_PATH/../../../scripts/deploy/aws-entrypoint.sh"

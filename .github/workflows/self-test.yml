@@ -234,6 +234,13 @@ jobs:
         shell: bash
         run: node --test scripts/ephemeral/__tests__/deploy-cloud-init.test.mjs
 
+      - name: AWS guarded deploy engine and controller recovery (no cloud calls)
+        shell: bash
+        run: |
+          node --test --test-concurrency=1 scripts/deploy/__tests__/aws.test.mjs
+          python3 -B scripts/deploy/__tests__/aws_rollout_test.py
+          bash -n scripts/deploy/aws-entrypoint.sh
+
       # No shell step truncates a pipeline with `head`.
       #
       # `shell: bash` is `-eo pipefail`, and a composite action's `run:` MUST
