@@ -69,6 +69,7 @@ test("parameter files fail closed on malformed shape without disclosing values",
 test("AWS adapters stay off by default, prebuilt-only, scoped and pinned", async () => {
   const workflow = await readFile(new URL("../../../.github/workflows/deploy-aws.yml", import.meta.url), "utf8");
   const cd = await readFile(new URL("../../../.github/workflows/cd.yml", import.meta.url), "utf8");
+  const selfTest = await readFile(new URL("../../../.github/workflows/self-test.yml", import.meta.url), "utf8");
   assert.match(workflow, /if: vars\.ENABLE_DEPLOY_AWS == 'true'/);
   assert.match(workflow, /\^\[a-f0-9\]\{40\}\$/);
   assert.match(workflow, /allowed-account-ids: \$\{\{ inputs\.expected_account \}\}/);
@@ -76,6 +77,7 @@ test("AWS adapters stay off by default, prebuilt-only, scoped and pinned", async
   assert.doesNotMatch(workflow, /docker build|build-push-action|uses: \.\//);
   assert.match(cd, /if: inputs\.target != 'aws' &&/);
   assert.match(cd, /if: inputs\.target == 'aws' && vars\.ENABLE_DEPLOY_AWS == 'true'/);
+  assert.equal(selfTest.match(/'scripts\/deploy\/\*\*'/g)?.length, 2, "PR and main path filters both cover the tested engine");
 });
 test("plan/status are read-only, hide unrelated outputs and never imply provisioning", async () => {
   for (const action of ["plan", "status"]) {

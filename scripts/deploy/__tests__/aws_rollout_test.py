@@ -1,6 +1,7 @@
 import copy
 import importlib.util
 import json
+import itertools
 import pathlib
 import os
 import tempfile
@@ -15,10 +16,11 @@ CONFIG = {"action": "deploy", "container": "relay", "stack": "owned-stack", "ima
           "registry": IMAGE.split("/")[0], "mount": "/srv/relay/data", "destination": "/var/lib/relay",
           "timeout": 10, "port": 8787, "health": "/readyz", "region": "us-east-1"}
 CONFIG.update({"readyFile": "/var/lib/relay-controller-ready", "volume": "vol-1234567890abcdef0", "secret": "private-secret-reference"})
+IDS = itertools.count()
 
 
 def container(image, running=True):
-    return {"Id": image, "State": {"Running": running}, "Config": {"Image": image, "Env": ["SECRET=old-private-fixture"],
+    return {"Id": "fixture-" + str(next(IDS)), "State": {"Running": running}, "Config": {"Image": image, "Env": ["SECRET=old-private-fixture"],
             "Labels": {"ci.12-apps.managed": "true", "ci.12-apps.stack": "owned-stack"}}}
 
 
@@ -31,14 +33,20 @@ class Fake(module.Rollout):
         self.bad_image = None
         self.fail_start = False
         self.fail_once = None
+        self.maximum_running = 1
+        self.server_drained = False
 
     def command(self, args, data=None, timeout=180, optional=False):
         self.events.append(args)
         if self.fail_once == args:
             self.fail_once = None
             raise module.RolloutError("injected host failure")
+        if args[:3] == ["docker", "container", "ls"]:
+            return "\n".join(self.containers)
         if args[:2] == ["docker", "inspect"]:
-            return json.dumps([self.containers[args[-1]]]) if args[-1] in self.containers else None
+            if args[-1] not in self.containers:
+                raise module.RolloutError("no such container")
+            return json.dumps([{**self.containers[args[-1]], "Name": "/" + args[-1]}])
         if args[:2] == ["docker", "stop"]:
             self.containers[args[-1]]["State"]["Running"] = False
         elif args[:2] == ["docker", "rename"]:
@@ -46,15 +54,17 @@ class Fake(module.Rollout):
         elif args[:2] == ["docker", "rm"]:
             self.containers.pop(args[-1])
         elif args[:2] == ["docker", "start"]:
-            assert not any(value["State"]["Running"] for value in self.containers.values())
             self.containers[args[-1]]["State"]["Running"] = True
         elif args[:2] == ["docker", "run"]:
-            assert not any(value["State"]["Running"] for value in self.containers.values())
+            if self.name in self.containers:
+                raise module.RolloutError("container name conflict")
             self.containers[self.name] = container(args[-1])
+            self.containers[self.name]["Config"]["Labels"]["ci.12-apps.attempt"] = self.attempt
             if self.fail_start:
                 raise module.RolloutError("start failed")
         else:
             raise AssertionError("Unexpected operation")
+        self.maximum_running = max(self.maximum_running, sum(value["State"]["Running"] for value in self.containers.values()))
         return ""
 
     def validate_mount(self):
@@ -66,6 +76,10 @@ class Fake(module.Rollout):
 
     def http(self, method, route):
         self.events.append([method, route])
+        if route.endswith("drain") and not self.busy:
+            self.server_drained = True
+        if route.endswith("resume"):
+            self.server_drained = False
         return not self.busy if route.endswith("drain") else True
 
     def ready(self):
@@ -135,7 +149,7 @@ class Tests(unittest.TestCase):
                 fake.prepare = lambda: module.Rollout.prepare(fake)
                 original_command = fake.command
                 def command(args, data=None, **kwargs):
-                    if args[:2] == ["docker", "inspect"]:
+                    if args[:2] == ["docker", "inspect"] or args[:3] == ["docker", "container", "ls"]:
                         return original_command(args)
                     if "get-secret-value" in args:
                         return json.dumps({"SecretString": json.dumps(value)})
@@ -160,6 +174,7 @@ class Tests(unittest.TestCase):
             self.assertIn(flag, run)
         self.assertIn("1000:1000", run)
         self.assertIn(["POST", "/internal/deploy/resume"], fake.events)
+        self.assertEqual(fake.maximum_running, 1)
 
     def test_busy_controller_never_stops(self):
         fake = Fake()
@@ -179,6 +194,15 @@ class Tests(unittest.TestCase):
                 fake.run()
             self.assertEqual(fake.containers["relay"], old)
             self.assertNotIn("relay-previous", fake.containers)
+
+    def test_same_digest_redeploy_recovers_the_exact_original_container_id(self):
+        fake = Fake()
+        old = copy.deepcopy(fake.containers["relay"])
+        fake.config["image"] = old["Config"]["Image"]
+        fake.fail_start = True
+        with self.assertRaisesRegex(module.RolloutError, "Previous container is healthy"):
+            fake.run()
+        self.assertEqual(fake.containers["relay"], old)
 
     def test_manual_rollback_restores_previous_digest_and_configuration(self):
         fake = Fake()
@@ -208,6 +232,49 @@ class Tests(unittest.TestCase):
                     fake.run()
                 self.assertEqual(fake.containers["relay"], original)
                 self.assertEqual(sum(value["State"]["Running"] for value in fake.containers.values()), 1)
+                self.assertEqual(fake.maximum_running, 1)
+
+    def test_transient_inspection_failure_cannot_be_mistaken_for_absence(self):
+        for command in [["docker", "container", "ls", "--all", "--format", "{{.Names}}"], ["docker", "inspect", "--type", "container", "relay"]]:
+            fake = Fake()
+            original = copy.deepcopy(fake.containers)
+            fake.fail_once = command
+            with self.assertRaises(module.RolloutError):
+                fake.run()
+            self.assertEqual(fake.containers, original)
+            self.assertFalse(any(event[:2] in [["docker", "rm"], ["docker", "run"]] for event in fake.events))
+
+    def test_other_controller_name_or_overlapping_mount_is_rejected(self):
+        for mode in ["same-stack", "same-mount", "parent-mount", "child-mount"]:
+            fake = Fake()
+            other = fake.containers.pop("relay")
+            if mode != "same-stack":
+                other["Config"]["Labels"] = {}
+                source = {"same-mount": CONFIG["mount"], "parent-mount": "/srv/relay", "child-mount": "/srv/relay/data/child"}[mode]
+                other["Mounts"] = [{"Type": "bind", "Source": source}]
+            fake.containers["other-controller"] = other
+            with self.assertRaisesRegex(module.RolloutError, "Another controller"):
+                fake.run()
+            self.assertEqual(list(fake.containers), ["other-controller"])
+            self.assertFalse(any(event[:2] == ["docker", "run"] for event in fake.events))
+
+    def test_recovery_will_not_delete_a_container_from_another_attempt(self):
+        fake = Fake()
+        original = copy.deepcopy(fake.containers)
+        with self.assertRaisesRegex(module.RolloutError, "Unexpected container"):
+            fake.recover(None)
+        self.assertEqual(fake.containers, original)
+
+    def test_resume_precedes_readiness_when_original_is_still_drained(self):
+        fake = Fake()
+        fake.fail_once = ["docker", "stop", "--time", "120", "relay"]
+        def ready():
+            self.assertFalse(fake.server_drained)
+            return True
+        fake.ready = ready
+        with self.assertRaisesRegex(module.RolloutError, "healthy again"):
+            fake.run()
+        self.assertFalse(fake.drained)
 
     def test_unhealthy_rollback_restores_original_and_retains_candidate(self):
         fake = Fake()

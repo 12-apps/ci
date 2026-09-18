@@ -90,7 +90,11 @@ a host administrator.
 
 ## Rollout, rollback and interruptions
 
-The host uses a nonblocking exclusive deployment lock. It verifies ownership,
+The host uses a nonblocking exclusive deployment lock shared across container
+names. It inventories Docker successfully (inspection failures are not absence)
+and rejects other containers belonging to the stack or overlapping the data
+mount, even if they use another name. Recovery only removes a failed candidate
+carrying this deployment attempt's unique label. It verifies ownership,
 pulls the exact digest and validates the secret **before** draining the old
 container. It then stops the old controller (120-second graceful timeout),
 retains it stopped, starts the new controller and verifies application readiness.

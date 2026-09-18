@@ -34,12 +34,16 @@ on:
       # assertions. do-provision executes deploy-cloud-init.sh, so a change
       # there is a change to what a consumer's droplet boots with.
       - 'scripts/ephemeral/**'
+      - 'scripts/deploy/**'
+      - '.github/deploy/**'
   push:
     branches: [main]
     paths:
       - '.github/actions/**'
       - '.github/workflows/**'
       - 'scripts/ephemeral/**'
+      - 'scripts/deploy/**'
+      - '.github/deploy/**'
       - '**.md'
       - '.github/majors.json'
       - 'renovate.json'

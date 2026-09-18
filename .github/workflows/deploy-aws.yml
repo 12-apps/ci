@@ -70,7 +70,7 @@ jobs:
   deploy:
     if: vars.ENABLE_DEPLOY_AWS == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 70
     environment: ${{ inputs.environment }}
     concurrency:
       group: deploy-aws-${{ inputs.expected_account }}-${{ inputs.region }}-${{ inputs.stack }}

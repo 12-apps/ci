@@ -133,11 +133,13 @@ export async function run(options, { aws = new AwsCli(options), sleep = ms => ne
   const script = await readFile(new URL("./aws-rollout.py", import.meta.url), "utf8");
   const encoded = Buffer.from(JSON.stringify(payload)).toString("base64");
   const commands = [`python3 - '${encoded}' <<'TWELVE_APPS_AWS_ROLLOUT'\n${script}\nTWELVE_APPS_AWS_ROLLOUT`];
-  const sent = await aws.call("ssm", "send-command", ["--document-name", "AWS-RunShellScript", "--instance-ids", target.ControllerInstanceId, "--timeout-seconds", "600", "--parameters", JSON.stringify({ commands, executionTimeout: ["1800"] }), "--cloud-watch-output-config", "CloudWatchOutputEnabled=false", "--comment", "12-apps-ci immutable container rollout"]);
+  // Include pull, drain/stop and two maximum readiness windows so an unhealthy
+  // candidate cannot consume the entire execution budget before recovery runs.
+  const sent = await aws.call("ssm", "send-command", ["--document-name", "AWS-RunShellScript", "--instance-ids", target.ControllerInstanceId, "--timeout-seconds", "600", "--parameters", JSON.stringify({ commands, executionTimeout: ["3000"] }), "--cloud-watch-output-config", "CloudWatchOutputEnabled=false", "--comment", "12-apps-ci immutable container rollout"]);
   const commandId = sent.Command?.CommandId;
   if (!/^[a-f0-9-]{36}$/.test(commandId || "")) fail("SSM did not return a command handle. Inspect AWS before submitting another deployment.");
   report({ action: options.action, commandId, instanceId: target.ControllerInstanceId, state: "submitted" });
-  for (let attempt = 0; attempt < 360; attempt++) {
+  for (let attempt = 0; attempt < 720; attempt++) {
     let invocation;
     try { invocation = await aws.call("ssm", "get-command-invocation", ["--command-id", commandId, "--instance-id", target.ControllerInstanceId]); }
     catch (error) { if (error.code === "NotYetVisible") { await sleep(5000); continue; } throw error; }
