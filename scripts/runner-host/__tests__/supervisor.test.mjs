@@ -82,7 +82,7 @@ test("registers a JIT runner with the labels, group and a slot-scoped name", () 
   const { status, stderr, calls } = runOnce();
   assert.equal(status, 0, stderr);
   const url = "https://api.test/repos/acme/app/actions/runners/generate-jitconfig";
-  const post = calls.find((c) => c.bin === "curl" && c.argv.includes(url));
+  const post = calls.find((c) => c.bin === "curl" && c.argv.some((arg) => arg === url));
   assert.ok(post, "no generate-jitconfig call was made on the configured scope");
   assert.equal(argAfter(post.argv, "-X"), "POST");
   const body = JSON.parse(argAfter(post.argv, "-d"));
