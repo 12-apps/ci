@@ -195,7 +195,7 @@ jobs:
   # the COUNT rather than the exit code.
   checks:
     name: Lint, types and tests
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -244,6 +244,10 @@ jobs:
 
   apk:
     name: Build the APK
+    # Pinned to GitHub's image, NOT `vars.CI_RUNNER`: the gradle build leans on
+    # the Android SDK that ubuntu-latest ships preinstalled (ANDROID_HOME), and
+    # a self-hosted runner has none. Every other job here follows the caller's
+    # runner choice — see runner-selection.test.mjs.
     runs-on: ubuntu-latest
     # A gradle build is ~13 minutes. Spending it on a tree that does not lint,
     # typecheck or pass its own tests buys nothing a reviewer wants.
@@ -522,7 +526,7 @@ jobs:
     # any branch decide what "the app" is.
     if: ${{ inputs.publish-release && github.event_name != 'pull_request' && inputs.release-tag != '' }}
     needs: apk
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: write

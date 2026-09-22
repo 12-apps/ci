@@ -229,6 +229,19 @@ jobs:
     secrets: inherit
 ```
 
+### 4. Where the jobs run — one variable (`CI_RUNNER`)
+
+Every job these workflows define says
+`runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}`. A called workflow reads
+`vars` from the **caller's** repository, so a consumer moves every job to its
+own runners by setting one repository variable. There's nothing to add under
+`with:`. Set nothing and the jobs run on GitHub's runners, as before. On a
+private repo that is the difference between paying per minute and paying
+nothing per minute. [`scripts/runner-host/`](./scripts/runner-host/README.md)
+turns one Ubuntu machine into a pool of single-use runners for it. Delete the
+variable to fall back. `runner-selection.test.mjs` keeps every new job on the
+switch. The cost report prices self-hosted jobs at $0.
+
 ## Versioning
 
 Consumers pin a moving major tag. **`v2` is the supported one**, and it is the

@@ -201,7 +201,7 @@ jobs:
     # would boot, install, and then run nothing. store-compliance is a separate
     # job and is unaffected by this condition.
     if: ${{ inputs.run-drift || inputs.run-lint || inputs.run-coverage || inputs.run-parity }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 30
@@ -398,7 +398,7 @@ jobs:
   store-compliance:
     name: MCP Store Compliance
     if: ${{ inputs.run-store-compliance }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 20
