@@ -34,6 +34,7 @@ on:
       # assertions. do-provision executes deploy-cloud-init.sh, so a change
       # there is a change to what a consumer's droplet boots with.
       - 'scripts/ephemeral/**'
+      - 'scripts/runner-host/**'
       - 'scripts/deploy/**'
       - '.github/deploy/**'
   push:
@@ -42,6 +43,7 @@ on:
       - '.github/actions/**'
       - '.github/workflows/**'
       - 'scripts/ephemeral/**'
+      - 'scripts/runner-host/**'
       - 'scripts/deploy/**'
       - '.github/deploy/**'
       - '**.md'
@@ -160,6 +162,13 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/job-timeouts.test.mjs
 
+      # Every reusable job takes its runner from the caller's `vars.CI_RUNNER`.
+      # A consumer cannot set runs-on on a `uses:` job, so a label hard-coded
+      # here is one no caller can move off a billed runner.
+      - name: Runner selection
+        shell: bash
+        run: node --test .github/workflows/__tests__/runner-selection.test.mjs
+
       # Every workflow here declares a top-level `permissions:` block, and every
       # nested reusable call declares its own.
       #
@@ -245,6 +254,15 @@ jobs:
           python3 -B scripts/deploy/__tests__/aws_rollout_test.py
           bash -n scripts/deploy/aws-entrypoint.sh
 
+      # One runner-host slot, run for real against stub curl/docker: the JIT
+      # registration a consumer's `CI_RUNNER` label has to match, the isolation
+      # and /dev/shm a job container needs, and that the JIT config never lands
+      # on the host's argv. Every one of those fails quietly on a live host —
+      # CI just queues, or Chromium crashes mid-suite.
+      - name: Runner host supervisor
+        shell: bash
+        run: node --test scripts/runner-host/__tests__/supervisor.test.mjs
+
       # No shell step truncates a pipeline with `head`.
       #
       # `shell: bash` is `-eo pipefail`, and a composite action's `run:` MUST
@@ -306,3 +324,32 @@ jobs:
         run: |
           echo "::error::the zero guard did not skip this job"
           exit 1
+
+  # The runner-host image, built and started for real.
+  #
+  # scripts/runner-host/ is what a consumer's `CI_RUNNER` sends every job to,
+  # and an image that builds but cannot serve a job fails nowhere a consumer can
+  # see: its jobs die minutes in, one lane at a time, on a machine nobody is
+  # watching. So the image is built from these exact files and smoke.sh checks
+  # the contract the workflows rely on — a private dockerd, a `services:` port
+  # on the job's localhost, sudo, the CLI tools, and Chromium on the libraries
+  # baked in. Free here: this repo is public.
+  runner-image:
+    name: Runner host image
+    runs-on: ubuntu-latest
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build the image
+        shell: bash
+        env:
+          CI_RUNNER_IMAGE: ci-runner:self-test
+        run: scripts/runner-host/build-image.sh
+
+      - name: Smoke-test the image
+        shell: bash
+        run: scripts/runner-host/smoke.sh ci-runner:self-test

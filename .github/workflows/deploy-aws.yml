@@ -69,6 +69,9 @@ permissions:
 jobs:
   deploy:
     if: vars.ENABLE_DEPLOY_AWS == 'true'
+    # Pinned to GitHub's image, NOT `vars.CI_RUNNER`: scripts/deploy/aws.mjs
+    # shells out to the `aws` CLI that ubuntu-latest ships preinstalled, and the
+    # runner-host image has none. See runner-selection.test.mjs.
     runs-on: ubuntu-latest
     timeout-minutes: 70
     environment: ${{ inputs.environment }}
@@ -131,7 +134,7 @@ jobs:
   post-cd:
     needs: deploy
     if: needs.deploy.result == 'success' && inputs.action == 'deploy' && inputs.post_cd_workflow != ''
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read

@@ -261,7 +261,7 @@ jobs:
   # reusable workflow's overall result.
   static-gates:
     name: Static Gates
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: ${{ inputs.static-gates-timeout-minutes }}
@@ -1098,7 +1098,7 @@ jobs:
   e2e-affected:
     name: E2E (affected only)
     if: ${{ inputs.run-affected-e2e }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: ${{ inputs.e2e-timeout-minutes }}
@@ -1199,7 +1199,7 @@ jobs:
   e2e-reliability:
     name: E2E Reliability
     if: ${{ inputs.run-e2e-reliability }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: ${{ inputs.e2e-timeout-minutes }}

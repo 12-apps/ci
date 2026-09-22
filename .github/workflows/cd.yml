@@ -112,7 +112,7 @@ jobs:
   discover:
     name: Discover targets
     if: inputs.target != 'aws' && (github.event_name == 'push' || inputs.action != 'destroy')
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 10
@@ -193,7 +193,7 @@ jobs:
     name: Build image · ${{ matrix.image }}
     needs: discover
     if: needs.discover.outputs.has_build_images == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 60
@@ -269,7 +269,7 @@ jobs:
     name: Reuse unaffected images
     needs: discover
     if: needs.discover.outputs.has_reuse_images == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 15
@@ -321,7 +321,7 @@ jobs:
       contents: read
       packages: read
     if: needs.discover.outputs.has_statics == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 30

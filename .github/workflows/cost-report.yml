@@ -76,7 +76,7 @@ permissions:
 jobs:
   report:
     name: Cost Report
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 15
@@ -129,7 +129,10 @@ jobs:
                 Object.entries(rates).map(([n, v]) => [n.toLowerCase(), v]),
               );
               const v = table[k] ?? table[aliases[k]];
-              return typeof v === 'number' ? v : null;
+              if (typeof v === 'number') return v;
+              // A self-hosted runner is not billed per minute by GitHub, so it
+              // is free here unless the caller prices its own fleet.
+              return k === 'self_hosted' ? 0 : null;
             };
 
             // ── Every run tied to this PR ─────────────────────────────────────
@@ -219,7 +222,13 @@ jobs:
                 // so it is left out and the comment says the run is in flight.
                 if (j.conclusion === 'skipped' || !j.started_at || !j.completed_at) continue;
                 const ms = Math.max(0, new Date(j.completed_at) - new Date(j.started_at));
-                const label = RUNNER_LABEL(j.labels);
+                // `labels` is what the job ASKED for (`runs-on`), which says
+                // nothing about who served it once the label comes from
+                // `vars.CI_RUNNER`. The runner group does: every GitHub-hosted
+                // job lands in the "GitHub Actions" group, and a self-hosted
+                // one in the group it was registered to.
+                const selfHosted = j.runner_group_name && j.runner_group_name !== 'GitHub Actions';
+                const label = selfHosted ? 'SELF_HOSTED' : RUNNER_LABEL(j.labels);
                 billable[label] ??= { total_ms: 0, job_runs: [] };
                 billable[label].total_ms += ms;
                 // A job that RAN bills at least one minute, however briefly it

@@ -163,7 +163,7 @@ jobs:
   smoke:
     name: Next.js Prod Smoke
     if: ${{ inputs.run-smoke }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 30
