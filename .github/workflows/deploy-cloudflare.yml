@@ -41,7 +41,7 @@ permissions:
 jobs:
   validate-secrets:
     name: Validate Secrets
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 10
@@ -70,7 +70,7 @@ jobs:
     name: Deploy Worker · ${{ matrix.app }}
     needs: validate-secrets
     if: ${{ inputs.workers != '[]' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 20
@@ -98,7 +98,7 @@ jobs:
     name: Deploy Pages · ${{ matrix.app }}
     needs: validate-secrets
     if: ${{ inputs.statics != '[]' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 20
@@ -133,7 +133,7 @@ jobs:
     if: >-
       !cancelled() && needs.validate-secrets.result == 'success' &&
       (needs.deploy-workers.result == 'success' || needs.deploy-pages.result == 'success')
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 10

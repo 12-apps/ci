@@ -71,7 +71,7 @@ jobs:
   provision:
     name: Provision droplet
     if: inputs.action == 'provision'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 30
@@ -115,7 +115,7 @@ jobs:
   deploy:
     name: Redeploy
     if: inputs.action == 'deploy'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 45
@@ -412,7 +412,7 @@ jobs:
     # skip would still pay for a post-cd dispatch plus a full e2e pass against
     # whatever happens to be live, which is the waste this was meant to remove.
     if: needs.deploy.result == 'success' && needs.deploy.outputs.superseded != 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 10
@@ -434,7 +434,7 @@ jobs:
   destroy:
     name: Destroy droplet
     if: inputs.action == 'destroy'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 10
