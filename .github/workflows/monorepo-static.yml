@@ -233,6 +233,31 @@ on:
         type: string
         required: false
         default: ''
+      migration-domains-registry:
+        description: >-
+          Repo-relative path to the consumer's domain registry (see the
+          `migration-domains` action). When set, `Detect Changes` refuses the
+          tree before anything else runs unless EVERY committed migration
+          declares — `-- @domains: a, b` — the domains it affects, and the
+          declaration matches its SQL. The job fails, so its outputs never
+          resolve and every lane gated on this tier (unit, integration, e2e,
+          all of it) is skipped: a migration that does not say what it affects
+          cannot be selected for, so nothing is. Empty (default) disables it.
+        type: string
+        required: false
+        default: ''
+      migration-domains-schema:
+        description: >-
+          Comma-separated Prisma schema files/directories for the check above,
+          so a table a model maps can never lack a domain. Optional.
+        type: string
+        required: false
+        default: ''
+      migration-domains-pattern:
+        description: 'Regex selecting the migration files the check above reads.'
+        type: string
+        required: false
+        default: '(^|/)prisma/migrations/[^/]+/migration\.sql$'
       retry-gate-timeout-minutes:
         description: >-
           Bound for the retry gate. It sits in front of the whole pipeline, so
@@ -380,6 +405,20 @@ jobs:
           # yield 1 and the filter would fail on a shallow clone with a "bad
           # object" error nothing here would explain.
           fetch-depth: ${{ steps.stackbase.outputs.value != '' && '0' || '1' }}
+
+      # FIRST, before a single filter is evaluated: a migration that does not
+      # declare what it affects stops the whole pipeline here. Failing THIS job
+      # is the mechanism — every lane downstream is gated on its outputs, so
+      # nothing (unit, integration, e2e, smoke) is ever scheduled, and the red
+      # arrives in seconds instead of after a fan-out. It reads files only: no
+      # install, no database, one node process over the committed migrations.
+      - name: Every migration declares the domains it affects
+        if: ${{ inputs.migration-domains-registry != '' }}
+        uses: 12-apps/ci/.github/actions/migration-domains@v2
+        with:
+          registry: ${{ inputs.migration-domains-registry }}
+          schema: ${{ inputs.migration-domains-schema }}
+          migrations: ${{ inputs.migration-domains-pattern }}
 
       # dorny/paths-filter takes its filter spec as a YAML string; build it
       # from the newline-list input so consumers pass plain globs, not YAML.

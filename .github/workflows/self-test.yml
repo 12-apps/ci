@@ -90,6 +90,14 @@ jobs:
         shell: bash
         run: node --test .github/actions/affected-plan/__tests__/*.test.mjs
 
+      # migration-domains stops a consumer's whole pipeline before any lane is
+      # scheduled, and its parse is what affected-plan's database router trusts
+      # to narrow a migration down to the tests that can observe it. Every
+      # refusal is exercised, because a gate only ever seen passing is untested.
+      - name: migration-domains
+        shell: bash
+        run: node --test .github/actions/migration-domains/__tests__/*.test.mjs
+
       - name: package-gates
         shell: bash
         run: node --test .github/actions/package-gates/__tests__/package-gates.test.mjs
