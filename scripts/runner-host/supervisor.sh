@@ -153,8 +153,9 @@ remove_stale() {
 }
 
 jit_config() {
+  # runner_name is set by the caller: this runs in a $(…) subshell, so an
+  # assignment here would never reach the state file or the logs.
   local body
-  runner_name="${prefix}-$(date +%s)"
   body=$(jq -n \
     --arg name "$runner_name" \
     --arg labels "$CI_RUNNER_LABELS" \
@@ -251,11 +252,29 @@ run_one() {
   watch_job
 }
 
+# ── one-shot modes (install.sh / uninstall.sh) ───────────────────────────────
+# CHECK_ONLY: prove the credential can manage runners on the scope, then exit.
+# DEREGISTER_ONLY: remove every runner this HOST registered (any slot, any
+# status), then exit.
+if [[ "${CI_RUNNER_CHECK_ONLY:-}" == 1 || "${CI_RUNNER_DEREGISTER_ONLY:-}" == 1 ]]; then
+  trap - EXIT
+  auth || { log "the credential was refused"; exit 1; }
+  runners=$(api "${api_base}/${CI_RUNNER_SCOPE}/actions/runners?per_page=100") \
+    || { log "the credential cannot list runners on ${CI_RUNNER_SCOPE}"; exit 1; }
+  if [[ "${CI_RUNNER_DEREGISTER_ONLY:-}" == 1 ]]; then
+    host="${CI_RUNNER_NAME:-$(hostname -s)}-"
+    for id in $(jq -r --arg p "$host" '.runners[] | select(.name | startswith($p)) | .id' <<<"$runners"); do
+      api -X DELETE "${api_base}/${CI_RUNNER_SCOPE}/actions/runners/${id}" >/dev/null && log "deregistered runner ${id}"
+    done
+  fi
+  exit 0
+fi
+
 # ── the loop ─────────────────────────────────────────────────────────────────
 cleanup
 failures=0
 while true; do
-  phase=registering; runner_name=""; job=""; job_started=""; save_state
+  phase=registering; runner_name="${prefix}-$(date +%s)"; job=""; job_started=""; save_state
   if auth && remove_stale && jit=$(jit_config); then
     failures=0
     run_one "$jit" || true

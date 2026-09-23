@@ -170,6 +170,9 @@ test("records the job, then a job that outlives its cap is killed and recorded",
     "the timed-out container was not removed",
   );
   assert.equal(state.job, "e2e shard 1/3");
+  // Set by the caller of jit_config, which runs in a subshell: an assignment
+  // inside it never reached the state file (found on a real Docker run).
+  assert.match(state.runner, /^host-1-\d+$/);
   assert.match(state.last_failure, /job 'e2e shard 1\/3' exceeded 0s/);
   assert.equal(state.phase, "stopped");
 });
