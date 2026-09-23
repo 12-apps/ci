@@ -183,6 +183,73 @@ the bump was supposed to reach, and report success doing it.
 A package whose `exports` point at an unbuilt `dist/` falls back to `src/`,
 which is what a test run actually resolves.
 
+## Migrations and schema files — the `database` block
+
+A migration and a `.prisma` file are not source. Routing them to the database
+client entry is correct and useless: every database test loads that entry, so
+any migration selected every one of them. Measured on a consumer: one backfill
+of one column — `UPDATE clients SET comanda_cancel_answer_roles = …` — selected
+256 of 282 integration files on seven shards. With this block, the same diff
+selects 14 on one.
+
+```json
+"database": {
+  "registry": "packages/prisma/prisma/domains.json",
+  "schema": ["packages/prisma/prisma/schema"],
+  "migrations": "^packages/[^/]+/prisma/migrations/[^/]+/migration\\.sql$",
+  "schemaFiles": "^packages/[^/]+/prisma/(?:schema/)?[^/]+\\.prisma$",
+  "global": ["packages/prisma/src/index.ts"],
+  "schemaReaders": ["packages/prisma/scripts/prisma-partials.mjs"],
+  "readerMarker": "[\"'`/]migrations[\"'`/]|MIGRATIONS_DIR",
+  "carriers": ["tests/integration/**", "packages/prisma/prisma/pglite-template.ts"],
+  "always": ["apps/web/tests/integration/migrations-replay.integration.test.ts"],
+  "lanes": { "unit": "text", "integration": "effects" }
+}
+```
+
+The router owns every path the two patterns match; a regex `route` that also
+matches one is not consulted. For each path it asks what the change DOES:
+
+1. **A migration** is parsed (`migration-domains/lib/sql.mjs`) into per-table
+   effects — the whole table (`*`: new or deleted rows, a trigger, a NOT NULL
+   column every INSERT must now supply), a set of columns (a backfill, a column
+   added with a default, a constraint over them), or nothing observable (a
+   comment, a non-unique index). A migration whose SQL is unchanged apart from
+   comments changes nothing. What dynamic SQL hides, its `-- @domains:`
+   declaration covers: every table of a declared domain the parse saw nothing of
+   counts as `*`. A migration with no valid declaration is left UNROUTED — so it
+   is unclassified and the plan stops, the same verdict the gate gives it.
+2. **A schema file** is diffed block by block: changed models, and inside each
+   the changed fields (`@@unique`/`@@index` name theirs; `@@map`/`@@id`, or an
+   added or removed model, are the whole table). A `generator`/`datasource`
+   change routes to `global`. Comment-only edits change nothing.
+3. **Where code touches it.** A table is reached through its Prisma delegate
+   (`prisma.order.findMany(`), raw SQL naming it, or a relation field in another
+   model's `include`/nested write. A column is reached through its field name —
+   and a field name that several models share, or a plain lower-case word
+   (`status`, `name`), only counts in a declaration that ALSO touches the model.
+4. **Which exports hold it.** Each hit is attributed to its top-level
+   declaration and then to the exports that can see it, so the route is
+   `file#a,b` and the walk starts at those symbols, not every export of a
+   repository module holding one query against the table. A test file, a file
+   that cannot be bracketed, or a hit at module level is seeded whole.
+5. **Who reads the files themselves.** A file naming ONE migration directory
+   runs when that migration changes. A file matching `readerMarker` reads the
+   folder's TEXT and runs on any migration change — unless it is a `carrier`
+   (glob), one that only replays the folder to build a database or spells its
+   path: that database differs exactly where step 1 says. `schemaReaders` run on
+   any schema change.
+6. **`always`** runs on any migration or schema change that alters SQL or a
+   model, so a migration nothing else can observe still applies somewhere.
+
+`lanes` says how each lane consumes it: `effects` (all of the above), `text`
+(a lane that never opens a database — migrations reach only their text
+readers; schema edits still reach the code naming changed fields) or `off`.
+
+Routes may now answer with an object, `{ entries }`, which is classified even
+when empty ("routed to nothing" is not "unclassified"), and an entry may name
+symbols — `file#a,b` — seeding only those.
+
 ## The plan document
 
 ```jsonc
