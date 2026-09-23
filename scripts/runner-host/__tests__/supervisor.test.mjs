@@ -202,7 +202,7 @@ test("a GitHub App mints a signed JWT, a narrowed installation token, and regist
   assert.equal(status, 0, stderr);
 
   const bearer = (c) => (c.argv.find((x) => x.startsWith("Authorization: Bearer ")) ?? "").slice(22);
-  const lookup = calls.find((c) => c.bin === "curl" && c.argv.includes("https://api.test/repos/acme/app/installation"));
+  const lookup = calls.find((c) => c.bin === "curl" && c.argv.some((arg) => arg === "https://api.test/repos/acme/app/installation"));
   assert.ok(lookup, "the installation was not looked up on the scope");
   const [h, p, s] = bearer(lookup).split(".");
   assert.deepEqual(JSON.parse(Buffer.from(h, "base64url")), { alg: "RS256", typ: "JWT" });
@@ -215,7 +215,7 @@ test("a GitHub App mints a signed JWT, a narrowed installation token, and regist
   const verified = spawnSync("openssl", ["dgst", "-sha256", "-verify", pub, "-signature", sigFile], { input: `${h}.${p}` });
   assert.equal(verified.status, 0, "the JWT signature does not verify with the App's public key");
 
-  const mint = calls.find((c) => c.bin === "curl" && c.argv.includes("https://api.test/app/installations/42/access_tokens"));
+  const mint = calls.find((c) => c.bin === "curl" && c.argv.some((arg) => arg === "https://api.test/app/installations/42/access_tokens"));
   assert.ok(mint, "no installation token was minted");
   assert.deepEqual(JSON.parse(argAfter(mint.argv, "-d")), { repositories: ["app"], permissions: { administration: "write" } });
 
