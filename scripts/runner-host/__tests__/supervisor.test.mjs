@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { spawnSync, execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, closeSync, mkdtempSync, openSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,14 +42,17 @@ jq -cn --arg bin ${bin} --arg jit "\${RUNNER_JITCONFIG:-}" '{bin:$bin, argv:$ARG
 url=""
 for a in "$@"; do case "$a" in https://*) url="$a";; esac; done
 case "$url" in
-  */generate-jitconfig) ${jitFails ? "exit 22" : `echo '{"encoded_jit_config":"${JIT}"}'`} ;;
+  */generate-jitconfig)
+    prev=""; for a in "$@"; do [[ "$prev" == -d ]] && jq -r .name <<<"$a" > "${dir}/registered"; prev="$a"; done
+    ${jitFails ? "exit 22" : `echo '{"encoded_jit_config":"${JIT}"}'`} ;;
   */repos/acme/app/installation) echo '{"id":42}' ;;
   */app/installations/42/access_tokens) echo '{"token":"${INSTALL_TOKEN}"}' ;;
-  */actions/runners\\?*) echo '{"runners":[
-      {"id":7,"name":"host-1-1700000000","status":"offline"},
-      {"id":8,"name":"host-1-1700000001","status":"online"},
-      {"id":9,"name":"host-10-1700000002","status":"offline"},
-      {"id":10,"name":"other-1-1","status":"offline"}]}' ;;
+  */actions/runners\\?*) jq -n --arg mine "$(cat "${dir}/registered" 2>/dev/null)" '{runners: ([
+      {id:7, name:"host-1-1700000000", status:"offline"},
+      {id:8, name:"host-1-1700000001", status:"online"},
+      {id:9, name:"host-10-1700000002", status:"offline"},
+      {id:10, name:"other-1-1", status:"offline"}]
+      + (if $mine == "" then [] else [{id:99, name:$mine, status:"online"}] end))}' ;;
   *) echo '{}' ;;
 esac
 `,
@@ -78,9 +81,16 @@ exit 0
 
 function runOnce(env = {}, opts = {}) {
   const { dir, log } = stubs(opts);
+  // stderr goes to a FILE: on timeout spawnSync closes its pipes, and the
+  // stopping supervisor's own log line would die of SIGPIPE — journald, what
+  // it writes to in production, never goes away under it.
+  const errPath = path.join(dir, "stderr.txt");
+  const errFd = openSync(errPath, "w");
   const result = spawnSync("bash", [SCRIPT, "1"], {
     encoding: "utf8",
-    timeout: 30_000,
+    stdio: ["ignore", "pipe", errFd],
+    timeout: opts.stopAfterMs ?? 30_000,
+    killSignal: "SIGTERM",
     env: {
       PATH: `${dir}:${process.env.PATH}`,
       CI_RUNNER_TOKEN: "pat",
@@ -94,6 +104,8 @@ function runOnce(env = {}, opts = {}) {
       ...env,
     },
   });
+  closeSync(errFd);
+  result.stderr = readFileSync(errPath, "utf8");
   let calls = [];
   try {
     calls = readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
@@ -157,6 +169,29 @@ test("removes only THIS slot's offline runners", () => {
   // 8 is online (a live job), 9 is slot 10 — `host-1` is a prefix of `host-10`,
   // which is why the match is on `host-1-` — and 10 is another host.
   assert.deepEqual(deleted, ["7"]);
+});
+
+const deletedIds = (calls) =>
+  calls
+    .filter((c) => c.bin === "curl" && c.argv.includes("DELETE"))
+    .map((c) => c.argv.find((x) => x.startsWith("https://")).split("/").at(-1));
+
+test("a slot stopped while its runner waits deregisters that runner, and only it", () => {
+  // systemctl stop = SIGTERM to the supervisor. The container is still up
+  // (runPolls is large), so the runner is registered and waiting.
+  const { status, stderr, calls, state } = runOnce({}, { runPolls: 1000, stopAfterMs: 1500 });
+  // 143 is what the unit's SuccessExitStatus= expects: a stop is not a failure.
+  assert.equal(status, 143, `the supervisor did not stop through its trap:\n${stderr}`);
+  // 7 is swept before registering; 99 is the runner this slot registered.
+  assert.deepEqual(deletedIds(calls), ["7", "99"]);
+  assert.equal(state.phase, "stopped");
+  const rm = calls.findLastIndex((c) => c.bin === "docker" && c.argv[0] === "rm" && c.argv.includes("ci-runner-1"));
+  assert.ok(rm > calls.findIndex((c) => c.bin === "docker" && c.argv[0] === "run"), "the container outlived the stop");
+});
+
+test("a runner whose job finished is not deregistered again on exit", () => {
+  const { calls } = runOnce({}, { runPolls: 2, logs: "Running job: build\nJob build completed with result: Succeeded\n" });
+  assert.deepEqual(deletedIds(calls), ["7"]);
 });
 
 test("records the job, then a job that outlives its cap is killed and recorded", () => {

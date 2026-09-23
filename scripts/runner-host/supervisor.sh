@@ -191,7 +191,24 @@ cleanup() {
   docker rm -f "$container" >/dev/null 2>&1 || true
   disk_down
 }
-on_exit() { cleanup; phase=stopped; save_state 2>/dev/null || true; }
+
+# A runner whose container ended deregisters itself (it is single-use) or is
+# swept by the next iteration's remove_stale. One still waiting when the slot
+# STOPS has neither: it would sit offline under Settings → Runners until this
+# slot next starts, and for ever if it never does. So the slot takes its own
+# registration with it — by exact name, never a neighbour's.
+live=0
+deregister_self() {
+  (( live )) && [[ -n "$runner_name" ]] || return 0
+  local id
+  auth || return 0
+  id=$(api --max-time 10 "${api_base}/${CI_RUNNER_SCOPE}/actions/runners?per_page=100" \
+    | jq -r --arg n "$runner_name" '.runners[] | select(.name == $n) | .id') || return 0
+  [[ -n "$id" ]] || return 0
+  api --max-time 10 -X DELETE "${api_base}/${CI_RUNNER_SCOPE}/actions/runners/${id}" >/dev/null \
+    && log "deregistered ${runner_name}" || true
+}
+on_exit() { cleanup; deregister_self; live=0; phase=stopped; save_state 2>/dev/null || true; }
 trap on_exit EXIT
 trap 'exit 143' TERM INT
 
@@ -247,9 +264,10 @@ run_one() {
     fail "the job container did not start"
     return 1
   fi
-  phase=idle; job=""; job_started=""; save_state
+  live=1; phase=idle; job=""; job_started=""; save_state
   log "registered ${runner_name}; waiting for a job"
   watch_job
+  live=0
 }
 
 # ── one-shot modes (install.sh / uninstall.sh) ───────────────────────────────

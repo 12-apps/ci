@@ -163,7 +163,9 @@ A failed, hung or killed job cannot leave a slot busy. The container is removed
 on every path (done, failed, timeout, `systemctl stop`, a crash of the
 supervisor on its next start), the per-job disk is unmounted and deleted, and
 an offline runner the slot left behind is deregistered before it registers
-again. Registration failures back off exponentially. After 8 in a row the
+again. A slot that is stopped while its runner waits for a job deregisters that
+runner on the way out, so `systemctl stop` or a reboot leaves nothing offline
+under Settings → Runners. Registration failures back off exponentially. After 8 in a row the
 slot's process exits, systemd restarts it 30 s later, and `ci-runner-status`
 shows the failure until it clears.
 

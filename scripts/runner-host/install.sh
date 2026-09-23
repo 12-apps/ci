@@ -141,7 +141,13 @@ StartLimitIntervalSec=0
 [Service]
 EnvironmentFile=${envfile}
 ExecStart=${prefix}/supervisor.sh %i
-ExecStop=-/usr/bin/docker stop --time 30 ci-runner-%i
+# Stop = SIGTERM to the supervisor alone; its trap removes the container, the
+# per-job disk and the slot's own registration, then exits 143. No ExecStop:
+# stopping the container first let the loop see a finished job and register a
+# fresh runner in the moment before the SIGTERM arrived.
+KillMode=mixed
+TimeoutStopSec=60
+SuccessExitStatus=143
 Restart=always
 RestartSec=30
 
