@@ -254,10 +254,10 @@ on:
         required: false
         default: ''
       migration-domains-pattern:
-        description: 'Regex selecting the migration files the check above reads.'
+        description: 'Path glob selecting the migration files the check above reads.'
         type: string
         required: false
-        default: '(^|/)prisma/migrations/[^/]+/migration\.sql$'
+        default: '**/prisma/migrations/*/migration.sql'
       retry-gate-timeout-minutes:
         description: >-
           Bound for the retry gate. It sits in front of the whole pipeline, so

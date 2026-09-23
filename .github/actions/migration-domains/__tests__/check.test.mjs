@@ -158,3 +158,13 @@ test("--write refuses to guess for SQL it cannot fully read", () => {
   assert.equal(r.status, 1);
   assert.match(r.stdout, /20260102000000_dyn.*declares no domains/);
 });
+
+test("--migrations is a glob: regex syntax in it is literal, never compiled", () => {
+  const root = repo(BASE);
+  // As a regex this would be a syntax error; as a glob it names no file.
+  const r = run(root, "--migrations", "prisma/migrations/(*/migration.sql");
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /the gate would pass having checked nothing/);
+  // And the default glob reaches a migration at any depth.
+  assert.equal(run(root, "--migrations", "**/prisma/migrations/*/migration.sql").status, 0);
+});

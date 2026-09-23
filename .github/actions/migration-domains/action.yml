@@ -23,10 +23,11 @@ inputs:
     default: ''
   migrations:
     description: >-
-      Regex over repo-relative paths selecting the migration files. Every
-      committed match is checked — the whole history, not only the diff.
+      Path glob selecting the migration files (`**` any depth, `*` one path
+      segment). Every committed match is checked — the whole history, not only
+      the diff.
     required: false
-    default: '(^|/)prisma/migrations/[^/]+/migration\.sql$'
+    default: '**/prisma/migrations/*/migration.sql'
   working-directory:
     description: 'Consumer checkout root the paths are relative to.'
     required: false

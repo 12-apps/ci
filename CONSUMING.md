@@ -366,7 +366,7 @@ static:
   with:
     migration-domains-registry: packages/prisma/prisma/domains.json
     migration-domains-schema: packages/prisma/prisma/schema   # optional
-    # migration-domains-pattern: '(^|/)prisma/migrations/[^/]+/migration\.sql$'
+    # migration-domains-pattern: '**/prisma/migrations/*/migration.sql'
 ```
 
 The opening step of `Detect Changes` runs the

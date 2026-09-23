@@ -48,7 +48,21 @@ const arg = (name, fallback = null) => {
 
 const root = resolve(arg("root", process.cwd()));
 const registryPath = arg("registry");
-const pattern = new RegExp(arg("migrations", String.raw`(^|/)prisma/migrations/[^/]+/migration\.sql$`));
+/**
+ * The migrations to read, as a path GLOB — `**` any depth, `*` one segment.
+ * A glob rather than a regex on purpose: the value arrives on the command line
+ * from a caller's workflow input, and compiling it verbatim would hand that
+ * caller the regex engine. Every character but the two wildcards is escaped.
+ */
+const escapeSegment = (part) => part.split("*").map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[^/]*");
+const globToRegExp = (glob) =>
+  new RegExp(
+    `^${glob
+      .split("**/")
+      .map((chunk) => chunk.split("**").map(escapeSegment).join(".*"))
+      .join("(?:.*/)?")}$`,
+  );
+const pattern = globToRegExp(arg("migrations", "**/prisma/migrations/*/migration.sql"));
 const schemaDirs = (arg("schema", "") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 const write = argv.includes("--write");
 
