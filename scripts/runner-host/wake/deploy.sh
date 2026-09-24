@@ -18,7 +18,8 @@
 # tuned for), MAX_HOSTS (30; 30 × 8 vCPU must fit the account's spot vCPU
 # quota, L-34B43A08), POOL_SIZE (0; stopped hosts kept warm, see README), TOKEN_PARAMETER
 # (/ci-runner/github-app-key), FUNCTION_NAME (ci-runner-scale),
-# WAKE_SECRET_FILE (~/.ci-runner-wake-secret, created 0600, never printed).
+# WAKE_SECRET_FILE (~/.ci-runner-wake-secret, created 0600, never printed),
+# ROOT_IOPS (6000) and ROOT_THROUGHPUT (500 MB/s) for the hosts' gp3 root volume.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -29,6 +30,12 @@ types="${INSTANCE_TYPES:-m7a.2xlarge,m6a.2xlarge,m7i.2xlarge,m7i-flex.2xlarge,m6
 slots="${SLOTS_PER_HOST:-2}"
 max_hosts="${MAX_HOSTS:-30}"
 pool_size="${POOL_SIZE:-0}"
+# gp3's baseline is 125 MB/s and 3000 IOPS. A job's dependency install is
+# disk-bound once the cache is found (future-pay: 529 MB restored in 2.5 s,
+# then 19 s to extract and more to link 1887 packages), so the root volume
+# gets more; it is billed only while a host exists.
+root_iops="${ROOT_IOPS:-6000}"
+root_throughput="${ROOT_THROUGHPUT:-500}"
 param="${TOKEN_PARAMETER:-/ci-runner/github-app-key}"
 fn="${FUNCTION_NAME:-ci-runner-scale}"
 role="$fn"
@@ -89,13 +96,13 @@ host_role=$(aws iam get-instance-profile --instance-profile-name "${profile_arn#
 # back to on-demand when no spot pool has capacity (index.mjs).
 data=$(jq -n --arg ami "$AMI_ID" --arg type "${types%%,*}" --arg profile "$profile_arn" \
   --arg sg "$sg" --arg label "$label" \
-  --arg dev "$root_device" --argjson gb "$root_gb" '{
+  --arg dev "$root_device" --argjson gb "$root_gb" --argjson iops "$root_iops" --argjson tput "$root_throughput" '{
   ImageId: $ami, InstanceType: $type,
   IamInstanceProfile: {Arn: $profile},
   SecurityGroupIds: [$sg],
   MetadataOptions: {HttpTokens: "required", HttpEndpoint: "enabled"},
   InstanceInitiatedShutdownBehavior: "terminate",
-  BlockDeviceMappings: [{DeviceName: $dev, Ebs: {VolumeSize: $gb, VolumeType: "gp3", Encrypted: true, DeleteOnTermination: true}}],
+  BlockDeviceMappings: [{DeviceName: $dev, Ebs: {VolumeSize: $gb, VolumeType: "gp3", Iops: $iops, Throughput: $tput, Encrypted: true, DeleteOnTermination: true}}],
   TagSpecifications: [
     {ResourceType: "instance", Tags: [{Key: "Project", Value: "ci-runner"}, {Key: "Name", Value: "ci-runner-fleet"}, {Key: "ci-runner-fleet", Value: $label}]},
     {ResourceType: "volume", Tags: [{Key: "Project", Value: "ci-runner"}]}
