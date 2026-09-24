@@ -27,8 +27,21 @@ ENV DEBIAN_FRONTEND=noninteractive \
     RUNNER_TOOL_CACHE=/opt/hostedtoolcache \
     AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache
 
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
+# Ubuntu's security mirror serves nodes out of step with its index: on
+# 2026-09-24 91.189.91.82/.83 answered 404 for the libexpat1 the fresh index
+# named, twice in an hour, while other nodes served it. apt does not retry a
+# 404, so every install here goes through apt-install: update, install, and on
+# failure wait and start over (a new update, often a different node).
+RUN printf '%s\n' '#!/bin/sh' \
+      'for i in 1 2 3 4 5; do' \
+      '  apt-get update && apt-get install -y --no-install-recommends "$@" && exit 0' \
+      '  echo "apt-install: attempt $i failed; retrying" >&2; sleep $((i * 15))' \
+      'done' \
+      'exit 1' > /usr/local/bin/apt-install \
+ && chmod 0755 /usr/local/bin/apt-install \
+ && echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries
+
+RUN apt-install \
       build-essential ca-certificates curl file git git-lfs gnupg iproute2 \
       iptables jq less lsb-release openssh-client procps psmisc python3 \
       python3-pip python3-venv rsync shellcheck sudo tini tzdata unzip wget \
@@ -40,8 +53,7 @@ RUN apt-get update \
  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli.gpg \
  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli.gpg] https://cli.github.com/packages stable main" \
       > /etc/apt/sources.list.d/github-cli.list \
- && apt-get update \
- && apt-get install -y --no-install-recommends \
+ && apt-install \
       containerd.io docker-buildx-plugin docker-ce docker-ce-cli \
       docker-compose-plugin gh \
  && rm -rf /var/lib/apt/lists/*
@@ -62,9 +74,9 @@ RUN curl -fsSL "https://nodejs.org/dist/${SYSTEM_NODE}/node-${SYSTEM_NODE}-linux
 # top — GTK 3, libnotify, libsecret, FUSE for AppImages, and Xvfb — which
 # ubuntu-latest also carries: printer-agent's packaged-start proof died with
 # `libgtk-3.so.0: cannot open shared object file` without them.
-RUN npx -y "playwright@${PLAYWRIGHT_VERSION}" install-deps chromium \
- && apt-get update \
- && apt-get install -y --no-install-recommends \
+RUN (npx -y "playwright@${PLAYWRIGHT_VERSION}" install-deps chromium \
+      || { sleep 30; npx -y "playwright@${PLAYWRIGHT_VERSION}" install-deps chromium; }) \
+ && apt-install \
       libfuse2t64 libgtk-3-0t64 libnotify4 libsecret-1-0 libxss1 libxtst6 \
       xdg-utils xvfb \
  && rm -rf /root/.npm /var/lib/apt/lists/*
