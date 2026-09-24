@@ -29,6 +29,11 @@ runuser -u runner -- env ${NODE_EXTRA_CA_CERTS:+NODE_EXTRA_CA_CERTS="$NODE_EXTRA
   done
   node -e \"process.exit(Number(process.versions.node.split(\\\".\\\")[0]) >= 20 ? 0 : 1)\" \
     || { echo \"smoke: system node is older than 20\" >&2; exit 1; }
+  # Electron apps load these at start; a packaged app dies without them.
+  for lib in libgtk-3.so.0 libnotify.so.4 libsecret-1.so.0 libfuse.so.2; do
+    /sbin/ldconfig -p | grep -q \"\$lib\" || { echo \"smoke: missing \$lib\" >&2; exit 1; }
+  done
+  command -v Xvfb >/dev/null || { echo \"smoke: missing Xvfb\" >&2; exit 1; }
   docker buildx version >/dev/null
   docker compose version >/dev/null
 
