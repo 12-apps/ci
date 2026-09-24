@@ -20,16 +20,31 @@ name: Cost Report (reusable)
 on:
   workflow_call:
     inputs:
+      # `self_hosted` is one runner slot of the scripts/runner-host fleet, all
+      # in, per minute of job. Measured on 2026-09-24:
+      #   host   $0.15/h  8-vCPU spot (Ohio averaged $0.143 over 24 pools)
+      #        + $0.054/h gp3 root: 120 GB, 6000 IOPS, 500 MB/s ($39.6/month)
+      #        + $0.005/h public IPv4
+      #        = $0.209/h for 2 slots = $0.1045 per slot-hour
+      #   busy   61%: 2448 jobs that day ran 86.2 job-hours on hosts that were
+      #          up 70.6 host-hours (boot, idle-stop's 5 minutes, empty slots)
+      #   rate   0.1045 / 0.61 / 60 = $0.0029 per job-minute
+      # Egress is left out: a job downloads far more than it uploads, and
+      # inbound traffic is free. Re-measure when the fleet's types, disk or
+      # slots change.
       runner-rates:
         description: >-
           JSON map of runner class -> USD per minute. Keys are matched
           case-insensitively against the timing API's runner labels (UBUNTU,
-          MACOS, WINDOWS), with `linux` accepted as an alias for UBUNTU. Defaults
-          are GitHub's published public rates for 2-core runners; override for
-          larger runners, a different plan, or a non-GitHub-hosted fleet.
+          MACOS, WINDOWS, SELF_HOSTED), with `linux` accepted as an alias for
+          UBUNTU. Defaults are GitHub's published public rates for 2-core
+          runners, and for `self_hosted` what one runner slot of the
+          scripts/runner-host fleet costs on AWS per minute (derived in
+          the comment above); override for larger runners, a different
+          plan, or another fleet.
         type: string
         required: false
-        default: '{"linux":0.006,"linux_arm":0.005,"windows":0.01,"macos":0.062}'
+        default: '{"linux":0.006,"linux_arm":0.005,"windows":0.01,"macos":0.062,"self_hosted":0.0029}'
       comment-marker:
         description: >-
           Hidden HTML marker identifying this workflow's comment. The job
@@ -129,11 +144,14 @@ jobs:
                 Object.entries(rates).map(([n, v]) => [n.toLowerCase(), v]),
               );
               const v = table[k] ?? table[aliases[k]];
-              if (typeof v === 'number') return v;
-              // A self-hosted runner is not billed per minute by GitHub, so it
-              // is free here unless the caller prices its own fleet.
-              return k === 'self_hosted' ? 0 : null;
+              // A class with no rate is reported as unpriced, never as free:
+              // a self-hosted runner costs nothing on GitHub's bill and a
+              // great deal on the cloud bill that runs it.
+              return typeof v === 'number' ? v : null;
             };
+            // EC2 bills a host by the second, so self-hosted time is priced as
+            // wall-clock; only GitHub rounds each job up to a whole minute.
+            const perSecond = (label) => label === 'SELF_HOSTED';
 
             // ── Every run tied to this PR ─────────────────────────────────────
             // Cumulative cost is ALWAYS recomputed from the API rather than read
@@ -211,7 +229,11 @@ jobs:
                 owner,
                 repo,
                 run_id: run.id,
-                filter: 'latest',
+                // Every attempt, not the latest: a re-run bills again, and the
+                // attempt it replaced was billed too. On the spot fleet a job
+                // lost with its host is re-run automatically, so counting only
+                // the last attempt drops exactly the minutes a reclaim cost.
+                filter: 'all',
                 per_page: 100,
               });
               const billable = {};
@@ -248,6 +270,9 @@ jobs:
 
             const perRun = [];
             const totals = new Map(); // runner label -> { billed, raw }
+            // What the self-hosted jobs would have billed on GitHub-hosted
+            // runners: each job rounded up to a minute, at the `linux` rate.
+            const hosted = { jobs: 0, billed: 0 };
             let failed = 0;
             let estimated = 0;
             for (const run of runs) {
@@ -264,7 +289,13 @@ jobs:
                       repo,
                       run_id: run.id,
                     });
-                    if (totalMsOf(data) > 0) timing = data;
+                    // The billing endpoint knows only GitHub-hosted runners: a
+                    // self-hosted job is absent from it, so the jobs-derived
+                    // self-hosted time is kept alongside it.
+                    if (totalMsOf(data) > 0) {
+                      const own = timing.billable.SELF_HOSTED;
+                      timing = { ...data, billable: { ...data.billable, ...(own ? { SELF_HOSTED: own } : {}) } };
+                    }
                   } catch (e) {
                     core.warning(`Billing endpoint unavailable for run ${run.id}: ${e.message}`);
                   }
@@ -281,9 +312,14 @@ jobs:
                 // Prefer per-job durations; fall back to the run total when the
                 // API omits job_runs (older runs), which under-reports rather
                 // than inventing jobs that were not there.
-                const billedMs = jobs.length
+                const roundedMs = jobs.length
                   ? jobs.reduce((a, j) => a + Math.ceil((j.duration_ms ?? 0) / 60000) * 60000, 0)
                   : Math.ceil((usage.total_ms ?? 0) / 60000) * 60000;
+                const billedMs = perSecond(label) ? (usage.total_ms ?? 0) : roundedMs;
+                if (perSecond(label)) {
+                  hosted.jobs += jobs.length;
+                  hosted.billed += roundedMs / 60000;
+                }
                 const billedMin = billedMs / 60000;
                 const rawMin = (usage.total_ms ?? 0) / 60000;
                 const rate = rateFor(label);
@@ -324,6 +360,26 @@ jobs:
                 `${runs.length} run${runs.length === 1 ? '' : 's'} on this PR`,
               '',
             );
+            // The comparison is the point of running a fleet at all, so it is
+            // stated next to the total rather than left for the reader to work
+            // out from two rate tables.
+            const own = totals.get('SELF_HOSTED');
+            const linuxRate = rateFor('UBUNTU');
+            if (own && hosted.jobs && linuxRate !== null) {
+              const onGitHub = hosted.billed * linuxRate;
+              const saved = own.priced
+                ? ` Self-hosted cost **${money(own.cost)}**, ` +
+                  (onGitHub > own.cost
+                    ? `**${money(onGitHub - own.cost)} less** (${Math.round((1 - own.cost / onGitHub) * 100)}%).`
+                    : `**${money(own.cost - onGitHub)} more**.`)
+                : '';
+              lines.push(
+                `> On GitHub-hosted runners, the ${hosted.jobs} self-hosted job` +
+                  `${hosted.jobs === 1 ? '' : 's'} would have billed **${mins(hosted.billed)} min** ` +
+                  `(each rounded up to a minute) at the \`linux\` rate: **${money(onGitHub)}**.${saved}`,
+                '',
+              );
+            }
 
             // A stacked pull request is one layer of a larger change, and every
             // layer runs the same workflows. Reported alone, this figure reads as
@@ -380,6 +436,11 @@ jobs:
             const notes = [
               'Billed minutes round **each job** up to the whole minute, which is how ' +
                 'GitHub bills; wall-clock is the unrounded sum.',
+              ...(own
+                ? ['**SELF_HOSTED** is billed by AWS per second, so its minutes are wall-clock. ' +
+                    'Its rate is what one runner slot costs, all in: the spot host, its disk ' +
+                    'and public address, and its share of boot and idle time.']
+                : []),
               'The run posting this comment is still in progress, so jobs that had not ' +
                 'finished when it ran — this one included — are not yet counted.',
             ];
