@@ -28,6 +28,13 @@ if ! docker info >/dev/null 2>&1; then
   exit 70
 fi
 
+# Docker exports HOSTNAME=<container id>, which resolves to the container's
+# bridge address; GitHub's runner VM exports no HOSTNAME at all. The runner
+# hands its environment to every step, and servers that read it as their bind
+# address (future-pay's `process.env.HOSTNAME ?? "0.0.0.0"`) then listen on
+# 172.17.0.x alone: Playwright's web servers never answered on localhost.
+unset HOSTNAME
+
 cd /home/runner/actions-runner
 # With a per-job disk the workspace is a bind mount the host created as root.
 mkdir -p _work && chown runner:runner _work

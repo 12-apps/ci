@@ -18,8 +18,11 @@ docker run --rm --privileged --shm-size 2g --volume /var/lib/docker \
   --entrypoint bash "$image" -c '
 set -euo pipefail
 test "$(id -u)" = 0
-# What the entrypoint does first: `localhost` is 127.0.0.1 alone.
+# What the entrypoint does first: `localhost` is 127.0.0.1 alone, and no
+# HOSTNAME reaches the job (servers bind to it; the GitHub VM exports none).
 ci-runner-localhost
+grep -q "^unset HOSTNAME$" /usr/local/bin/ci-runner-entrypoint \
+  || { echo "smoke: the entrypoint lets the Docker HOSTNAME reach the job" >&2; exit 1; }
 dockerd >/var/log/dockerd.log 2>&1 &
 for _ in $(seq 1 120); do docker info >/dev/null 2>&1 && break; sleep 0.5; done
 runuser -u runner -- env ${NODE_EXTRA_CA_CERTS:+NODE_EXTRA_CA_CERTS="$NODE_EXTRA_CA_CERTS"} bash -euo pipefail -c "
