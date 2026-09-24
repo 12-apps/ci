@@ -137,3 +137,34 @@ test("declarationsOf keeps exported-ness and the identifiers a body uses", () =>
   assert.deepEqual(decls.map((d) => [d.name, d.exported]), [["hidden", false], ["shown", true]]);
   assert.ok(decls[1].refs.has("hidden"));
 });
+
+// --- destructuring declarations ---------------------------------------------
+
+test("an exported destructuring declares every name it binds", () => {
+  // Read as an import clause, this line used to vanish — every importer of
+  // Given/When/Then was cut off from a change to `test`.
+  const src = [
+    'import { World } from "./world";',
+    "export const test = base.extend({ world: async ({}, use) => use(new World()) });",
+    "export const { Given, When, Then } = createBdd(test);",
+  ].join("\n");
+  assert.deepEqual(reach(src, ["World"]), ["Given", "Then", "When", "test"]);
+});
+
+test("renamed, defaulted and rest names are the ones bound", () => {
+  const decls = declarationsOf("export const { a: b, c = 1, ...rest } = make();\n");
+  assert.deepEqual(decls[0].names, ["b", "c", "rest"]);
+  assert.equal(decls[0].exported, true);
+});
+
+test("a destructuring pattern that cannot be read here widens", () => {
+  assert.equal(declarationsOf("export const {\n  a,\n  b,\n} = make();\n"), null);
+  assert.equal(declarationsOf("export const { a: { b } } = make();\n"), null);
+});
+
+test("a declaration continued on the next line is not closed by it", () => {
+  // `=` at the end of a line means the next line is its value, even when that
+  // line starts with `async function`.
+  const src = ['import { dep } from "./dep";', "export const handler =", "  async function handle(req) { return dep(req); };"].join("\n");
+  assert.deepEqual(reach(src, ["dep"]), ["handler"]);
+});

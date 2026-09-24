@@ -22,6 +22,7 @@ import {
   isTypeOnlyClause,
   parseImports,
   resolveSpecifier,
+  scan,
   stripComments,
 } from "../lib/modules.mjs";
 
@@ -139,4 +140,47 @@ test("a published package is external, not a hole in the graph", () => {
   const root = fixture({ "a/b.ts": 'import React from "react";\n' });
   const { unresolved } = buildGraph(root, ["a/b.ts"], { packages: new Map() });
   assert.deepEqual(unresolved, []);
+});
+
+// --- regex literals -----------------------------------------------------------
+
+test("a quote inside a regex literal does not open a string", () => {
+  // The apostrophe in "fridge's" used to open a string that never closed:
+  // every comment after it survived, every import after it was masked away.
+  const src = 'Given(/^"(.+)" is on the fridge\'s shelf$/, go);\n// a comment\nconst later = () => import("./later");\n';
+  const { code, masked } = scan(src);
+  assert.ok(!code.includes("a comment"), "the comment after the regex is stripped");
+  assert.ok(masked.includes("import("), "the import after the regex is still visible");
+  assert.equal(code.length, masked.length);
+});
+
+test("a slash that divides is not a regex", () => {
+  const src = "const half = total / 2; // note\nconst r = a / b / c;\n";
+  assert.equal(scan(src).code, "const half = total / 2; \nconst r = a / b / c;\n");
+});
+
+test("a JSX closing tag is not a regex: later strings and imports stay aligned", () => {
+  const src = [
+    'export const Help = () => <p><b>Ajuda</b> <a href="/ajuda">abrir</a></p>;',
+    'export const API = "https://api.example/v1"; // note',
+    'const Page = lazyRoute(async () => ({ default: (await import("./page")).Page }));',
+  ].join("\n");
+  const code = stripComments(src);
+  assert.ok(code.includes('"https://api.example/v1";'), "the URL string survives whole");
+  assert.ok(!code.includes("// note"));
+  assert.ok(parseImports(src).some((r) => r.spec === "./page"), "the dynamic import is still found");
+});
+
+test("a self-closing tag after `}` is JSX, not a regex", () => {
+  const src = 'export const Help = () => <p><Icon size={16} /> <a href="/ajuda">Ajuda</a></p>;\nexport const API = "https://api.example/v1"; // note\n';
+  const code = stripComments(src);
+  assert.ok(code.includes('"https://api.example/v1";'));
+  assert.ok(!code.includes("// note"));
+});
+
+test("a regex whose reading leaves the line consistent wins over a division", () => {
+  // One apostrophe inside the regex: read as a division, the rest of the line
+  // would sit inside a string.
+  const src = "Given(/^\"(.+)\" is on the fridge's shelf$/, go); // c\n";
+  assert.equal(stripComments(src), "Given(/^\"(.+)\" is on the fridge's shelf$/, go); \n");
 });

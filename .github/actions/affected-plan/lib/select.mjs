@@ -22,7 +22,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { reachableExports } from "./exports-dataflow.mjs";
+import { changedDeclarations, reachableExports, withinFile } from "./exports-dataflow.mjs";
 import { buildGraph, listSourceFiles, loadPackages } from "./modules.mjs";
 import { affectedExports, exportedSymbols } from "./symbols.mjs";
 
@@ -43,11 +43,20 @@ function importReaches(record, symbols) {
  * there is no name list to intersect, so the whole file widens, exactly as it
  * did before this narrowing existed.
  */
-function narrowedExports(source, record, symbols) {
-  if (source == null || record.wildcard) return "*";
-  const tainted = symbols === "*" ? record.names : record.names.filter((n) => symbols.has(n));
-  if (tainted.length === 0) return "*";
-  return reachableExports(source, [...tainted, ...tainted.map((n) => `${record.spec}#${n}`)]);
+function narrowedExports(source, record, symbols, calls) {
+  const tainted = taintOf(record, symbols);
+  if (source == null || tainted === "*") return "*";
+  return reachableExports(source, tainted, { calls });
+}
+
+/**
+ * The local names an import record binds from a changed module — `"*"` when
+ * it has no name list to intersect (see narrowedExports).
+ */
+function taintOf(record, symbols) {
+  if (record.wildcard) return "*";
+  const names = symbols === "*" ? record.names : record.names.filter((n) => symbols.has(n));
+  return names.length === 0 ? "*" : [...names, ...names.map((n) => `${record.spec}#${n}`)];
 }
 
 /**
@@ -64,7 +73,11 @@ function narrowedExports(source, record, symbols) {
  * @param {(f:string)=>boolean} options.isIgnored     cannot change any verdict
  * @param {(f:string)=>boolean} options.isUntraceable forces the full suite
  * @param {(f:string)=>{prefix:string,replacement:string}[]} [options.aliasesFor]
- * @returns {{mode:"full"|"narrowed"|"none", tests:string[], reasons:object, symbols:object, stats:object, why:string}}
+ * @param {string[]} [options.calls]  callees whose top-level calls bracket as
+ *   declarations (Gherkin step definitions — see exports-dataflow.mjs)
+ * @returns {{mode:"full"|"narrowed"|"none", tests:string[], reasons:object, symbols:object, affected:Map, stats:object, why:string}}
+ *   `affected`: file → the names in it that can see the change (exports, and
+ *   `<callee>@<n>` for a bracketed call), or "*"
  */
 export function selectAffected(options) {
   const {
@@ -79,6 +92,7 @@ export function selectAffected(options) {
     isSource = () => true,
     routeOf = () => [],
     aliasesFor,
+    calls = [],
   } = options;
 
   const relevant = [...changed, ...deleted].filter((f) => !isIgnored(f));
@@ -227,9 +241,15 @@ export function selectAffected(options) {
       continue;
     }
     const names = affectedExports(baseSources.get(file), head, baseByName, headByName);
-    const value = names.has("*") ? "*" : names;
+    // An export's hash covers its own body, so the exports that merely CALL a
+    // changed one are found by following the file's own references. A lane
+    // that brackets calls (Gherkin steps) also reads a module-level edit
+    // declaration by declaration rather than as "everything in the file".
+    const value = names.has("*")
+      ? ((calls.length > 0 ? changedDeclarations(baseSources.get(file), head, { calls }) : null) ?? "*")
+      : withinFile(head, names, { calls });
     affected.set(file, value);
-    symbolReport[file] = value === "*" ? ["*"] : [...names].sort();
+    symbolReport[file] = value === "*" ? ["*"] : [...value].sort();
   }
 
   // A changed file whose exports are all byte-identical (a pure move, a
@@ -318,7 +338,7 @@ export function selectAffected(options) {
       // compounded it over every hop after (see exports-dataflow.mjs). Every
       // uncertainty in there answers `"*"`, so this can only ever narrow a
       // claim the old walk was already making.
-      const next = narrowedExports(headSourceOf(file), record, symbols);
+      const next = narrowedExports(headSourceOf(file), record, symbols, calls);
       // Nothing here can observe it: the chain genuinely ends at this file.
       if (next !== "*" && next.size === 0) continue;
       // Already knew everything this hop carries — re-queueing would not add.
@@ -353,6 +373,7 @@ export function selectAffected(options) {
     tests,
     reasons,
     symbols: symbolReport,
+    affected,
     // entry -> the changed non-source paths that routed to it, so a reviewer
     // can see WHY a file nobody edited is seeded as fully changed.
     routes: routeReport,

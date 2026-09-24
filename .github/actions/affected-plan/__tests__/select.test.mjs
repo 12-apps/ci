@@ -421,3 +421,19 @@ test("a route to an entry outside the graph selects nothing and says so", () => 
   assert.deepEqual(result.tests, []);
   assert.deepEqual(result.routes, { "src/does-not-exist.ts": ["prisma/schema.prisma"] });
 });
+
+test("an export that calls a changed export in the same file is changed too", () => {
+  // `b` is byte-identical, but it returns `a()`, and `a` moved: a test that
+  // imports only `b` used to run nothing.
+  const base = "export function a() {\n  return 1;\n}\nexport function b() {\n  return a() + 1;\n}\n";
+  const head = base.replace("return 1;", "return 2;");
+  const { root, readBase } = scenario({
+    head: {
+      "src/entry.ts": head,
+      "src/entry.test.ts": 'import { b } from "./entry";\nb();\n',
+    },
+    base: { "src/entry.ts": base },
+  });
+  const result = run({ repoRoot: root, changed: ["src/entry.ts"], readBase });
+  assert.deepEqual(result.tests, ["src/entry.test.ts"]);
+});
