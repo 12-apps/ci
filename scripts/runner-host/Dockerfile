@@ -3,9 +3,10 @@
 # The image a runner-host slot starts per job (see README.md). It stands in for
 # GitHub's `ubuntu-latest`, so it carries what the 12-apps workflows actually
 # reach for on that image — git, jq, gh, curl, zip, ssh, a C toolchain, python,
-# sudo, Docker, and Chromium's system libraries — and nothing else. Anything a
-# workflow installs itself (node via setup-node, pnpm, Playwright's browsers)
-# is left to the workflow, exactly as on a hosted runner.
+# shellcheck, sudo, Docker, a system Node, and Chromium's system libraries —
+# and nothing else. Anything a workflow installs itself (a pinned node via
+# setup-node, pnpm, Playwright's browsers) is left to the workflow, exactly as
+# on a hosted runner.
 #
 # It runs its OWN dockerd (the container is started `--privileged`), so a job's
 # `services:`, `container:` and `docker build` get a daemon, a network and a
@@ -30,8 +31,8 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       build-essential ca-certificates curl file git git-lfs gnupg iproute2 \
       iptables jq less lsb-release openssh-client procps psmisc python3 \
-      python3-pip python3-venv rsync sudo tini tzdata unzip wget xz-utils zip \
-      zstd \
+      python3-pip python3-venv rsync shellcheck sudo tini tzdata unzip wget \
+      xz-utils zip zstd \
  && install -m 0755 -d /etc/apt/keyrings \
  && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" \
@@ -45,16 +46,21 @@ RUN apt-get update \
       docker-compose-plugin gh \
  && rm -rf /var/lib/apt/lists/*
 
+# A system Node on PATH, as ubuntu-latest has one: workflows run `node` in
+# steps BEFORE setup-node (12-apps/ci's fetch-base and migration-domains
+# actions do, in the first seconds of Static), and on a runner without it
+# every such job dies with `node: command not found`. setup-node still wins
+# wherever a workflow pins a version, by putting its own ahead on PATH. Not
+# apt's `nodejs`: noble ships 18, and Playwright refuses to start below 20.
+ARG SYSTEM_NODE=v24.9.0
+RUN curl -fsSL "https://nodejs.org/dist/${SYSTEM_NODE}/node-${SYSTEM_NODE}-linux-x64.tar.xz" \
+      | tar -xJ -C /usr/local --strip-components=1 \
+ && node --version
+
 # Chromium's shared libraries and fonts, installed once here instead of by
-# `playwright install --with-deps` on every job. Node is borrowed for the one
-# command and removed; workflows bring their own through setup-node. Not apt's
-# `nodejs`: noble ships 18, and Playwright refuses to start below 20.
-ARG BOOTSTRAP_NODE=v22.20.0
-RUN curl -fsSL "https://nodejs.org/dist/${BOOTSTRAP_NODE}/node-${BOOTSTRAP_NODE}-linux-x64.tar.xz" \
-      | tar -xJ -C /tmp \
- && PATH="/tmp/node-${BOOTSTRAP_NODE}-linux-x64/bin:$PATH" \
-      npx -y "playwright@${PLAYWRIGHT_VERSION}" install-deps chromium \
- && rm -rf "/tmp/node-${BOOTSTRAP_NODE}-linux-x64" /root/.npm /var/lib/apt/lists/*
+# `playwright install --with-deps` on every job.
+RUN npx -y "playwright@${PLAYWRIGHT_VERSION}" install-deps chromium \
+ && rm -rf /root/.npm /var/lib/apt/lists/*
 
 # The job user: passwordless sudo and the docker group, as on ubuntu-latest,
 # because workflows `sudo apt-get` and `docker run` without asking.
