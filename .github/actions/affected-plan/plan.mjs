@@ -20,11 +20,13 @@
  */
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { databaseRoutes } from "./lib/database.mjs";
 import { explainByChange, explainByTest } from "./lib/explain.mjs";
-import { listSourceFiles } from "./lib/modules.mjs";
+import { fileKeys, keyedChange, keyPatterns, wiringOf } from "./lib/keys.mjs";
+import { listSourceFiles, stripComments } from "./lib/modules.mjs";
+import { entriesForMatches } from "./lib/occurrences.mjs";
 import { selectAffected } from "./lib/select.mjs";
 
 const argv = process.argv.slice(2);
@@ -121,6 +123,7 @@ const routes = [...(config.routes ?? []), ...(laneConfig.routes ?? [])].map((r) 
   match: rx(r.match),
   entry: r.entry ? (Array.isArray(r.entry) ? r.entry : [r.entry]) : null,
   command: r.command ?? null,
+  keys: r.keys ?? null,
 }));
 
 /**
@@ -200,7 +203,188 @@ const resolveDatabase = () => {
   return database;
 };
 
+/**
+ * Seeded DATA, routed by the keys of the records a change touches
+ * (lib/keys.mjs). A `keys` route owns its paths outright, like the database
+ * router: an `entry` route matching the same file is not consulted.
+ *
+ *   { "match": "^tests/e2e/helpers/.+\\.mjs$",
+ *     "keys": { "search": "^(apps|tests/e2e)/", "logic": "records" } }
+ *
+ * `search` bounds where a key is looked for (source files for the walk, any
+ * other tracked file — a `.feature` — for the plan's `keys` report). `logic`
+ * says what a change OUTSIDE any record means: `"records"` (every key the file
+ * holds — a seeder only reaches its own rows), a list of entries (a script the
+ * runner launches by path, which the graph cannot see: route it to the runner),
+ * or, by default, the file itself as ordinary source. `unnamed` says what a
+ * record NO test names means: by default the file is traced as source (a test
+ * may read the whole table); `"none"` is for a caller that has checked no test
+ * imports the file, so a row nobody names is a row nobody observes.
+ */
+let keyed = null;
+const keyRouteOf = (file) => routes.find((r) => r.keys && r.match?.test(file)) ?? null;
+let tracked = null;
+const trackedFiles = () => (tracked ??= new Set(git(["ls-files"]).split("\n").filter(Boolean)));
+
+/** Every file in `route` that imports `file`, transitively (relative specifiers). */
+const importersWithin = (file, route) => {
+  const family = [...trackedFiles()].filter((f) => route.match.test(f));
+  const importsOf = new Map();
+  for (const f of family) {
+    let text = "";
+    try {
+      text = readFileSync(join(repoRoot, f), "utf8");
+    } catch {
+      continue;
+    }
+    const targets = new Set();
+    for (const m of text.matchAll(/(?:from\s*|import\(\s*|require\(\s*)["'](\.{1,2}\/[^"']+)["']/g)) {
+      const b = join(dirname(f), m[1]);
+      for (const cand of [b, `${b}.mjs`, `${b}.js`, `${b}.ts`, `${b}.json`]) if (family.includes(cand)) targets.add(cand);
+    }
+    importsOf.set(f, targets);
+  }
+  const out = new Set();
+  const queue = [file];
+  while (queue.length > 0) {
+    const cur = queue.shift();
+    for (const [f, targets] of importsOf) if (targets.has(cur) && !out.has(f) && f !== file) {
+      out.add(f);
+      queue.push(f);
+    }
+  }
+  return [...out].sort();
+};
+
+const resolveKeys = () => {
+  if (keyed) return keyed;
+  keyed = new Map();
+  const hit = [...changed, ...deleted].filter((f) => keyRouteOf(f));
+  if (hit.length === 0) return keyed;
+  const tracked = git(["ls-files"]).split("\n").filter(Boolean);
+  const sources = listSourceFiles(repoRoot, laneConfig.roots ?? dirs);
+  const texts = new Map();
+  const textOf = (f) => {
+    if (!texts.has(f)) {
+      try {
+        texts.set(f, readFileSync(join(repoRoot, f), "utf8"));
+      } catch {
+        texts.set(f, null);
+      }
+    }
+    return texts.get(f);
+  };
+  const codeOf = (f) => {
+    const t = textOf(f);
+    return t === null ? null : stripComments(t);
+  };
+  for (const file of hit) {
+    const route = keyRouteOf(file);
+    const opts = route.keys;
+    const head = deleted.includes(file) ? null : textOf(file);
+    const base = readBase(file);
+    const diff = git(["diff", "-U0", mergeBase, "HEAD", "--", file]);
+    let change = keyedChange({ base, head, diff });
+    let logicLines = null;
+    const via = [];
+    if (change.kind === "logic") {
+      // A line that imports a sibling seeder, or calls what it imported from
+      // one, is about that sibling's records (lib/keys.mjs wiringOf).
+      const sibling = (spec) => {
+        if (!spec.startsWith(".")) return null;
+        const b = join(dirname(file), spec);
+        for (const c of [b, `${b}.mjs`, `${b}.js`, `${b}.ts`, `${b}.json`]) if (keyRouteOf(c) && trackedFiles().has(c)) return c;
+        return null;
+      };
+      const h = wiringOf(head, change.lines.filter((l) => l > 0), sibling);
+      const b = wiringOf(base, change.lines.filter((l) => l < 0).map((l) => -l), sibling);
+      const siblings = [...new Set([...h.wired.values(), ...b.wired.values()].flat())];
+      const found = fileKeys(...siblings.map((f) => textOf(f)));
+      const rest = [...h.rest, ...b.rest.map((l) => -l)];
+      if (siblings.length > 0 && found.keys.length + found.props.length === 0) {
+        // Wired to a helper with no records of its own (an encryption helper):
+        // that is logic, and stays so.
+      } else if (siblings.length > 0) {
+        via.push(...siblings);
+        change = rest.length > 0
+          ? { ...change, lines: rest, keys: [...new Set([...change.keys, ...found.keys])], props: [...new Set([...change.props, ...found.props])] }
+          : { kind: "keys", keys: [...new Set([...change.keys, ...found.keys])].sort(), props: [...new Set([...change.props, ...found.props])].sort() };
+      }
+    }
+    if (change.kind === "logic" && opts.logic === "records") {
+      // Logic in a seeder reaches the rows it seeds: its own, and those of
+      // every file in the same route that imports it — `seedHistory(db, id)`
+      // is keyed by the caller that passes `id`. With no keys anywhere in the
+      // chain (an encryption helper), it is plain logic, traced as source.
+      const chain = [file, ...importersWithin(file, route)];
+      const found = fileKeys(base, ...chain.map((f) => textOf(f)));
+      if (found.keys.length + found.props.length > 0) {
+        logicLines = change.lines;
+        change = {
+          kind: "keys",
+          keys: [...new Set([...change.keys, ...found.keys])].sort(),
+          props: [...new Set([...change.props, ...found.props])].sort(),
+          chain,
+        };
+      }
+    }
+    const asLogic = (why, extra = {}) => {
+      const entries = Array.isArray(opts.logic) ? opts.logic : [file];
+      keyed.set(file, { entries, report: { kind: "logic", why, entries, ...extra } });
+    };
+    if (change.kind === "none") {
+      keyed.set(file, { entries: [], report: { kind: "none", why: "only comments or whitespace moved" } });
+      continue;
+    }
+    if (change.kind === "logic") {
+      asLogic(`setup logic changed outside any record (line ${change.lines.map(Math.abs).slice(0, 4).join(", ")})`, { lines: change.lines });
+      continue;
+    }
+    const searchRe = rx(opts.search);
+    const inScope = (f) => f !== file && !keyRouteOf(f) && (!searchRe || searchRe.test(f));
+    const specs = keyPatterns(change);
+    const entries = entriesForMatches({ files: sources.filter(inScope), textOf: codeOf, isTest, specs });
+    const textSpecs = specs.filter((sp) => !sp.codeOnly);
+    const hits = tracked.filter((f) => inScope(f) && !isSource(f) && textSpecs.some((sp) => sp.re.test(textOf(f) ?? "")));
+    if (entries.length === 0 && hits.length === 0 && opts.unnamed === "none") {
+      // The caller has made "no test reads this table except by key" a checked
+      // fact (seeders only the provisioner imports): a row no test names is a
+      // row no test observes.
+      keyed.set(file, {
+        entries: [],
+        report: { kind: "unnamed", why: `no test names any of its keys (${change.keys.slice(0, 3).join(", ")})`, keys: change.keys, props: change.props, entries: [], hits: [] },
+      });
+      continue;
+    }
+    if (entries.length === 0 && hits.length === 0) {
+      asLogic(
+        change.keys.length + change.props.length === 0
+          ? "setup logic in a file that holds no records — traced as source"
+          : `no test names any of its keys (${change.keys.slice(0, 3).join(", ")}) — traced as source, since a test may read the whole table`,
+        { keys: change.keys, props: change.props },
+      );
+      continue;
+    }
+    keyed.set(file, {
+      entries,
+      report: {
+        kind: "keys",
+        why: `${logicLines ? `setup logic in a seeder: every record its chain seeds (${change.chain.join(", ")})` : via.length > 0 ? `records, and the seeders it wires in (${via.join(", ")})` : "records changed"} — ${change.keys.length} key(s), ${change.props.length} name(s)`,
+        keys: change.keys,
+        props: change.props,
+        entries,
+        hits,
+      },
+    });
+  }
+  for (const [file, { report }] of keyed)
+    console.error(`[keys] ${file} → ${report.kind}: ${report.why}${report.entries ? ` → ${report.entries.length} entr${report.entries.length === 1 ? "y" : "ies"}` : ""}${report.hits?.length ? `, ${report.hits.length} other file(s)` : ""}`);
+  return keyed;
+};
+
 const routeOf = (file) => {
+  const keyRoute = resolveKeys().get(file);
+  if (keyRoute) return { entries: keyRoute.entries };
   const db = resolveDatabase();
   if (db?.handles(file)) {
     // A problem (an undeclared migration) leaves the path UNROUTED, so it is
@@ -275,7 +459,13 @@ const result = selectAffected({
   aliasesFor,
 });
 
-emit({ ...result, base: mergeBase, lane, changed });
+emit({
+  ...result,
+  base: mergeBase,
+  lane,
+  changed,
+  ...(keyed?.size ? { keys: Object.fromEntries([...keyed].map(([f, k]) => [f, k.report])) } : {}),
+});
 
 // An unclassified path is the one outcome that must stop the run. Emitting
 // first means the document still lands, so the failure is inspectable: the
@@ -317,6 +507,10 @@ function emit(plan) {
     // at six, the artifact does not.
     ...(plan.unclassified ? { unclassified: plan.unclassified } : {}),
     ...(plan.routes && Object.keys(plan.routes).length ? { routes: plan.routes } : {}),
+    // What each key-routed seeder change meant, and the non-source files (a
+    // `.feature`) naming its keys — the part of the answer a caller outside
+    // the import graph needs.
+    ...(plan.keys ? { keys: plan.keys } : {}),
     affectedSymbols: plan.symbols ?? {},
     tests,
     reasons: plan.reasons ?? {},

@@ -253,6 +253,51 @@ Routes may now answer with an object, `{ entries }`, which is classified even
 when empty ("routed to nothing" is not "unclassified"), and an entry may name
 symbols — `file#a,b` — seeding only those.
 
+## Seeded data — `keys` routes
+
+An end-to-end suite provisions its world from modules no test imports — a
+users table, a stores table, the provisioner itself — and its tests reach that
+world by KEY: they sign in as `"jm-olivia@futurepay.test"`, they open
+`"jornada-mesa-sai"`. The import graph cannot see that edge, so a selector
+either reaches nothing from a seeder or runs everything for it. A consumer did
+the second for every harness change: 102 commits in sixty days, each running
+all 162 specs and every Gherkin feature, comments included.
+
+A route with `keys` reads the diff of each matching file, both sides:
+
+```json
+{ "match": "^tests/e2e/helpers/[^/]+\\.(mjs|json)$",
+  "keys": { "search": "^(apps/[^/]+/src/|tests/e2e/)", "logic": "records", "unnamed": "none" } }
+```
+
+- **only comments or whitespace moved** → routed to nothing;
+- **a record changed** — the line opens, closes or sits in an object literal,
+  a call's argument list or an array holding key-shaped strings (ids, slugs,
+  e-mails; also `'…'` inside SQL strings) → its keys, and the property it is
+  filed under (`mesaSai: {`). Files under `search` that name one are the
+  entries, attributed to the declaration holding the hit (a test runs itself; a
+  helper becomes `file#symbol`), and any NON-source file naming one — a
+  `.feature` — is listed in the plan document's `keys` report for the caller;
+- **a line that wires a sibling in** — an import from another file of the same
+  route, or a call of a name imported from one → that sibling's records;
+- **anything else is logic.** With `logic: "records"` (a seeder, whose effect
+  is confined to the rows it seeds) that is every record the file and the files
+  of the route importing it hold — `seedHistory(db, id)` is keyed by whoever
+  passes `id` — or, with no keys anywhere in that chain, plain logic. A list of
+  entries routes to them (a script a runner launches by path). By default the
+  file is ordinary source, and the graph decides.
+
+A record no searched file names is traced as source by default — a test may
+read the whole table. `unnamed: "none"` routes it to nothing instead; set it
+only where "no test imports this file" is itself checked, so a row nobody
+names really is a row nobody observes.
+
+A runner the graph cannot see through — a config that launches scripts by path
+— is best made a ROOT of the lane: put it in the lane's `test` pattern and add
+its file to `roots` (a root may be a single file). A plan that reaches it then
+says so in `tests`, and the caller can treat that, and only that, as "every
+test".
+
 ## The plan document
 
 ```jsonc
