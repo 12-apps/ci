@@ -13,7 +13,7 @@
 # Env: AWS_REGION (us-east-1), REPOSITORY (12-apps/future-pay), RUNNER_LABEL
 # (future-pay-ci), INSTANCE_TYPES (c7a.2xlarge,c6a.2xlarge,m7a.2xlarge),
 # SLOTS_PER_HOST (3), MAX_HOSTS (30; 30 × 8 vCPU must fit the account's spot vCPU
-# quota, L-34B43A08), TOKEN_PARAMETER
+# quota, L-34B43A08), POOL_SIZE (2 stopped hosts kept warm), TOKEN_PARAMETER
 # (/ci-runner/github-app-key), FUNCTION_NAME (ci-runner-scale),
 # WAKE_SECRET_FILE (~/.ci-runner-wake-secret, created 0600, never printed).
 set -euo pipefail
@@ -25,6 +25,7 @@ label="${RUNNER_LABEL:-future-pay-ci}"
 types="${INSTANCE_TYPES:-c7a.2xlarge,c6a.2xlarge,m7a.2xlarge}"
 slots="${SLOTS_PER_HOST:-3}"
 max_hosts="${MAX_HOSTS:-30}"
+pool_size="${POOL_SIZE:-2}"
 param="${TOKEN_PARAMETER:-/ci-runner/github-app-key}"
 fn="${FUNCTION_NAME:-ci-runner-scale}"
 role="$fn"
@@ -89,6 +90,36 @@ fi
 template_arn="arn:aws:ec2:${region}:${account}:launch-template/$(aws ec2 describe-launch-templates \
   --launch-template-names "$template" --query 'LaunchTemplates[0].LaunchTemplateId')"
 
+# ── warm pool: stopped hosts whose disks have booted before ─────────────────
+# A fresh host reads its root volume from the snapshot on first touch, which
+# is most of its ~2.5 minutes to a first job. A stopped host keeps a volume
+# that has already been read, so the scaler starts these first. They are
+# persistent spot requests that STOP (idle-stop's poweroff, or an
+# interruption) instead of terminating; they cost only their volumes while
+# stopped. A pool host still on an older image is retired once it is stopped.
+pool_hosts() {
+  aws ec2 describe-instances --filters "Name=tag:ci-runner-pool,Values=${label}" \
+    "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+    --query 'Reservations[].Instances[].[InstanceId,ImageId,State.Name,SpotInstanceRequestId]'
+}
+while read -r id image state request; do
+  [[ -n "$id" && "$image" != "$AMI_ID" && "$state" == stopped ]] || continue
+  echo "deploy: retiring pool host ${id} (image ${image})"
+  [[ "$request" == None ]] || aws ec2 cancel-spot-instance-requests --spot-instance-request-ids "$request" >/dev/null
+  aws ec2 terminate-instances --instance-ids "$id" >/dev/null
+done < <(pool_hosts)
+have=$(pool_hosts | awk -v ami="$AMI_ID" 'NF && ($2 == ami || $3 != "stopped")' | wc -l)
+if (( have < pool_size )); then
+  tags=$(jq -nc --arg label "$label" '[{ResourceType: "instance", Tags: [{Key: "Project", Value: "ci-runner"},
+    {Key: "Name", Value: "ci-runner-pool"}, {Key: "ci-runner-fleet", Value: $label}, {Key: "ci-runner-pool", Value: $label}]},
+    {ResourceType: "volume", Tags: [{Key: "Project", Value: "ci-runner"}]}]')
+  echo "deploy: adding $(( pool_size - have )) pool host(s); each stops itself after its idle minutes"
+  aws ec2 run-instances --launch-template "LaunchTemplateName=${template},Version=\$Default" \
+    --count "$(( pool_size - have ))" --instance-initiated-shutdown-behavior stop \
+    --instance-market-options '{"MarketType":"spot","SpotOptions":{"SpotInstanceType":"persistent","InstanceInterruptionBehavior":"stop"}}' \
+    --tag-specifications "$tags" --query 'Instances[].InstanceId'
+fi
+
 # ── role: launch from THAT template, read the token, write own logs ─────────
 new_role=0
 if ! aws iam get-role --role-name "$role" >/dev/null 2>&1; then
@@ -96,13 +127,14 @@ if ! aws iam get-role --role-name "$role" >/dev/null 2>&1; then
     --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}' >/dev/null
   new_role=1
 fi
-policy=$(jq -n --arg lt "$template_arn" --arg hostrole "$host_role" \
+policy=$(jq -n --arg lt "$template_arn" --arg hostrole "$host_role" --arg label "$label" \
   --arg param "arn:aws:ssm:${region}:${account}:parameter${param}" \
   --arg logs "arn:aws:logs:${region}:${account}:log-group:/aws/lambda/${fn}" '{
   Version: "2012-10-17",
   Statement: [
     {Effect: "Allow", Action: "ec2:RunInstances", Resource: "*", Condition: {ArnLike: {"ec2:LaunchTemplate": $lt}}},
     {Effect: "Allow", Action: "ec2:CreateTags", Resource: "*", Condition: {StringEquals: {"ec2:CreateAction": "RunInstances"}}},
+    {Effect: "Allow", Action: "ec2:StartInstances", Resource: "*", Condition: {StringEquals: {"aws:ResourceTag/ci-runner-pool": $label}}},
     {Effect: "Allow", Action: "iam:PassRole", Resource: $hostrole},
     {Effect: "Allow", Action: "ec2:DescribeInstances", Resource: "*"},
     {Effect: "Allow", Action: "ssm:GetParameter", Resource: $param},
@@ -166,7 +198,8 @@ if [[ "${CREATE_WEBHOOK:-1}" == 1 ]]; then
 fi
 
 cat <<DONE
-deploy: fleet ready. AMI ${AMI_ID}, template ${template}, up to ${max_hosts} hosts × ${slots} slots.
+deploy: fleet ready. AMI ${AMI_ID}, template ${template}, up to ${max_hosts} hosts × ${slots} slots,
+the first ${pool_size} started from the warm pool.
 Scaler: ${url}
 
 Webhook on ${repo}: ${hook}. To add it by hand instead (CREATE_WEBHOOK=0), use Settings → Webhooks:

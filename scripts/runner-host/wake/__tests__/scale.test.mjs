@@ -9,15 +9,21 @@ import { makeScaler } from "../scale.mjs";
 const SECRET = "s3cret";
 const NOW = 1_800_000_000_000;
 
-function fleet({ queued, idle, hosts = [] }) {
+function fleet({ queued, idle, hosts = [], startFails = false }) {
   const launches = [];
   const tokens = [];
+  const starts = [];
   const scaler = makeScaler({
     secret: SECRET, label: "fp-ci", repo: "acme/app", slotsPerHost: 3, maxHosts: 5, bootSeconds: 180, now: () => NOW,
     github: { queuedJobs: async () => queued, idleRunners: async () => idle },
     ec2: {
       hosts: async () => hosts,
       launch: async (n, token) => { launches.push(n); tokens.push(token); return Array.from({ length: n }, (_, i) => `i-new${i}`); },
+      start: async (ids) => {
+        if (startFails) throw Object.assign(new Error("no spot capacity"), { name: "InsufficientInstanceCapacity" });
+        starts.push(...ids);
+        return ids;
+      },
     },
   });
   const deliver = async ({ action = "queued", labels = ["fp-ci"], repo = "acme/app", sig } = {}) => {
@@ -28,7 +34,7 @@ function fleet({ queued, idle, hosts = [] }) {
     });
     return { status: res.statusCode, ...JSON.parse(res.body) };
   };
-  return { deliver, launches, tokens };
+  return { deliver, launches, tokens, starts };
 }
 
 const up = (ageSeconds) => ({ id: "i-x", state: "running", launchedAt: NOW - ageSeconds * 1000 });
@@ -86,4 +92,35 @@ test("two evaluations that reach the same answer at once launch with the same id
   assert.equal(tokens.length, 2);
   assert.equal(tokens[0], tokens[1], "EC2 would launch twice");
   assert.match(tokens[0], /^fleet-fp-ci-\d+-2$/);
+});
+
+const parked = (id, state = "stopped") => ({ id, state, launchedAt: NOW - 86_400_000, pool: true });
+
+test("stopped pool hosts are started before anything is launched", async () => {
+  const { deliver, launches, starts } = fleet({ queued: 4, idle: 0, hosts: [parked("p1"), parked("p2"), parked("p3")] });
+  const r = await deliver();
+  assert.deepEqual(starts, ["p1", "p2"], "4 jobs need 2 hosts; the pool has them");
+  assert.deepEqual(launches, []);
+  assert.equal(r.started, 2);
+});
+
+test("a queue bigger than the pool starts all of it and launches the rest", async () => {
+  const { deliver, launches, starts } = fleet({ queued: 12, idle: 0, hosts: [parked("p1"), parked("p2")] });
+  await deliver();
+  assert.deepEqual(starts, ["p1", "p2"]);
+  assert.deepEqual(launches, [2]);
+});
+
+test("a pool host that cannot start is launched instead, so the queue still gets its slots", async () => {
+  const { deliver, launches } = fleet({ queued: 6, idle: 0, hosts: [parked("p1"), parked("p2")], startFails: true });
+  const r = await deliver();
+  assert.deepEqual(launches, [2]);
+  assert.equal(r.started, 0);
+});
+
+test("a pool host still stopping is not started, and a running one is capacity like any other", async () => {
+  const { deliver, launches, starts } = fleet({ queued: 3, idle: 0, hosts: [parked("p1", "stopping"), { ...parked("p2", "running"), launchedAt: NOW - 30_000 }] });
+  assert.equal((await deliver()).launched, 0, "p2 is booting and brings 3 slots");
+  assert.deepEqual(starts, []);
+  assert.deepEqual(launches, []);
 });

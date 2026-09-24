@@ -5,10 +5,12 @@ costs for a hundred. Nothing needs to wait for a slot. The fleet grows to the
 queue at once, and every host terminates itself when it goes idle.
 
 ```
-GitHub ──workflow_job──▶ Lambda (scale.mjs) ──RunInstances(template)──▶ N spot hosts
+GitHub ──workflow_job──▶ Lambda (scale.mjs) ──StartInstances──▶ stopped pool hosts (warm disks)
+                              │                  └─RunInstances(template)──▶ the rest, fresh spot hosts
                               │  queued jobs − idle runners − booting slots
                               └─ launches carry an idempotent ClientToken
-host: boots from the AMI → token from SSM → 3 slots → idle 5 min → terminates
+fresh host: boots from the AMI → token from SSM → 3 slots → idle 5 min → terminates
+pool host:  starts → token from SSM → 3 slots → idle 5 min → stops (only its volume is billed)
 ```
 
 - **Sizing.** Every `queued` or `completed` job for the fleet's label
@@ -16,10 +18,12 @@ host: boots from the AMI → token from SSM → 3 slots → idle 5 min → termi
   - `launch = ceil((queued − idle runners − slots on hosts still booting) / slots per host)`
   - The result is capped at `MAX_HOSTS`.
   - Hosts still booting count as capacity, so a hundred deliveries in a burst launch what the queue needs, not a hundred hosts.
+- **Warm pool.** A host launched from the AMI reads its disk from the snapshot on first touch: about 90 s to boot and another minute before its runner takes a job (measured 2 min 45 s from queue to start). `POOL_SIZE` hosts (default 2) are kept **stopped** instead, with disks that have booted before, and the scaler starts those before it launches anything. They are persistent spot requests whose poweroff stops rather than terminates, so while stopped they cost only their volumes (about US$10 a month each for the 120 GB root). A pool host that cannot start for lack of spot capacity is replaced by a fresh launch in the same evaluation.
 - **Spot capacity.** When one instance type has no spot capacity, the next in `INSTANCE_TYPES` is tried.
 - **Boot.** A host launched from the AMI has Docker, the job image and the kit already on disk. It reads the PAT from SSM (`fetch-credential.sh`), so the image carries no secret, and registers its runners in about a minute.
 - **Scale-in.** `idle-stop.sh` releases each waiting runner through the API. GitHub refuses that (422) for a runner it has just handed a job, and one refusal cancels the stop. Once released, the host powers off, which the launch template turns into a terminate.
 - **Who can drive it.**
+  - The role can start only instances tagged `ci-runner-pool=<label>`.
   - Every delivery must carry GitHub's `X-Hub-Signature-256` for the shared secret and name the configured repository.
   - The role can run instances only from the fleet's launch template, pass only the host role, and read only the token parameter.
 - **What it costs.** The hosts, for the seconds they run. The Lambda stays inside the free tier.
@@ -41,7 +45,9 @@ host: boots from the AMI → token from SSM → 3 slots → idle 5 min → termi
    - The secret from `~/.ci-runner-wake-secret`.
    - Only the **Workflow jobs** event.
 
-After that, the golden host can be terminated. Re-run `deploy.sh` with a new golden host to ship a new image (for example after a runner release).
+After that, the golden host can be terminated. Re-run `deploy.sh` with a new golden host to ship a new image (for example after a runner release). The run also tops the warm pool up to `POOL_SIZE` and retires stopped pool hosts on an older image; one that is running is left to finish and retired by the next run.
+
+To remove a pool host by hand, cancel its spot request first (`aws ec2 cancel-spot-instance-requests`), then terminate it. A persistent request whose instance is terminated launches a replacement.
 
 ## When a job waits
 

@@ -17,6 +17,13 @@
 //   deficit = queued jobs − idle runners − slots on hosts still booting
 //   launch  = ceil(deficit / slotsPerHost), capped at maxHosts
 //
+// A host launched from the AMI reads its disk from the snapshot block by
+// block, so the first boot takes ~90 s and the runner another minute to take
+// a job. A small warm pool of STOPPED hosts (tagged `pool`) keeps disks that
+// have booted before: those are started first and take a job in well under a
+// minute. Only the remainder is launched, and a pool host that cannot start
+// (spot capacity) is launched instead.
+//
 // Pure logic: index.mjs wires `github` and `ec2`, the tests fake them.
 import { signatureValid } from "./wake.mjs";
 
@@ -25,9 +32,18 @@ const reply = (statusCode, message, extra = {}) => ({ statusCode, body: JSON.str
 /**
  * @param {object} cfg
  * @param {{ queuedJobs(label: string): Promise<number>, idleRunners(label: string): Promise<number> }} cfg.github
- * @param {{ hosts(): Promise<{ id: string, state: string, launchedAt: number }[]>, launch(n: number, token: string): Promise<string[]> }} cfg.ec2
+ * @param {{ hosts(): Promise<{ id: string, state: string, launchedAt: number, pool?: boolean }[]>, launch(n: number, token: string): Promise<string[]>, start(ids: string[]): Promise<string[]> }} cfg.ec2
  */
 export function makeScaler({ secret, label, repo, github, ec2, slotsPerHost = 3, maxHosts = 30, bootSeconds = 180, now = () => Date.now() }) {
+  async function startPool(ids) {
+    try {
+      return await ec2.start(ids);
+    } catch (e) {
+      console.log(`starting pool hosts ${ids.join(" ")} failed (${e.name}: ${e.message}); launching instead`);
+      return [];
+    }
+  }
+
   async function evaluate() {
     const [queued, idle, hosts] = await Promise.all([github.queuedJobs(label), github.idleRunners(label), ec2.hosts()]);
     const live = hosts.filter((h) => h.state === "pending" || h.state === "running");
@@ -36,9 +52,12 @@ export function makeScaler({ secret, label, repo, github, ec2, slotsPerHost = 3,
     const deficit = queued - idle - booting.length * slotsPerHost;
     const room = Math.max(0, maxHosts - live.length);
     const launch = Math.min(room, Math.max(0, Math.ceil(deficit / slotsPerHost)));
+    const parked = hosts.filter((h) => h.pool && h.state === "stopped").slice(0, launch).map((h) => h.id);
+    const started = parked.length ? await startPool(parked) : [];
+    const rest = launch - started.length;
     const token = `fleet-${label}-${Math.floor(now() / 30_000)}-${live.length + launch}`;
-    const launched = launch > 0 ? await ec2.launch(launch, token) : [];
-    const decision = { queued, idle, hosts: live.length, booting: booting.length, launched: launched.length };
+    const launched = rest > 0 ? await ec2.launch(rest, token) : [];
+    const decision = { queued, idle, hosts: live.length, booting: booting.length, started: started.length, launched: launched.length };
     console.log(JSON.stringify(decision));
     if (deficit > 0 && room === 0) console.log(`at the ${maxHosts}-host cap; ${deficit} job(s) wait`);
     return decision;

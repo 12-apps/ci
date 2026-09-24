@@ -12,6 +12,7 @@ import { makeHandler } from "./wake.mjs";
 const env = process.env;
 const ec2 = new EC2Client({});
 const FLEET_TAG = "ci-runner-fleet";
+const POOL_TAG = "ci-runner-pool";
 
 let token;
 async function githubToken() {
@@ -56,7 +57,25 @@ const fleet = {
       ],
     }));
     return (out.Reservations ?? []).flatMap((r) => r.Instances ?? [])
-      .map((i) => ({ id: i.InstanceId, state: i.State?.Name, launchedAt: new Date(i.LaunchTime).getTime() }));
+      .map((i) => ({
+        id: i.InstanceId, state: i.State?.Name, launchedAt: new Date(i.LaunchTime).getTime(),
+        pool: (i.Tags ?? []).some((t) => t.Key === POOL_TAG),
+      }));
+  },
+  // One call per host: a spot host with no capacity to start fails alone, and
+  // the scaler launches a fresh host for it.
+  async start(ids) {
+    const started = [];
+    for (const id of ids) {
+      try {
+        await ec2.send(new StartInstancesCommand({ InstanceIds: [id] }));
+        started.push(id);
+      } catch (e) {
+        console.log(`start of pool host ${id} failed: ${e.name} ${e.message}`);
+      }
+    }
+    if (started.length) console.log(`started ${started.length}/${ids.length} pool hosts: ${started.join(" ")}`);
+    return started;
   },
   // Spot capacity for one type can run out; the next type in INSTANCE_TYPES
   // (same size class) is tried before the queue is left waiting.
