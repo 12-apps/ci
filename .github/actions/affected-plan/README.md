@@ -287,6 +287,15 @@ A route with `keys` reads the diff of each matching file, both sides:
   entries routes to them (a script a runner launches by path). By default the
   file is ordinary source, and the graph decides.
 
+Two rules keep the analysis from failing SILENT. "Nothing observable" is
+only ever the proven case — the executable text (comments stripped, strings
+kept) is identical on both sides; a change the analysis cannot place is logic.
+And the scan is its own (strings, `${…}` templates, regex literals): a line
+inside a multi-line SQL string is code, and a scan that ends mid-literal makes
+every change in the file logic. A record's keys are its OUTERMOST record's
+below the table — a product line is observed through its store's slug — and a
+key counts as named inside a longer id (`salao-mesa-e2e-salao-mesa-2`).
+
 A record no searched file names is traced as source by default — a test may
 read the whole table. `unnamed: "none"` routes it to nothing instead; set it
 only where "no test imports this file" is itself checked, so a row nobody

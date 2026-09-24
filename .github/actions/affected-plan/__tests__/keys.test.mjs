@@ -17,7 +17,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { analyseLines, isKey, keyedChange } from "../lib/keys.mjs";
+import { analyseLines, isKey, keyedChange, keyPatterns } from "../lib/keys.mjs";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "plan.mjs");
 
@@ -231,3 +231,62 @@ test("a change that moves only comments is none, on both sides", () => {
   const diff = "@@ -2 +2 @@\n";
   assert.deepEqual(keyedChange({ base: USERS, head: USERS.replace("the buyer", "THE buyer"), diff }), { kind: "none" });
 });
+
+// ── Review round 1: real-shaped input the first version got wrong ──────────
+
+test("a regex literal holding a quote does not flip every later line into a string", () => {
+  const src = [
+    'const VERSION = /TERMS_VERSION\\s*=\\s*"([^"]+)"/;',
+    "await seedStores(db);",
+    "for (const user of USERS) await db.insert(user);",
+    "",
+  ].join("\n");
+  const r = analyseLines(src, [3]);
+  assert.deepEqual(r.logic, [3], "the loop is logic, not a comment");
+});
+
+test("a change inside a multi-line SQL template is code, never a comment", () => {
+  const base = "await db.query(`\n  UPDATE clients SET status = 'past_due'\n  WHERE id = $1`, [id]);\n";
+  const head = base.replace("'past_due'", "'active'");
+  const r = keyedChange({ base, head, diff: "@@ -2 +2 @@\n" });
+  assert.notEqual(r.kind, "none");
+});
+
+test("an edited ${…} expression inside a template is a change", () => {
+  const base = "const sql = `SELECT ${computeA()} FROM t`;\n";
+  const r = keyedChange({ base, head: base.replace("computeA", "computeB"), diff: "@@ -1 +1 @@\n" });
+  assert.equal(r.kind, "logic");
+});
+
+test("code that differs is never 'none' — unexplained is logic", () => {
+  const base = "export const x = 1;\n";
+  const r = keyedChange({ base, head: "export const x = 2;\n", diff: "@@ -1 +1 @@\n" });
+  assert.equal(r.kind, "logic");
+});
+
+test("a key embedded in a longer test id is still named", () => {
+  const [spec] = keyPatterns({ keys: ["e2e-salao-mesa-2"], props: [] });
+  assert.ok(spec.re.test('getByTestId("salao-mesa-e2e-salao-mesa-2")'));
+  assert.equal(spec.re.test('"e2e-salao-mesa-20"'), false, "…but not a different, longer key");
+});
+
+test("a changed sub-record carries its enclosing record's keys — a product is seen through its store", () => {
+  const src = [
+    "const STORES = {",
+    "  mesaSai: {",
+    '    slug: "jornada-mesa-sai",',
+    '    product: { id: "e2e-jornada-mesa-sai-item", priceCents: 3200 },',
+    "  },",
+    "};",
+    "",
+  ].join("\n");
+  const { keys, props } = analyseLines(src, [4]);
+  assert.ok(keys.has("jornada-mesa-sai"), [...keys].join(","));
+  assert.ok(props.has("mesaSai"));
+});
+
+test("a logic line inside an array of keyed calls is logic, not the first call's record", () => {
+  const src = ['await Promise.all([', '  seed(db, "store-alpha"),', "  wipeEverything(db),", "]);", ""].join("\n");
+  assert.deepEqual(analyseLines(src, [3]).logic, [3]);
+});
+
