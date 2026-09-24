@@ -358,6 +358,27 @@ jobs:
           if printf '%s' "$RESULTS" | grep -qwE 'failure|cancelled'; then exit 1; fi
 ```
 
+### Every migration declares its domains — first, before anything runs (opt-in)
+
+```yaml
+static:
+  uses: 12-apps/ci/.github/workflows/monorepo-static.yml@v2
+  with:
+    migration-domains-registry: packages/prisma/prisma/domains.json
+    migration-domains-schema: packages/prisma/prisma/schema   # optional
+    # migration-domains-pattern: '**/prisma/migrations/*/migration.sql'
+```
+
+The opening step of `Detect Changes` runs the
+[`migration-domains`](./.github/actions/migration-domains/README.md) check over
+every committed migration: each must carry `-- @domains: a, b`, and the line
+must match what its SQL changes. A failure fails that job, so none of its
+outputs resolve and every lane gated on the tier — unit, integration, e2e,
+smoke — is skipped: red in seconds, with nothing scheduled. Pair it with the
+`database` block in `.affected-plan.json`
+([affected-plan README](./.github/actions/affected-plan/README.md)), which uses
+the same parse to select only the tests a migration can affect.
+
 ### Replaying last run's failures first — the retry gate (opt-in)
 
 Every selector in this pipeline answers *what could this diff have broken?*

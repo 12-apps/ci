@@ -22,7 +22,9 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
+import { databaseRoutes } from "./lib/database.mjs";
 import { explainByChange, explainByTest } from "./lib/explain.mjs";
+import { listSourceFiles } from "./lib/modules.mjs";
 import { selectAffected } from "./lib/select.mjs";
 
 const argv = process.argv.slice(2);
@@ -165,13 +167,51 @@ const resolveCommandRoutes = () => {
   return commandRoutes;
 };
 
+const testRe = rx(laneConfig.test);
+const excludeRe = rx(laneConfig.exclude);
+const isTest = (f) => Boolean(testRe?.test(f)) && !(excludeRe?.test(f) ?? false);
+
+/**
+ * Migrations and schema files, when the config has a `database` block, are
+ * routed by what they change in the DATABASE (lib/database.mjs) rather than
+ * by a regex route to the client entry — which every database test loads, so
+ * that route selected all of them for any migration at all. The database
+ * router owns those paths outright: a regex route that also matches one is
+ * not consulted, or it would widen the answer straight back.
+ */
+let database = null;
+const resolveDatabase = () => {
+  if (database || !config.database) return database;
+  const tracked = git(["ls-files"]).split("\n").filter(Boolean);
+  database = databaseRoutes({
+    repoRoot,
+    config: config.database,
+    lane,
+    changed,
+    deleted,
+    readBase,
+    trackedFiles: tracked,
+    sourceFiles: listSourceFiles(repoRoot, laneConfig.roots ?? dirs),
+    isTest,
+  });
+  for (const [file, why] of database.problems) console.error(`::error::affected-plan (${lane}): ${file} ${why}`);
+  for (const [file, route] of database.routes)
+    console.error(`[database] ${file} → ${route.entries.length} entr${route.entries.length === 1 ? "y" : "ies"} — ${route.why}`);
+  return database;
+};
+
 const routeOf = (file) => {
+  const db = resolveDatabase();
+  if (db?.handles(file)) {
+    // A problem (an undeclared migration) leaves the path UNROUTED, so it is
+    // unclassified and the plan stops in red — never routed to "everything".
+    const route = db.routes.get(file);
+    return route ? { entries: route.entries } : [];
+  }
   const out = [...(resolveCommandRoutes().get(file) ?? [])];
   for (const r of routes) if (r.entry && r.match?.test(file)) out.push(...r.entry);
   return [...new Set(out)];
 };
-const testRe = rx(laneConfig.test);
-const excludeRe = rx(laneConfig.exclude);
 
 /**
  * `@/x` resolves against the workspace that OWNS the importing file, so the
@@ -228,7 +268,7 @@ const result = selectAffected({
   readBase,
   roots: laneConfig.roots ?? dirs,
   workspaceDirs: dirs,
-  isTest: (f) => Boolean(testRe?.test(f)) && !(excludeRe?.test(f) ?? false),
+  isTest,
   isIgnored: (f) => Boolean(ignoreRe?.test(f)) || Boolean(laneIgnoreRe?.test(f)),
   isSource,
   routeOf,
