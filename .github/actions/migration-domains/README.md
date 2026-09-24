@@ -33,7 +33,7 @@ checks it.
 | malformed | empty list, a non-id (`Orders`), a domain twice, two lines |
 | unknown domain | `-- @domains: payments` when the registry has no `payments` |
 | **under-declared** | `UPDATE "clients" …` in a migration that does not declare the domain owning `clients` |
-| **over-declared** | a declared domain none of whose tables the SQL changes — unless the file holds dynamic SQL |
+| **over-declared** | a declared domain none of whose tables the SQL changes — unless the parse is blind there: dynamic SQL, an index nobody created, or no visible table at all (a trigger function, an extension), where the declaration stands |
 | table without a domain | a migration or a Prisma model touching a table the registry does not place |
 | registry conflicts | a table in two domains, a domain with no tables, a table no migration or model has |
 | nothing to check | no file matches the pattern — a gate that passes having read nothing is not a gate |

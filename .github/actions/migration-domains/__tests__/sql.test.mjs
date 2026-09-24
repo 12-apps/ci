@@ -164,3 +164,22 @@ test("schema-qualified and quoted names normalize to the table", () => {
     carts: ["y"],
   });
 });
+
+test("a FROM inside parentheses belongs to its expression — the SET list goes on past it", () => {
+  const sql = `UPDATE "order_items" SET "product_name" = (SELECT "name" FROM "menu_items" WHERE "id" = 1), "discount_cents" = 0 WHERE true;`;
+  assert.deepEqual(effect(sql), { order_items: ["discount_cents", "product_name"] });
+  assert.deepEqual(effect(`UPDATE t SET a = trim(both ' ' FROM a), b = EXTRACT(YEAR FROM c);`), { t: ["a", "b"] });
+});
+
+test("an E'…' literal's backslash escape does not re-open SQL inside the data", () => {
+  assert.deepEqual(effect(`INSERT INTO notes (b) VALUES (E'it\\'s DELETE FROM clients'); UPDATE users SET name = 'x';`), {
+    notes: "*",
+    users: ["name"],
+  });
+});
+
+test("a dollar-quote tag with digits is still a tag", () => {
+  assert.deepEqual(effect(`CREATE FUNCTION f() RETURNS trigger AS $fn1$ BEGIN UPDATE clients SET v = 1; RETURN NEW; END $fn1$ LANGUAGE plpgsql;`), {
+    clients: ["v"],
+  });
+});

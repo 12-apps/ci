@@ -168,3 +168,12 @@ test("--migrations is a glob: regex syntax in it is literal, never compiled", ()
   // And the default glob reaches a migration at any depth.
   assert.equal(run(root, "--migrations", "**/prisma/migrations/*/migration.sql").status, 0);
 });
+
+test("a migration with no visible table (a trigger function) keeps the domains it declares", () => {
+  const sql = `-- @domains: tenancy\nCREATE OR REPLACE FUNCTION bump() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;`;
+  const r = run(repo({ ...BASE, "20260102000000_fn": sql }));
+  assert.equal(r.status, 0, r.stdout);
+  // …but still has to declare SOMETHING real.
+  const bare = run(repo({ ...BASE, "20260102000000_fn": sql.replace("-- @domains: tenancy\n", "") }));
+  assert.equal(bare.status, 1);
+});

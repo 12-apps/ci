@@ -215,9 +215,10 @@ matches one is not consulted. For each path it asks what the change DOES:
    column every INSERT must now supply), a set of columns (a backfill, a column
    added with a default, a constraint over them), or nothing observable (a
    comment, a non-unique index). A migration whose SQL is unchanged apart from
-   comments changes nothing. What dynamic SQL hides, its `-- @domains:`
-   declaration covers: every table of a declared domain the parse saw nothing of
-   counts as `*`. A migration with no valid declaration is left UNROUTED — so it
+   comments changes nothing. What the parse cannot see — dynamic SQL, an index
+   nobody created, a migration with no visible table (a trigger function) — its
+   `-- @domains:` declaration covers: every declared-domain table the parse did
+   not see counts as `*`, table by table. A migration with no valid declaration is left UNROUTED — so it
    is unclassified and the plan stops, the same verdict the gate gives it.
 2. **A schema file** is diffed block by block: changed models, and inside each
    the changed fields (`@@unique`/`@@index` name theirs; `@@map`/`@@id`, or an
@@ -237,7 +238,9 @@ matches one is not consulted. For each path it asks what the change DOES:
    runs when that migration changes. A file matching `readerMarker` reads the
    folder's TEXT and runs on any migration change — unless it is a `carrier`
    (glob), one that only replays the folder to build a database or spells its
-   path: that database differs exactly where step 1 says. `schemaReaders` run on
+   path: that database differs exactly where step 1 says. `migrationReaders`
+   (literal paths) run on any migration change whatever they name — a discovery
+   test that lists the folder but pins two known entries. `schemaReaders` run on
    any schema change.
 6. **`always`** runs on any migration or schema change that alters SQL or a
    model, so a migration nothing else can observe still applies somewhere.

@@ -205,3 +205,16 @@ test("a generator edit reaches the whole client, honestly, through `global`", ()
   const { doc } = plan(root, base);
   assert.ok(doc.tests.includes("src/client.test.ts"));
 });
+
+test("dynamic SQL widens every declared-domain table the parse did not see, even beside one it did", () => {
+  const { root, base } = repo({
+    "db/migrations/20260102000000_dyn/migration.sql": `-- @domains: orders, tenancy
+DO $$ BEGIN EXECUTE format('ALTER TABLE %I ADD COLUMN x INT', 'clients'); END $$;
+UPDATE "orders" SET "status" = 'x' WHERE false;
+`,
+  });
+  const { doc } = plan(root, base);
+  // clients was never named, so every client query runs — not just the status reader.
+  assert.ok(doc.tests.includes("src/tenant.test.ts"), JSON.stringify(doc.tests));
+  assert.ok(doc.tests.includes("src/cancel-roles.test.ts"));
+});

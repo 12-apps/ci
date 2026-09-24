@@ -123,8 +123,15 @@ export function stripSql(sql) {
       continue;
     }
     if (c === "'") {
+      // An E'…' string treats a backslash as an escape: `E'it\'s'` is one
+      // literal, and reading it as two would re-open SQL inside the data.
+      const escaped = i > 0 && /[eE]/.test(sql[i - 1]) && (i < 2 || !/[\w$]/.test(sql[i - 2]));
       let j = i + 1;
       while (j < n) {
+        if (escaped && sql[j] === "\\") {
+          j += 2;
+          continue;
+        }
         if (sql[j] === "'" && sql[j + 1] === "'") {
           j += 2;
           continue;
@@ -144,7 +151,7 @@ export function stripSql(sql) {
       continue;
     }
     if (c === "$") {
-      const tag = /^\$[A-Za-z_]*\$/.exec(sql.slice(i, i + 64));
+      const tag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i, i + 64));
       if (tag) {
         const close = sql.indexOf(tag[0], i + tag[0].length);
         const stop = close === -1 ? n : close;
@@ -390,7 +397,11 @@ export function migrationEffects(sql, state = {}) {
     for (const update of statement.matchAll(new RegExp(UPDATE.source, "gi"))) {
       const table = normalizeIdent(update[1]);
       const set = statement.slice(update.index + update[0].length);
-      const clause = set.split(/\b(?:FROM|WHERE|RETURNING)\b/i)[0];
+      const clause = setClause(set);
+      if (clause === null) {
+        mark(table, "*");
+        continue;
+      }
       const targets = new Set();
       let precise = true;
       for (const item of topLevel(clause)) {
@@ -405,6 +416,31 @@ export function migrationEffects(sql, state = {}) {
   }
 
   return { effects, touched: new Set(effects.keys()), dynamic: DYNAMIC.test(text), unresolved };
+}
+
+/**
+ * The `SET a = …, b = …` list of an UPDATE: everything up to the first
+ * top-level FROM / WHERE / RETURNING. A `FROM` inside parentheses — a
+ * subquery, `trim(both x FROM y)`, `EXTRACT(… FROM …)` — belongs to its
+ * expression, not to the statement, and cutting there drops every target after
+ * it. Null when the parentheses never balance: the caller widens to `"*"`.
+ */
+function setClause(text) {
+  let depth = 0;
+  let quoted = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i];
+    if (c === '"') quoted = !quoted;
+    if (quoted) continue;
+    if (c === "(") depth += 1;
+    else if (c === ")") depth -= 1;
+    else if (depth === 0 && /[A-Za-z]/.test(c) && (i === 0 || !/[\w$]/.test(text[i - 1]))) {
+      const word = /^(FROM|WHERE|RETURNING)\b/i.exec(text.slice(i));
+      if (word) return text.slice(0, i);
+    }
+    if (depth < 0) return null;
+  }
+  return depth === 0 ? text : null;
 }
 
 /** One `ALTER TABLE t <action>` clause. */

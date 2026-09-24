@@ -144,7 +144,10 @@ for (const { name: file, sql } of sources) {
     if (!needed.has(domain)) needed.set(domain, []);
     needed.get(domain).push(table);
   }
-  const blind = dynamic || unresolved.length > 0;
+  // Dynamic SQL, an index nobody created, or no visible table at all (a
+  // trigger FUNCTION, an extension): the parse cannot say what it reaches, so
+  // the declaration stands for it — checked for shape and known domains only.
+  const blind = dynamic || unresolved.length > 0 || touched.size === 0;
 
   if (declaration.domains === null) {
     if (write && !blind && needed.size > 0 && touched.size === [...needed.values()].flat().length) {
@@ -171,8 +174,6 @@ for (const { name: file, sql } of sources) {
       if (registry.domains.has(d) && !needed.has(d))
         fail(file, declaration.line, `declares "${d}" but its SQL changes no table in it — declare only what the migration affects`);
 
-  if (touched.size === 0 && !blind)
-    fail(file, declaration.line || 1, "changes no table the parser can see — if that is wrong, the migration's SQL shape needs a rule in 12-apps/ci migration-domains/lib/sql.mjs");
 }
 
 // The registry against the migrations and the schema: complete, and not stale.

@@ -292,6 +292,9 @@ export function databaseRoutes(options) {
         continue;
       }
       for (const f of migrationReaders(file)) entries.add(f);
+      // Named outright: files that read the WHOLE folder even though they also
+      // name a migration or two (a discovery test pinning known entries).
+      for (const f of config.migrationReaders ?? []) entries.add(f);
       const squash = (sql) => stripSql(sql).replace(/\s+/g, " ").trim();
       const sqlChanged = head === null || base === null || squash(head) !== squash(base);
       if (!sqlChanged) why.push("comments only — the database it builds is unchanged");
@@ -304,19 +307,21 @@ export function databaseRoutes(options) {
         if (head !== null) sides.push(headEffects(file) ?? migrationEffects(head, { columnsOf }));
         if (base !== null) sides.push(migrationEffects(base, { columnsOf, tables: new Set(tableModel.keys()) }));
         for (const side of sides) {
-          blind ||= side.dynamic || side.unresolved.length > 0;
+          // Dynamic SQL, an index nobody created, or no table visible at all (a
+          // function, an extension): the parse cannot say what it reaches.
+          blind ||= side.dynamic || side.unresolved.length > 0 || side.touched.size === 0;
           for (const [table, effect] of side.effects) {
             seen.add(table);
             addTableEffect(targets, table, effect);
           }
         }
-        // What the parse could not see, the declaration covers.
+        // What the parse could not see, the declaration covers — table by
+        // table. Seeing ONE table of a domain says nothing about the others:
+        // `EXECUTE format('ALTER TABLE %I …', t)` over a loop is exactly how a
+        // migration reaches many tables the parse never names.
         if (blind && registry)
-          for (const d of declaration.domains) {
-            const tables = registry.domains.get(d)?.tables ?? [];
-            if (tables.some((t) => seen.has(t))) continue;
-            for (const t of tables) addTableEffect(targets, t, "*");
-          }
+          for (const d of declaration.domains)
+            for (const t of registry.domains.get(d)?.tables ?? []) if (!seen.has(t)) addTableEffect(targets, t, "*");
         for (const e of scan(targets)) entries.add(e);
         why.push(
           [...targets].map(([k, v]) => `${models.get(k)?.table ?? k.replace(/^table:/, "")}:${v === "*" ? "*" : [...v].join("|")}`).join(" ") ||
