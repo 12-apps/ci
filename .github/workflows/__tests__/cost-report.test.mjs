@@ -36,7 +36,7 @@ const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 const at = (s) => new Date(Date.UTC(2026, 8, 24, 12, 0, s)).toISOString();
 const job = (id, seconds, { selfHosted = true, labels = ["future-pay-ci"] } = {}) => ({
   id, conclusion: "success", started_at: at(0), completed_at: at(seconds), labels,
-  runner_group_name: selfHosted ? "Default" : "GitHub Actions",
+  runner_group_name: selfHosted ? "Default" : "GitHub Actions", runner_name: `runner-${id}`,
 });
 
 async function report({ runs, jobs, usage = {}, rates = defaultRates }) {
@@ -150,4 +150,12 @@ test("a re-run's earlier attempt is counted too: it was billed", async () => {
     runs: [run(2)], jobs: { 2: [{ ...job(1, 240), run_attempt: 1, conclusion: "failure" }, { ...job(2, 180), run_attempt: 2 }] },
   });
   assert.equal(billed, 7);
+});
+
+test("a job cancelled before it got a runner bills nothing", async () => {
+  // GitHub gives it start and end times 0 s apart, and no runner at all.
+  const queuedThenCancelled = { ...job(2, 0), conclusion: "cancelled", runner_name: null, runner_group_name: null };
+  const { billed, body } = await report({ runs: [run(2)], jobs: { 2: [job(1, 60), queuedThenCancelled] } });
+  assert.equal(billed, 1);
+  assert.doesNotMatch(body, /FUTURE-PAY-CI/);
 });
