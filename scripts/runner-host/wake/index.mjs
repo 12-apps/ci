@@ -3,7 +3,7 @@
 // deploy.sh sets the environment:
 //   WEBHOOK_SECRET, RUNNER_LABEL, REPOSITORY          both modes
 //   INSTANCE_ID                                       wake
-//   LAUNCH_TEMPLATE, INSTANCE_TYPES, SUBNETS, TOKEN_PARAMETER, SLOTS_PER_HOST, MAX_HOSTS   scale
+//   LAUNCH_TEMPLATE, OVERRIDES (type@subnet,...), INSTANCE_TYPES, SUBNETS, TOKEN_PARAMETER, SLOTS_PER_HOST, MAX_HOSTS   scale
 import { CreateFleetCommand, DescribeInstancesCommand, EC2Client, StartInstancesCommand } from "@aws-sdk/client-ec2";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { makeScaler } from "./scale.mjs";
@@ -130,10 +130,15 @@ const fleet = {
     const list = (v) => (v ?? "").split(",").map((t) => t.trim()).filter(Boolean);
     const types = list(env.INSTANCE_TYPES);
     const subnets = list(env.SUBNETS);
-    const overrides = (types.length ? types : [undefined]).flatMap((type) =>
-      (subnets.length ? subnets : [undefined]).map((subnet) => ({
-        ...(type ? { InstanceType: type } : {}), ...(subnet ? { SubnetId: subnet } : {}),
-      })));
+    // OVERRIDES (deploy.sh) lists only the pairs EC2 offers; one it does not
+    // makes the whole instant fleet fail with InvalidFleetConfiguration.
+    const pairs = list(env.OVERRIDES).map((p) => p.split("@"));
+    const overrides = pairs.length
+      ? pairs.map(([type, subnet]) => ({ InstanceType: type, SubnetId: subnet }))
+      : (types.length ? types : [undefined]).flatMap((type) =>
+        (subnets.length ? subnets : [undefined]).map((subnet) => ({
+          ...(type ? { InstanceType: type } : {}), ...(subnet ? { SubnetId: subnet } : {}),
+        })));
     const one = async (clientToken) => {
       try {
         const out = await throttled(() => ec2.send(new CreateFleetCommand({
@@ -148,8 +153,8 @@ const fleet = {
         })));
         const ids = (out.Instances ?? []).flatMap((i) => i.InstanceIds ?? []);
         if (ids.length === 0) {
-          const e = out.Errors?.[0];
-          console.log(`fleet: ${clientToken}: nothing launched (${e?.ErrorCode ?? "no error"}: ${e?.ErrorMessage ?? ""})`);
+          const codes = [...new Set((out.Errors ?? []).map((e) => e.ErrorCode))].join(", ") || "no error";
+          console.log(`fleet: ${clientToken}: nothing launched (${codes}): ${out.Errors?.[0]?.ErrorMessage ?? ""}`);
         }
         return ids;
       } catch (e) {

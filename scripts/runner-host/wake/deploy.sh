@@ -69,6 +69,18 @@ vpc=$(aws ec2 describe-subnets --subnet-ids "$subnet" --query 'Subnets[0].VpcId'
 subnets=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=${vpc}" "Name=default-for-az,Values=true" \
   --query 'Subnets[].SubnetId' | tr '\t' ',')
 [[ -n "$subnets" ]] || subnets=$subnet
+# Only the (type, subnet) pairs EC2 offers: one type a zone lacks (m7i-flex in
+# us-east-1e) makes an instant fleet refuse the whole request
+# (InvalidFleetConfiguration), and the queue waits.
+overrides=""
+while read -r sn az; do
+  [[ -n "$sn" ]] || continue
+  for t in $(aws ec2 describe-instance-type-offerings --location-type availability-zone \
+      --filters "Name=location,Values=${az}" "Name=instance-type,Values=${types}" --query 'InstanceTypeOfferings[].InstanceType'); do
+    overrides+="${overrides:+,}${t}@${sn}"
+  done
+done < <(IFS=, read -ra ids <<< "$subnets"; aws ec2 describe-subnets --subnet-ids "${ids[@]}" --query 'Subnets[].[SubnetId,AvailabilityZone]')
+[[ -n "$overrides" ]] || { echo "deploy: none of ${types} is offered in any subnet of ${vpc}" >&2; exit 1; }
 host_role=$(aws iam get-instance-profile --instance-profile-name "${profile_arn##*/}" --query 'InstanceProfile.Roles[0].Arn')
 
 # ── launch template: throwaway spot hosts that terminate when idle ──────────
@@ -161,9 +173,9 @@ aws iam create-service-linked-role --aws-service-name ec2fleet.amazonaws.com >/d
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 (umask 077; jq -n --rawfile s "$secret_file" --arg l "$label" --arg r "$repo" --arg t "$template" \
-  --arg p "$param" --arg types "$types" --arg subnets "$subnets" --arg slots "$slots" --arg max "$max_hosts" \
+  --arg p "$param" --arg types "$types" --arg subnets "$subnets" --arg overrides "$overrides" --arg slots "$slots" --arg max "$max_hosts" \
   '{Variables: {MODE: "scale", WEBHOOK_SECRET: ($s | rtrimstr("\n")), RUNNER_LABEL: $l, REPOSITORY: $r,
-    LAUNCH_TEMPLATE: $t, TOKEN_PARAMETER: $p, INSTANCE_TYPES: $types, SUBNETS: $subnets, SLOTS_PER_HOST: $slots, MAX_HOSTS: $max}}' > "$work/env.json")
+    LAUNCH_TEMPLATE: $t, TOKEN_PARAMETER: $p, INSTANCE_TYPES: $types, SUBNETS: $subnets, OVERRIDES: $overrides, SLOTS_PER_HOST: $slots, MAX_HOSTS: $max}}' > "$work/env.json")
 cp "$here/wake.mjs" "$here/scale.mjs" "$here/index.mjs" "$work/"
 (cd "$work" && python3 -m zipfile -c fn.zip wake.mjs scale.mjs index.mjs)
 if aws lambda get-function --function-name "$fn" >/dev/null 2>&1; then
