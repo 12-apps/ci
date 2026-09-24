@@ -25,10 +25,10 @@
 // (spot capacity) is launched instead.
 //
 // A spot host can be reclaimed mid-job, and the job fails with it. When a
-// `workflow_run` completes as a failure, the jobs that ran on a host AWS
-// reclaimed are counted (`lostJobs`), and if there are any the run's failed
-// jobs are re-run once more, up to MAX_ATTEMPTS attempts in all. A job that
-// failed on its own merits is never the reason for a re-run.
+// `workflow_run` completes as a failure, the jobs that lost their runner are
+// counted (`lostJobs`: failed with a step left unfinished), and if there are
+// any the run's failed jobs are re-run once more, up to MAX_ATTEMPTS attempts
+// in all. A job that failed on its own merits is never the reason for a re-run.
 //
 // Pure logic: index.mjs wires `github` and `ec2`, the tests fake them.
 import { signatureValid } from "./wake.mjs";

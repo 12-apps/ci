@@ -11,8 +11,9 @@
 # once; idempotent, re-run it to ship a new AMI or a new function version.
 #
 # Env: AWS_REGION (us-east-1), REPOSITORY (12-apps/future-pay), RUNNER_LABEL
-# (future-pay-ci), INSTANCE_TYPES (five current 8-vCPU / 32 GB x86 types; m5a is left out, its
-# first-generation EPYC is slower per core than the runner the lanes are tuned for),
+# (future-pay-ci), INSTANCE_TYPES (current 8-vCPU x86 types, 32 GB m and 64 GB r:
+# more spot pools, fewer reclaims; m5a is left out, its first-generation EPYC is
+# slower per core than the runner the lanes are tuned for),
 # SLOTS_PER_HOST (2: a 4-core, 14 GB slot, like the 4-vCPU runner the lanes are
 # tuned for), MAX_HOSTS (30; 30 × 8 vCPU must fit the account's spot vCPU
 # quota, L-34B43A08), POOL_SIZE (0; stopped hosts kept warm, see README), TOKEN_PARAMETER
@@ -24,7 +25,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 region="${AWS_REGION:-us-east-1}"
 repo="${REPOSITORY:-12-apps/future-pay}"
 label="${RUNNER_LABEL:-future-pay-ci}"
-types="${INSTANCE_TYPES:-m7a.2xlarge,m6a.2xlarge,m7i.2xlarge,m7i-flex.2xlarge,m6i.2xlarge}"
+types="${INSTANCE_TYPES:-m7a.2xlarge,m6a.2xlarge,m7i.2xlarge,m7i-flex.2xlarge,m6i.2xlarge,r7a.2xlarge,r6a.2xlarge,r7i.2xlarge,r6i.2xlarge}"
 slots="${SLOTS_PER_HOST:-2}"
 max_hosts="${MAX_HOSTS:-30}"
 pool_size="${POOL_SIZE:-0}"

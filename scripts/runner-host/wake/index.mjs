@@ -43,28 +43,17 @@ const github = {
     }
     return count;
   },
-  // Failed jobs of this attempt whose host AWS reclaimed. A runner is named
-  // after its host (`ip-172-31-30-61-<slot>-<epoch>`), so the name gives the
-  // private address, and EC2 keeps a terminated instance's state reason for
-  // about an hour.
+  // Failed jobs of this attempt that lost their runner. When the host goes
+  // (spot reclaim, a crash), GitHub closes the job as a failure but leaves
+  // the step it was in unfinished; a job that fails on its own finishes every
+  // step it ran. The Actions API alone tells them apart, so this holds after
+  // EC2 has forgotten the host: a terminated instance has no private address
+  // left to look it up by, which is how the first version of this missed
+  // future-pay #1985's two lost jobs.
   async lostJobs(runId, attempt) {
     const { jobs } = await gh(`/repos/${env.REPOSITORY}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100`);
-    const ips = new Map();
-    for (const j of jobs) {
-      const m = j.conclusion === "failure" && j.labels.includes(env.RUNNER_LABEL) && /^ip-(\d+)-(\d+)-(\d+)-(\d+)-/.exec(j.runner_name ?? "");
-      if (m) ips.set(m.slice(1, 5).join("."), (ips.get(m.slice(1, 5).join(".")) ?? 0) + 1);
-    }
-    if (ips.size === 0) return 0;
-    const out = await ec2.send(new DescribeInstancesCommand({
-      Filters: [
-        { Name: `tag:${FLEET_TAG}`, Values: [env.RUNNER_LABEL] },
-        { Name: "private-ip-address", Values: [...ips.keys()] },
-        // Terminated (one-time spot) or stopped (a pool host's persistent request).
-        { Name: "state-reason-code", Values: ["Server.SpotInstanceTermination", "Server.SpotInstanceShutdown"] },
-      ],
-    }));
-    const reclaimed = (out.Reservations ?? []).flatMap((r) => r.Instances ?? []).map((i) => i.PrivateIpAddress);
-    return [...new Set(reclaimed)].reduce((n, ip) => n + (ips.get(ip) ?? 0), 0);
+    return jobs.filter((j) => j.conclusion === "failure" && j.labels.includes(env.RUNNER_LABEL)
+      && (j.steps ?? []).some((s) => s.status !== "completed")).length;
   },
   // Needs Actions: Read and write on the token.
   async rerunFailed(runId) {
