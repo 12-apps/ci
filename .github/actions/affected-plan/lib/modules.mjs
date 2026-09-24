@@ -90,7 +90,7 @@ const REQUIRE_CALL = /\brequire\(\s*["']([^"']+)["']\s*\)/g;
  * `code`, so the two must stay CHARACTER-ALIGNED: every branch below appends
  * the same number of characters to both.
  */
-function scan(source) {
+export function scan(source) {
   let out = "";
   let hidden = "";
   let i = 0;
@@ -392,7 +392,19 @@ export function listSourceFiles(repoRoot, roots) {
       else if (EXTENSIONS.includes(entry.name.slice(entry.name.lastIndexOf(".")))) out.push(rel);
     }
   };
-  for (const root of roots) walk(root);
+  for (const root of roots) {
+    // A root may name one FILE — a runner config at the repo root, say — which
+    // readdirSync would refuse and the walk would silently skip.
+    if (EXTENSIONS.includes(root.slice(root.lastIndexOf(".")))) {
+      try {
+        if (statSync(join(repoRoot, root)).isFile()) out.push(root);
+      } catch {
+        // absent: nothing to list
+      }
+      continue;
+    }
+    walk(root);
+  }
   return out;
 }
 

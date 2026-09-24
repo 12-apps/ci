@@ -58,7 +58,7 @@ import { join } from "node:path";
 import { changedBlocks, changedFields, schemaBlocks, schemaModels, delegateOf } from "../../migration-domains/lib/prisma-schema.mjs";
 import { loadRegistry } from "../../migration-domains/lib/registry.mjs";
 import { migrationEffects, readDeclaration, stripSql, walkMigrations } from "../../migration-domains/lib/sql.mjs";
-import { declarationsOf, reachableExports } from "./exports-dataflow.mjs";
+import { entriesForMatches } from "./occurrences.mjs";
 import { stripComments } from "./modules.mjs";
 
 /** Every Prisma delegate operation — a property access followed by one of these is a query. */
@@ -70,10 +70,6 @@ const OPS = [
 
 const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const camel = (snake) => snake.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
-const IMPORT_LINE = /^\s*(?:import\b|export\s+(?:type\s+)?(?:\*|\{[^}]*\})\s*from\b).*$/gm;
-
-/** How many times `re` matches `text` (global copy, so callers' lastIndex is untouched). */
-const count = (re, text) => (text.match(new RegExp(re.source, `${re.flags.replace("g", "")}g`)) ?? []).length;
 
 /**
  * @param {object} options
@@ -218,47 +214,7 @@ export function databaseRoutes(options) {
     }
     if (specs.length === 0) return [];
 
-    const entries = [];
-    for (const file of sourceFiles) {
-      const text = textOf(file);
-      if (!text) continue;
-      const live = specs.filter((s) => s.re.test(text) && (!s.mentionRe || s.mentionRe.test(text)));
-      if (live.length === 0) continue;
-      if (isTest(file)) {
-        entries.push(file);
-        continue;
-      }
-      const decls = declarationsOf(text);
-      if (decls === null) {
-        entries.push(file);
-        continue;
-      }
-      const hot = new Set();
-      let inDecls = 0;
-      let everywhere = 0;
-      const outsideImports = text.replace(IMPORT_LINE, "");
-      for (const s of live) {
-        // A shared field name counts only in a declaration that ALSO touches
-        // the model — `label(status)` beside `prisma.order.findMany` is not a
-        // read of orders.status just because the two share a file.
-        const owns = (text) => s.re.test(text) && (!s.mentionRe || s.mentionRe.test(text));
-        for (const d of decls)
-          if (owns(d.text)) {
-            hot.add(d.name);
-            inDecls += count(s.re, d.text);
-          }
-        everywhere += s.mentionRe ? 0 : count(s.re, outsideImports);
-      }
-      // A hit no declaration owns is module-level code — it can reach anything.
-      if (everywhere > inDecls) {
-        entries.push(file);
-        continue;
-      }
-      const reach = reachableExports(text, hot);
-      if (reach === "*") entries.push(file);
-      else if (reach.size > 0) entries.push(`${file}#${[...reach].sort().join(",")}`);
-    }
-    return entries;
+    return entriesForMatches({ files: sourceFiles, textOf, isTest, specs });
   };
 
   /** Merge table effects into model-keyed targets. */
