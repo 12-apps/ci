@@ -26,6 +26,10 @@
 # first. The AMI is copied (by name) into each and gets a launch template of
 # the same name there; a region that cannot be set up is left out with a
 # warning. The hosts of every region read the token from AWS_REGION's SSM.
+# DAILY_BUDGET (10 USD; 0 turns it off): once the fleet has spent it in a local
+# day (BUDGET_UTC_OFFSET, -3), it shrinks to DEGRADED_MAX_HOSTS (2) spot hosts
+# until local midnight, and fires the hook in ALERT_PARAMETER
+# (/ci-runner/budget-alert, a JSON SecureString {"url", "headers"}) once.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -36,6 +40,10 @@ types="${INSTANCE_TYPES:-m7a.2xlarge,m6a.2xlarge,m7i.2xlarge,m6i.2xlarge,r7a.2xl
 slots="${SLOTS_PER_HOST:-2}"
 max_hosts="${MAX_HOSTS:-30}"
 pool_size="${POOL_SIZE:-0}"
+daily_budget="${DAILY_BUDGET:-10}"
+degraded_max_hosts="${DEGRADED_MAX_HOSTS:-2}"
+budget_utc_offset="${BUDGET_UTC_OFFSET:--3}"
+alert_param="${ALERT_PARAMETER:-/ci-runner/budget-alert}"
 # gp3's baseline is 125 MB/s and 3000 IOPS. A job's dependency install is
 # disk-bound once the cache is found (future-pay: 529 MB restored in 2.5 s,
 # then 19 s to extract and more to link 1887 packages), so the root volume
@@ -198,6 +206,8 @@ if ! aws iam get-role --role-name "$role" >/dev/null 2>&1; then
 fi
 policy=$(jq -n --arg lts "$template_arns" --arg hostrole "$host_role" --arg label "$label" \
   --arg param "arn:aws:ssm:${region}:${account}:parameter${param}" \
+  --arg spend "arn:aws:ssm:${region}:${account}:parameter/ci-runner/spend-${label}" \
+  --arg alert "arn:aws:ssm:${region}:${account}:parameter${alert_param}" \
   --arg logs "arn:aws:logs:${region}:${account}:log-group:/aws/lambda/${fn}" '{
   Version: "2012-10-17",
   Statement: [
@@ -205,11 +215,12 @@ policy=$(jq -n --arg lts "$template_arns" --arg hostrole "$host_role" --arg labe
     {Effect: "Allow", Action: "ec2:CreateFleet", Resource: "*"},
     {Effect: "Allow", Action: "ec2:CreateTags", Resource: "*", Condition: {StringEquals: {"ec2:CreateAction": ["RunInstances", "CreateFleet"]}}},
     {Effect: "Allow", Action: ["ec2:DescribeLaunchTemplateVersions", "ec2:DescribeImages", "ec2:DescribeSubnets",
-      "ec2:DescribeInstanceTypeOfferings", "ec2:GetSpotPlacementScores"], Resource: "*"},
+      "ec2:DescribeInstanceTypeOfferings", "ec2:GetSpotPlacementScores", "ec2:DescribeSpotPriceHistory"], Resource: "*"},
     {Effect: "Allow", Action: "ec2:StartInstances", Resource: "*", Condition: {StringEquals: {"aws:ResourceTag/ci-runner-pool": $label}}},
     {Effect: "Allow", Action: "iam:PassRole", Resource: $hostrole},
     {Effect: "Allow", Action: "ec2:DescribeInstances", Resource: "*"},
-    {Effect: "Allow", Action: "ssm:GetParameter", Resource: $param},
+    {Effect: "Allow", Action: "ssm:GetParameter", Resource: [$param, $alert]},
+    {Effect: "Allow", Action: ["ssm:GetParameter", "ssm:PutParameter"], Resource: $spend},
     {Effect: "Allow", Action: "kms:Decrypt", Resource: "*", Condition: {StringEquals: {"kms:ViaService": "ssm.\($param | split(":")[3]).amazonaws.com"}}},
     {Effect: "Allow", Action: "logs:CreateLogGroup", Resource: $logs},
     {Effect: "Allow", Action: ["logs:CreateLogStream", "logs:PutLogEvents"], Resource: ($logs + ":*")}
@@ -225,10 +236,12 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 (umask 077; jq -n --rawfile s "$secret_file" --arg l "$label" --arg r "$repo" --arg t "$template" \
   --arg p "$param" --arg types "$types" --arg regions "$live_regions" --arg slots "$slots" --arg max "$max_hosts" \
+  --arg budget "$daily_budget" --arg degraded "$degraded_max_hosts" --arg offset "$budget_utc_offset" --arg alert "$alert_param" \
   '{Variables: {MODE: "scale", WEBHOOK_SECRET: ($s | rtrimstr("\n")), RUNNER_LABEL: $l, REPOSITORY: $r,
-    LAUNCH_TEMPLATE: $t, TOKEN_PARAMETER: $p, INSTANCE_TYPES: $types, REGIONS: $regions, SLOTS_PER_HOST: $slots, MAX_HOSTS: $max}}' > "$work/env.json")
-cp "$here/wake.mjs" "$here/scale.mjs" "$here/index.mjs" "$work/"
-(cd "$work" && python3 -m zipfile -c fn.zip wake.mjs scale.mjs index.mjs)
+    LAUNCH_TEMPLATE: $t, TOKEN_PARAMETER: $p, INSTANCE_TYPES: $types, REGIONS: $regions, SLOTS_PER_HOST: $slots, MAX_HOSTS: $max,
+    DAILY_BUDGET: $budget, DEGRADED_MAX_HOSTS: $degraded, BUDGET_UTC_OFFSET: $offset, ALERT_PARAMETER: $alert}}' > "$work/env.json")
+cp "$here/wake.mjs" "$here/scale.mjs" "$here/budget.mjs" "$here/index.mjs" "$work/"
+(cd "$work" && python3 -m zipfile -c fn.zip wake.mjs scale.mjs budget.mjs index.mjs)
 if aws lambda get-function --function-name "$fn" >/dev/null 2>&1; then
   aws lambda update-function-code --function-name "$fn" --zip-file "fileb://$work/fn.zip" >/dev/null
   aws lambda wait function-updated-v2 --function-name "$fn"
