@@ -139,23 +139,37 @@ const fleet = {
         (subnets.length ? subnets : [undefined]).map((subnet) => ({
           ...(type ? { InstanceType: type } : {}), ...(subnet ? { SubnetId: subnet } : {}),
         })));
+    const request = (clientToken, market) => throttled(() => ec2.send(new CreateFleetCommand({
+      Type: "instant",
+      ClientToken: clientToken.slice(0, 64),
+      TargetCapacitySpecification: { TotalTargetCapacity: 1, DefaultTargetCapacityType: market },
+      ...(market === "spot"
+        ? { SpotOptions: { AllocationStrategy: "price-capacity-optimized", InstanceInterruptionBehavior: "terminate" } }
+        : { OnDemandOptions: { AllocationStrategy: "lowest-price" } }),
+      LaunchTemplateConfigs: [{
+        LaunchTemplateSpecification: { LaunchTemplateName: env.LAUNCH_TEMPLATE, Version: "$Default" },
+        Overrides: overrides,
+      }],
+    })));
+    const launched = (out) => (out.Instances ?? []).flatMap((i) => i.InstanceIds ?? []);
+    const codes = (out) => [...new Set((out.Errors ?? []).map((e) => e.ErrorCode))];
+    // When no spot pool has capacity, a job waiting costs more than an
+    // on-demand host: measured, every one of 25 spot pools refused at once on
+    // 2026-09-24 while seven future-pay jobs queued. The on-demand host
+    // terminates when idle like any other.
+    const SPOT_EXHAUSTED = new Set(["InsufficientInstanceCapacity", "UnfulfillableCapacity", "MaxSpotInstanceCountExceeded", "SpotMaxPriceTooLow"]);
     const one = async (clientToken) => {
       try {
-        const out = await throttled(() => ec2.send(new CreateFleetCommand({
-          Type: "instant",
-          ClientToken: clientToken.slice(0, 64),
-          TargetCapacitySpecification: { TotalTargetCapacity: 1, DefaultTargetCapacityType: "spot" },
-          SpotOptions: { AllocationStrategy: "price-capacity-optimized", InstanceInterruptionBehavior: "terminate" },
-          LaunchTemplateConfigs: [{
-            LaunchTemplateSpecification: { LaunchTemplateName: env.LAUNCH_TEMPLATE, Version: "$Default" },
-            Overrides: overrides,
-          }],
-        })));
-        const ids = (out.Instances ?? []).flatMap((i) => i.InstanceIds ?? []);
-        if (ids.length === 0) {
-          const codes = [...new Set((out.Errors ?? []).map((e) => e.ErrorCode))].join(", ") || "no error";
-          console.log(`fleet: ${clientToken}: nothing launched (${codes}): ${out.Errors?.[0]?.ErrorMessage ?? ""}`);
+        const spot = await request(clientToken, "spot");
+        if (launched(spot).length) return launched(spot);
+        const why = codes(spot);
+        if (!why.length || !why.every((c) => SPOT_EXHAUSTED.has(c))) {
+          console.log(`fleet: ${clientToken}: nothing launched (${why.join(", ") || "no error"}): ${spot.Errors?.[0]?.ErrorMessage ?? ""}`);
+          return [];
         }
+        const onDemand = await request(`${clientToken}-od`, "on-demand");
+        const ids = launched(onDemand);
+        console.log(`fleet: ${clientToken}: no spot capacity (${why.join(", ")}); on-demand ${ids.length ? ids.join(" ") : `refused too (${codes(onDemand).join(", ")})`}`);
         return ids;
       } catch (e) {
         // Another evaluation is launching this very position right now.

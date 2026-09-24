@@ -83,7 +83,9 @@ done < <(IFS=, read -ra ids <<< "$subnets"; aws ec2 describe-subnets --subnet-id
 [[ -n "$overrides" ]] || { echo "deploy: none of ${types} is offered in any subnet of ${vpc}" >&2; exit 1; }
 host_role=$(aws iam get-instance-profile --instance-profile-name "${profile_arn##*/}" --query 'InstanceProfile.Roles[0].Arn')
 
-# ── launch template: throwaway spot hosts that terminate when idle ──────────
+# ── launch template: throwaway hosts that terminate when idle ───────────────
+# No market options here: the scaler's fleet request asks for spot and falls
+# back to on-demand when no spot pool has capacity (index.mjs).
 data=$(jq -n --arg ami "$AMI_ID" --arg type "${types%%,*}" --arg profile "$profile_arn" \
   --arg sg "$sg" --arg label "$label" \
   --arg dev "$root_device" --argjson gb "$root_gb" '{
@@ -91,7 +93,6 @@ data=$(jq -n --arg ami "$AMI_ID" --arg type "${types%%,*}" --arg profile "$profi
   IamInstanceProfile: {Arn: $profile},
   SecurityGroupIds: [$sg],
   MetadataOptions: {HttpTokens: "required", HttpEndpoint: "enabled"},
-  InstanceMarketOptions: {MarketType: "spot", SpotOptions: {SpotInstanceType: "one-time", InstanceInterruptionBehavior: "terminate"}},
   InstanceInitiatedShutdownBehavior: "terminate",
   BlockDeviceMappings: [{DeviceName: $dev, Ebs: {VolumeSize: $gb, VolumeType: "gp3", Encrypted: true, DeleteOnTermination: true}}],
   TagSpecifications: [
