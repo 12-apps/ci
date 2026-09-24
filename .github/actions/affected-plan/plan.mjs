@@ -24,6 +24,7 @@ import { dirname, join, resolve } from "node:path";
 
 import { databaseRoutes } from "./lib/database.mjs";
 import { explainByChange, explainByTest } from "./lib/explain.mjs";
+import { gherkinFeatures } from "./lib/gherkin.mjs";
 import { fileKeys, keyedChange, keyPatterns, wiringOf } from "./lib/keys.mjs";
 import { listSourceFiles, stripComments } from "./lib/modules.mjs";
 import { entriesForMatches } from "./lib/occurrences.mjs";
@@ -173,6 +174,22 @@ const resolveCommandRoutes = () => {
 const testRe = rx(laneConfig.test);
 const excludeRe = rx(laneConfig.exclude);
 const isTest = (f) => Boolean(testRe?.test(f)) && !(excludeRe?.test(f) ?? false);
+
+/**
+ * `gherkin: { calls, projects: [{ steps, features }] }` — step files are
+ * lists of `Given(…)` calls, bracketed one definition at a time, and the plan
+ * names the features that speak a reached one (lib/gherkin.mjs).
+ */
+const gherkin = laneConfig.gherkin
+  ? { calls: laneConfig.gherkin.calls ?? ["Given", "When", "Then", "Step"], projects: laneConfig.gherkin.projects ?? [] }
+  : null;
+if (gherkin && gherkin.projects.length === 0) {
+  // A block with no projects would select no feature for any step file —
+  // silently. Refuse to narrow instead.
+  console.error(`::error::affected-plan (${lane}): the gherkin block names no projects — planning the full suite.`);
+  emit({ mode: "full", tests: [], why: "the gherkin block names no projects", stats: {}, symbols: {}, reasons: {} });
+  process.exit(0);
+}
 
 /**
  * Migrations and schema files, when the config has a `database` block, are
@@ -457,7 +474,16 @@ const result = selectAffected({
   isSource,
   routeOf,
   aliasesFor,
+  calls: gherkin?.calls ?? [],
 });
+
+// Gherkin: the features the reached step DEFINITIONS are spoken in
+// (lib/gherkin.mjs). The step files stay in `tests` for a caller that reads
+// only that list; a caller selecting features reads this instead.
+const gherkinReport =
+  gherkin && result.affected
+    ? gherkinFeatures({ repoRoot, projects: gherkin.projects, calls: gherkin.calls, affected: result.affected })
+    : null;
 
 emit({
   ...result,
@@ -465,6 +491,7 @@ emit({
   lane,
   changed,
   ...(keyed?.size ? { keys: Object.fromEntries([...keyed].map(([f, k]) => [f, k.report])) } : {}),
+  ...(gherkin ? { gherkin: gherkinReport ?? { features: [], steps: {} } } : {}),
 });
 
 // An unclassified path is the one outcome that must stop the run. Emitting
@@ -511,6 +538,8 @@ function emit(plan) {
     // `.feature`) naming its keys — the part of the answer a caller outside
     // the import graph needs.
     ...(plan.keys ? { keys: plan.keys } : {}),
+    // The features the reached step definitions are spoken in, per step file.
+    ...(plan.gherkin ? { gherkin: plan.gherkin } : {}),
     affectedSymbols: plan.symbols ?? {},
     tests,
     reasons: plan.reasons ?? {},
@@ -535,6 +564,11 @@ function emit(plan) {
   }
   console.error(`[affected-plan] ${plan.lane ?? lane}: ${plan.mode} — ${plan.why}`);
   console.error(`[affected-plan] ${tests.length} test file(s), ${shards.length} shard(s) → ${outPath}`);
+  if (plan.gherkin) {
+    console.error(`[gherkin] ${plan.gherkin.features.length} feature(s) speak a reached step definition`);
+    for (const [file, s] of Object.entries(plan.gherkin.steps))
+      console.error(`[gherkin] ${file}: ${s.definitions} definition(s) → ${s.features.length} feature(s)${s.why ? ` (${s.why})` : ""}`);
+  }
 
   // The chain, not just the name. `• apps/web/.../route.test.ts` says a file
   // was selected; it never says by WHAT, which is the only question a reviewer

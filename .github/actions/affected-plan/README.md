@@ -307,6 +307,57 @@ its file to `roots` (a root may be a single file). A plan that reaches it then
 says so in `tests`, and the caller can treat that, and only that, as "every
 test".
 
+## Gherkin — the `gherkin` block
+
+A step file is a list of `Given("…", fn)` calls, and the runner binds them by
+glob across a whole project — so without help "a step file was reached" can
+only mean "every feature of its project". The `gherkin` block makes the
+DEFINITION the unit instead:
+
+```jsonc
+"lanes": {
+  "e2e": {
+    "gherkin": {
+      "calls": ["Given", "When", "Then"],   // default adds "Step"
+      "projects": [
+        { "steps": "tests/e2e/steps/checkout", "features": "tests/e2e/features/checkout" }
+      ]
+    }
+  }
+}
+```
+
+- each top-level step call brackets as its own declaration, so the walk knows
+  WHICH definitions can see a change — an edit inside one step body reaches
+  that step, a change to an import (or to a helper in the same file) reaches
+  the steps that use it;
+- the plan's `gherkin.features` lists the features whose step lines match a
+  reached definition (Cucumber expressions with every parameter type,
+  alternation and optional text; regex literals; `new RegExp` over same-file
+  top-level string constants — read statically, no install);
+- nothing the reader cannot prove narrows. The runner refuses undefined and
+  ambiguous steps, so every compiled line matches exactly one definition; a
+  line no readable pattern matches — a pattern built at run time, one this
+  reader got wrong, a feature it cannot read (a non-English `# language:`) —
+  is an ORPHAN, and whenever anything in a project is reached, every feature
+  holding an orphan runs with it;
+- an edit that REMOVES a definition or changes a pattern widens to the whole
+  file (whoever spoke the old pattern is now bound to nothing, and is an
+  orphan); so do two definitions sharing a pattern; a deleted step file
+  selects the features left bound to nothing;
+- a step file that cannot be bracketed (a hook, any module-level statement)
+  selects its whole project, and says why; a `gherkin` block with no
+  `projects` plans the full suite rather than select nothing.
+
+Fixtures reach definitions too: `export const { Given, When, Then } =
+createBdd(test)` makes every definition depend on `test`, so a change to a
+fixture — or to a world class a fixture constructs — reaches every definition
+of its project. That is the honest answer, not a fallback.
+
+The step files stay in `tests`; a caller selecting FEATURES reads
+`gherkin.features` and `gherkin.steps` (per step file: how many definitions
+were reached, and which features they select).
+
 ## The plan document
 
 ```jsonc

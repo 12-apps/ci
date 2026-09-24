@@ -89,6 +89,14 @@ const REQUIRE_CALL = /\brequire\(\s*["']([^"']+)["']\s*\)/g;
  * selector to fail. Positions are found in `masked` and specifiers read from
  * `code`, so the two must stay CHARACTER-ALIGNED: every branch below appends
  * the same number of characters to both.
+ *
+ * A REGEX literal is consumed whole, content blanked in `masked` like a
+ * string's. Read as code, `/^"(.+)" is on the fridge's shelf$/` opens a string
+ * at its apostrophe that never closes — and every comment after it survives
+ * into `code`, every import after it vanishes from `masked`. A `/` starts a
+ * regex where an operand is expected: at the start, after an operator or
+ * opening bracket, or after a keyword such as `return` (the same rule as
+ * keys.mjs's lexer).
  */
 export function scan(source) {
   let out = "";
@@ -97,6 +105,8 @@ export function scan(source) {
   const n = source.length;
   let quote = null; // ' " ` when inside a string
   let templateDepth = 0;
+  let lastSig = "";
+  let lastWord = "";
 
   while (i < n) {
     const c = source[i];
@@ -113,7 +123,11 @@ export function scan(source) {
         i += 2;
         continue;
       }
-      if (c === quote) quote = null;
+      if (c === quote) {
+        quote = null;
+        lastSig = c;
+        lastWord = "";
+      }
       i += 1;
       continue;
     }
@@ -145,12 +159,73 @@ export function scan(source) {
       continue;
     }
 
+    const regexEnd = c === "/" ? regexLiteralEnd(source, i, lastSig, lastWord) : -1;
+    if (regexEnd > i) {
+      out += source.slice(i, regexEnd);
+      hidden += `/${" ".repeat(Math.max(0, regexEnd - i - 2))}/`.slice(0, regexEnd - i);
+      i = regexEnd;
+      lastSig = ")";
+      lastWord = "";
+      continue;
+    }
+
     out += c;
     hidden += c;
+    if (!/\s/.test(c)) {
+      lastWord = /[\w$]/.test(c) ? (/[\w$]/.test(source[i - 1] ?? "") ? lastWord + c : c) : "";
+      lastSig = c;
+    }
     i += 1;
     void templateDepth;
   }
   return { code: out, masked: hidden };
+}
+
+/** Keywords after which a `/` opens a regex literal rather than dividing. */
+const REGEX_AFTER = new Set(["return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw", "yield", "await"]);
+
+/** Does the rest of the line from `from` end outside every string literal? */
+function endsOutsideString(text, from) {
+  let quote = null;
+  for (let k = from; k < text.length && text[k] !== "\n"; k += 1) {
+    const c = text[k];
+    if (c === "\\") k += 1;
+    else if (quote === null && (c === '"' || c === "'" || c === "`")) quote = c;
+    else if (c === quote) quote = null;
+  }
+  return quote === null || quote === "`";
+}
+
+/**
+ * The end (flags included) of the regex literal a `/` at `i` opens, or -1 when
+ * it opens none. `lastSig`/`lastWord` are the last significant character and
+ * word before it. A `/` is a regex only where an operand is expected — never
+ * after `<` or as `/>` after `}` (JSX: `</b>`, `<Icon size={16} />`) — and
+ * only when closed on its line.
+ *
+ * Even then the two readings are weighed by what they leave behind: the line
+ * after a real regex closes every string it opens, while reading `/> <a
+ * href="/x">` as a regex swallows half a string and leaves the rest of the
+ * line — and every string after it — inside out. So a candidate is declined
+ * when the rest of its line only makes sense read as a division. Declining is
+ * the behaviour before regex literals were recognised at all.
+ */
+export function regexLiteralEnd(text, i, lastSig, lastWord) {
+  const operand = lastSig === "" || "(,=:[!&|?{};+-*%>~^".includes(lastSig) || REGEX_AFTER.has(lastWord);
+  if (!operand || (lastSig === "}" && text[i + 1] === ">")) return -1;
+  let j = i + 1;
+  let inClass = false;
+  while (j < text.length && text[j] !== "\n" && (inClass || text[j] !== "/")) {
+    if (text[j] === "\\") j += 1;
+    else if (text[j] === "[") inClass = true;
+    else if (text[j] === "]") inClass = false;
+    j += 1;
+  }
+  if (text[j] !== "/") return -1;
+  j += 1;
+  while (j < text.length && /[a-z]/i.test(text[j])) j += 1;
+  if (!endsOutsideString(text, j) && endsOutsideString(text, i + 1)) return -1;
+  return j;
 }
 
 /** Comments removed, literals intact. */
