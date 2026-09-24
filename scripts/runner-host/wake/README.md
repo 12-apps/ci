@@ -19,7 +19,8 @@ pool host:  starts → token from SSM → 3 slots → idle 5 min → stops (only
   - The result is capped at `MAX_HOSTS`.
   - Hosts still booting count as capacity, so a hundred deliveries in a burst launch what the queue needs, not a hundred hosts.
 - **Warm pool.** A host launched from the AMI reads its disk from the snapshot on first touch: about 90 s to boot and another minute before its runner takes a job (measured 2 min 45 s from queue to start). `POOL_SIZE` hosts (default 2) are kept **stopped** instead, with disks that have booted before, and the scaler starts those before it launches anything. They are persistent spot requests whose poweroff stops rather than terminates, so while stopped they cost only their volumes (about US$10 a month each for the 120 GB root). A pool host that cannot start for lack of spot capacity is replaced by a fresh launch in the same evaluation.
-- **Spot capacity.** When one instance type has no spot capacity, the next in `INSTANCE_TYPES` is tried.
+- **Spot capacity.** Hosts are launched by one instant EC2 Fleet request that spans every type in `INSTANCE_TYPES` (eight 8-vCPU x86 types) and every default subnet (one per zone). The `price-capacity-optimized` strategy puts them in the spot pools least likely to be reclaimed. On the first real burst, every host was a c7a in us-east-1d. That pool was out of capacity, and AWS reclaimed a host from it mid-job.
+- **Reclaimed hosts.** A job on a host that AWS reclaims fails with it. When a run completes as a failure, the function looks for failed jobs whose runner's host was ended with `Server.SpotInstanceTermination`, and re-runs the run's failed jobs. This happens up to the third attempt. A job that failed on its own merits never triggers a re-run.
 - **Boot.** A host launched from the AMI has Docker, the job image and the kit already on disk. It reads the PAT from SSM (`fetch-credential.sh`), so the image carries no secret, and registers its runners in about a minute.
 - **Scale-in.** `idle-stop.sh` releases each waiting runner through the API. GitHub refuses that (422) for a runner it has just handed a job, and one refusal cancels the stop. Once released, the host powers off, which the launch template turns into a terminate.
 - **Who can drive it.**
@@ -30,7 +31,10 @@ pool host:  starts → token from SSM → 3 slots → idle 5 min → stops (only
 
 ## Install
 
-1. **Token.** It lives in SSM (`/ci-runner/github-app-key`) and needs **Administration: Read and write** (register runners) plus **Actions: Read** (count the queue).
+1. **Token.** It lives in SSM (`/ci-runner/github-app-key`) and needs:
+   - **Administration: Read and write** to register runners.
+   - **Actions: Read and write** to count the queue and re-run jobs lost to a reclaimed host.
+   - **Webhooks: Read and write** to create the webhook.
 2. **Golden host.** On any host with the kit, as root:
    `wake/prepare-golden.sh 3`. It installs fleet mode, removes the token from disk and clears the host identity.
 3. **Deploy.** With a profile allowed to manage IAM, Lambda, AMIs and launch templates:
@@ -43,7 +47,7 @@ pool host:  starts → token from SSM → 3 slots → idle 5 min → stops (only
 4. **Webhook.** On the repository, under **Settings → Webhooks**, add the printed URL:
    - Content type `application/json`.
    - The secret from `~/.ci-runner-wake-secret`.
-   - Only the **Workflow jobs** event.
+   - The **Workflow jobs** and **Workflow runs** events.
 
 After that, the golden host can be terminated. Re-run `deploy.sh` with a new golden host to ship a new image (for example after a runner release). The run also tops the warm pool up to `POOL_SIZE` and retires stopped pool hosts on an older image; one that is running is left to finish and retired by the next run.
 

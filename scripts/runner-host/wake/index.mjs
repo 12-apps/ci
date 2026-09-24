@@ -3,8 +3,8 @@
 // deploy.sh sets the environment:
 //   WEBHOOK_SECRET, RUNNER_LABEL, REPOSITORY          both modes
 //   INSTANCE_ID                                       wake
-//   LAUNCH_TEMPLATE, TOKEN_PARAMETER, SLOTS_PER_HOST, MAX_HOSTS   scale
-import { DescribeInstancesCommand, EC2Client, RunInstancesCommand, StartInstancesCommand } from "@aws-sdk/client-ec2";
+//   LAUNCH_TEMPLATE, INSTANCE_TYPES, SUBNETS, TOKEN_PARAMETER, SLOTS_PER_HOST, MAX_HOSTS   scale
+import { CreateFleetCommand, DescribeInstancesCommand, EC2Client, StartInstancesCommand } from "@aws-sdk/client-ec2";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { makeScaler } from "./scale.mjs";
 import { makeHandler } from "./wake.mjs";
@@ -21,12 +21,13 @@ async function githubToken() {
   return token;
 }
 
-async function gh(path) {
+async function gh(path, method = "GET") {
   const res = await fetch(`https://api.github.com${path}`, {
+    method,
     headers: { Authorization: `Bearer ${await githubToken()}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
   });
-  if (!res.ok) throw new Error(`GitHub ${res.status} on ${path}`);
-  return res.json();
+  if (!res.ok) throw new Error(`GitHub ${res.status} on ${method} ${path}`);
+  return res.status === 204 || res.status === 201 ? {} : res.json();
 }
 
 const github = {
@@ -42,16 +43,42 @@ const github = {
     }
     return count;
   },
+  // Failed jobs of this attempt whose host AWS reclaimed. A runner is named
+  // after its host (`ip-172-31-30-61-<slot>-<epoch>`), so the name gives the
+  // private address, and EC2 keeps a terminated instance's state reason for
+  // about an hour.
+  async lostJobs(runId, attempt) {
+    const { jobs } = await gh(`/repos/${env.REPOSITORY}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100`);
+    const ips = new Map();
+    for (const j of jobs) {
+      const m = j.conclusion === "failure" && j.labels.includes(env.RUNNER_LABEL) && /^ip-(\d+)-(\d+)-(\d+)-(\d+)-/.exec(j.runner_name ?? "");
+      if (m) ips.set(m.slice(1, 5).join("."), (ips.get(m.slice(1, 5).join(".")) ?? 0) + 1);
+    }
+    if (ips.size === 0) return 0;
+    const out = await ec2.send(new DescribeInstancesCommand({
+      Filters: [
+        { Name: `tag:${FLEET_TAG}`, Values: [env.RUNNER_LABEL] },
+        { Name: "private-ip-address", Values: [...ips.keys()] },
+        { Name: "state-reason-code", Values: ["Server.SpotInstanceTermination"] },
+      ],
+    }));
+    const reclaimed = (out.Reservations ?? []).flatMap((r) => r.Instances ?? []).map((i) => i.PrivateIpAddress);
+    return [...new Set(reclaimed)].reduce((n, ip) => n + (ips.get(ip) ?? 0), 0);
+  },
+  // Needs Actions: Read and write on the token.
+  async rerunFailed(runId) {
+    await gh(`/repos/${env.REPOSITORY}/actions/runs/${runId}/rerun-failed-jobs`, "POST");
+  },
   async idleRunners(label) {
     const { runners } = await gh(`/repos/${env.REPOSITORY}/actions/runners?per_page=100`);
     return runners.filter((r) => r.status === "online" && !r.busy && r.labels.some((l) => l.name === label)).length;
   },
 };
 
-// A burst of deliveries is a burst of RunInstances calls, and a new
-// account's request bucket is small. A throttled call is retried with the SAME
-// type, hence the same ClientToken: falling through to the next type would
-// mint a new token and let two evaluations each launch the same deficit.
+// A burst of deliveries is a burst of launch calls, and a new account's
+// request bucket is small. A throttled call is retried with the same
+// ClientToken, so two evaluations that aim at the same fleet size still
+// launch it once.
 async function throttled(call) {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -92,30 +119,38 @@ const fleet = {
     if (started.length) console.log(`started ${started.length}/${ids.length} pool hosts: ${started.join(" ")}`);
     return started;
   },
-  // Spot capacity for one type can run out; the next type in INSTANCE_TYPES
-  // (same size class) is tried before the queue is left waiting.
+  // One instant EC2 Fleet request across every type in INSTANCE_TYPES and
+  // every subnet in SUBNETS (one per availability zone). The
+  // price-capacity-optimized strategy puts the hosts in the spot pools least
+  // likely to be reclaimed: on the first real burst, every host sat in one
+  // zone on one type, and that pool was both out of capacity and the one
+  // AWS reclaimed a host from, mid-job.
   async launch(n, clientToken) {
-    const types = (env.INSTANCE_TYPES ?? "").split(",").map((t) => t.trim()).filter(Boolean);
-    let lastError;
-    for (const type of types.length ? types : [undefined]) {
-      try {
-        const out = await throttled(() => ec2.send(new RunInstancesCommand({
-          LaunchTemplate: { LaunchTemplateName: env.LAUNCH_TEMPLATE, Version: "$Default" },
-          ...(type ? { InstanceType: type } : {}),
-          // Idempotent per type: a retry with the next type is a new request.
-          ClientToken: `${clientToken}-${type ?? "default"}`.slice(0, 64),
-          MinCount: 1,
-          MaxCount: n,
-        })));
-        const ids = (out.Instances ?? []).map((i) => i.InstanceId);
-        console.log(`launched ${ids.length}/${n} ${type ?? ""}: ${ids.join(" ")}`);
-        return ids;
-      } catch (e) {
-        lastError = e;
-        console.log(`launch of ${type ?? "template type"} failed: ${e.name} ${e.message}`);
-      }
+    const list = (v) => (v ?? "").split(",").map((t) => t.trim()).filter(Boolean);
+    const types = list(env.INSTANCE_TYPES);
+    const subnets = list(env.SUBNETS);
+    const overrides = (types.length ? types : [undefined]).flatMap((type) =>
+      (subnets.length ? subnets : [undefined]).map((subnet) => ({
+        ...(type ? { InstanceType: type } : {}), ...(subnet ? { SubnetId: subnet } : {}),
+      })));
+    const out = await throttled(() => ec2.send(new CreateFleetCommand({
+      Type: "instant",
+      ClientToken: clientToken.slice(0, 64),
+      TargetCapacitySpecification: { TotalTargetCapacity: n, DefaultTargetCapacityType: "spot" },
+      SpotOptions: { AllocationStrategy: "price-capacity-optimized", InstanceInterruptionBehavior: "terminate" },
+      LaunchTemplateConfigs: [{
+        LaunchTemplateSpecification: { LaunchTemplateName: env.LAUNCH_TEMPLATE, Version: "$Default" },
+        Overrides: overrides,
+      }],
+    })));
+    const ids = (out.Instances ?? []).flatMap((i) => i.InstanceIds ?? []);
+    for (const e of out.Errors ?? []) {
+      const where = e.LaunchTemplateAndOverrides?.Overrides ?? {};
+      console.log(`fleet: ${where.InstanceType ?? "?"} in ${where.SubnetId ?? "?"}: ${e.ErrorCode} ${e.ErrorMessage}`);
     }
-    throw lastError;
+    console.log(`launched ${ids.length}/${n}: ${ids.join(" ")}`);
+    if (ids.length === 0 && out.Errors?.length) throw new Error(`fleet launched nothing: ${out.Errors[0].ErrorCode}`);
+    return ids;
   },
 };
 
@@ -134,7 +169,7 @@ async function ensureWebhook(url) {
     return res.json();
   };
   const hook = {
-    name: "web", active: true, events: ["workflow_job"],
+    name: "web", active: true, events: ["workflow_job", "workflow_run"],
     config: { url, content_type: "json", insecure_ssl: "0", secret: env.WEBHOOK_SECRET },
   };
   const existing = (await call("GET", "/hooks?per_page=100")).find((h) => h.config?.url === url);

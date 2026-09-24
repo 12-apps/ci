@@ -24,6 +24,12 @@
 // minute. Only the remainder is launched, and a pool host that cannot start
 // (spot capacity) is launched instead.
 //
+// A spot host can be reclaimed mid-job, and the job fails with it. When a
+// `workflow_run` completes as a failure, the jobs that ran on a host AWS
+// reclaimed are counted (`lostJobs`), and if there are any the run's failed
+// jobs are re-run once more, up to MAX_ATTEMPTS attempts in all. A job that
+// failed on its own merits is never the reason for a re-run.
+//
 // Pure logic: index.mjs wires `github` and `ec2`, the tests fake them.
 import { signatureValid } from "./wake.mjs";
 
@@ -31,10 +37,22 @@ const reply = (statusCode, message, extra = {}) => ({ statusCode, body: JSON.str
 
 /**
  * @param {object} cfg
- * @param {{ queuedJobs(label: string): Promise<number>, idleRunners(label: string): Promise<number> }} cfg.github
+ * @param {{ queuedJobs(label: string): Promise<number>, idleRunners(label: string): Promise<number>, lostJobs(runId: number, attempt: number): Promise<number>, rerunFailed(runId: number): Promise<void> }} cfg.github
  * @param {{ hosts(): Promise<{ id: string, state: string, launchedAt: number, pool?: boolean }[]>, launch(n: number, token: string): Promise<string[]>, start(ids: string[]): Promise<string[]> }} cfg.ec2
  */
+export const MAX_ATTEMPTS = 3;
+
 export function makeScaler({ secret, label, repo, github, ec2, slotsPerHost = 3, maxHosts = 30, bootSeconds = 180, now = () => Date.now() }) {
+  async function recover(run) {
+    if (run.conclusion !== "failure") return reply(202, `run ${run.conclusion}`);
+    if ((run.run_attempt ?? 1) >= MAX_ATTEMPTS) return reply(202, `attempt ${run.run_attempt}; not re-running`);
+    const lost = await github.lostJobs(run.id, run.run_attempt ?? 1);
+    if (lost === 0) return reply(202, "no job lost to a reclaimed host");
+    await github.rerunFailed(run.id);
+    console.log(`run ${run.id}: ${lost} job(s) lost to a reclaimed spot host; re-running its failed jobs`);
+    return reply(200, "re-run", { run: run.id, lost });
+  }
+
   async function startPool(ids) {
     try {
       return await ec2.start(ids);
@@ -73,7 +91,7 @@ export function makeScaler({ secret, label, repo, github, ec2, slotsPerHost = 3,
     if (!signatureValid(secret, raw, headers["x-hub-signature-256"])) return reply(401, "bad signature");
     const kind = headers["x-github-event"];
     if (kind === "ping") return reply(200, "pong");
-    if (kind !== "workflow_job") return reply(202, `ignored event ${kind}`);
+    if (kind !== "workflow_job" && kind !== "workflow_run") return reply(202, `ignored event ${kind}`);
     let payload;
     try {
       payload = JSON.parse(raw.toString("utf8"));
@@ -81,6 +99,9 @@ export function makeScaler({ secret, label, repo, github, ec2, slotsPerHost = 3,
       return reply(400, "body is not JSON");
     }
     if (payload.repository?.full_name !== repo) return reply(403, "not this repository");
+    if (kind === "workflow_run") {
+      return payload.action === "completed" && payload.workflow_run ? recover(payload.workflow_run) : reply(202, `ignored action ${payload.action}`);
+    }
     if (!["queued", "completed"].includes(payload.action)) return reply(202, `ignored action ${payload.action}`);
     if (!(payload.workflow_job?.labels ?? []).includes(label)) return reply(202, "job is not for this fleet");
     return reply(200, "evaluated", await evaluate(payload.action === "queued" ? 1 : 0));

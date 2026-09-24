@@ -11,7 +11,7 @@
 # once; idempotent, re-run it to ship a new AMI or a new function version.
 #
 # Env: AWS_REGION (us-east-1), REPOSITORY (12-apps/future-pay), RUNNER_LABEL
-# (future-pay-ci), INSTANCE_TYPES (c7a.2xlarge,c6a.2xlarge,m7a.2xlarge),
+# (future-pay-ci), INSTANCE_TYPES (eight 8-vCPU x86 types, spread by the fleet),
 # SLOTS_PER_HOST (3), MAX_HOSTS (30; 30 × 8 vCPU must fit the account's spot vCPU
 # quota, L-34B43A08), POOL_SIZE (2 stopped hosts kept warm), TOKEN_PARAMETER
 # (/ci-runner/github-app-key), FUNCTION_NAME (ci-runner-scale),
@@ -22,7 +22,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 region="${AWS_REGION:-us-east-1}"
 repo="${REPOSITORY:-12-apps/future-pay}"
 label="${RUNNER_LABEL:-future-pay-ci}"
-types="${INSTANCE_TYPES:-c7a.2xlarge,c6a.2xlarge,m7a.2xlarge}"
+types="${INSTANCE_TYPES:-c7a.2xlarge,c6a.2xlarge,c7i.2xlarge,c6i.2xlarge,m7a.2xlarge,m6a.2xlarge,m7i.2xlarge,m6i.2xlarge}"
 slots="${SLOTS_PER_HOST:-3}"
 max_hosts="${MAX_HOSTS:-30}"
 pool_size="${POOL_SIZE:-2}"
@@ -62,15 +62,20 @@ else
   : "${SUBNET_ID:?}" "${SECURITY_GROUP_ID:?}" "${INSTANCE_PROFILE_ARN:?}"
   subnet=$SUBNET_ID sg=$SECURITY_GROUP_ID profile_arn=$INSTANCE_PROFILE_ARN
 fi
+# Every default subnet of the VPC, one per zone: the fleet spreads across them.
+vpc=$(aws ec2 describe-subnets --subnet-ids "$subnet" --query 'Subnets[0].VpcId')
+subnets=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=${vpc}" "Name=default-for-az,Values=true" \
+  --query 'Subnets[].SubnetId' | tr '\t' ',')
+[[ -n "$subnets" ]] || subnets=$subnet
 host_role=$(aws iam get-instance-profile --instance-profile-name "${profile_arn##*/}" --query 'InstanceProfile.Roles[0].Arn')
 
 # ── launch template: throwaway spot hosts that terminate when idle ──────────
 data=$(jq -n --arg ami "$AMI_ID" --arg type "${types%%,*}" --arg profile "$profile_arn" \
-  --arg subnet "$subnet" --arg sg "$sg" --arg label "$label" \
+  --arg sg "$sg" --arg label "$label" \
   --arg dev "$root_device" --argjson gb "$root_gb" '{
   ImageId: $ami, InstanceType: $type,
   IamInstanceProfile: {Arn: $profile},
-  NetworkInterfaces: [{DeviceIndex: 0, SubnetId: $subnet, Groups: [$sg], AssociatePublicIpAddress: true}],
+  SecurityGroupIds: [$sg],
   MetadataOptions: {HttpTokens: "required", HttpEndpoint: "enabled"},
   InstanceMarketOptions: {MarketType: "spot", SpotOptions: {SpotInstanceType: "one-time", InstanceInterruptionBehavior: "terminate"}},
   InstanceInitiatedShutdownBehavior: "terminate",
@@ -115,7 +120,7 @@ if (( have < pool_size )); then
     {ResourceType: "volume", Tags: [{Key: "Project", Value: "ci-runner"}]}]')
   echo "deploy: adding $(( pool_size - have )) pool host(s); each stops itself after its idle minutes"
   aws ec2 run-instances --launch-template "LaunchTemplateName=${template},Version=\$Default" \
-    --count "$(( pool_size - have ))" --instance-initiated-shutdown-behavior stop \
+    --count "$(( pool_size - have ))" --subnet-id "$subnet" --instance-initiated-shutdown-behavior stop \
     --instance-market-options '{"MarketType":"spot","SpotOptions":{"SpotInstanceType":"persistent","InstanceInterruptionBehavior":"stop"}}' \
     --tag-specifications "$tags" --query 'Instances[].InstanceId'
 fi
@@ -133,7 +138,9 @@ policy=$(jq -n --arg lt "$template_arn" --arg hostrole "$host_role" --arg label 
   Version: "2012-10-17",
   Statement: [
     {Effect: "Allow", Action: "ec2:RunInstances", Resource: "*", Condition: {ArnLike: {"ec2:LaunchTemplate": $lt}}},
-    {Effect: "Allow", Action: "ec2:CreateTags", Resource: "*", Condition: {StringEquals: {"ec2:CreateAction": "RunInstances"}}},
+    {Effect: "Allow", Action: "ec2:CreateFleet", Resource: "*"},
+    {Effect: "Allow", Action: "ec2:CreateTags", Resource: "*", Condition: {StringEquals: {"ec2:CreateAction": ["RunInstances", "CreateFleet"]}}},
+    {Effect: "Allow", Action: ["ec2:DescribeLaunchTemplateVersions", "ec2:DescribeImages", "ec2:DescribeSubnets"], Resource: "*"},
     {Effect: "Allow", Action: "ec2:StartInstances", Resource: "*", Condition: {StringEquals: {"aws:ResourceTag/ci-runner-pool": $label}}},
     {Effect: "Allow", Action: "iam:PassRole", Resource: $hostrole},
     {Effect: "Allow", Action: "ec2:DescribeInstances", Resource: "*"},
@@ -143,6 +150,8 @@ policy=$(jq -n --arg lt "$template_arn" --arg hostrole "$host_role" --arg label 
     {Effect: "Allow", Action: ["logs:CreateLogStream", "logs:PutLogEvents"], Resource: ($logs + ":*")}
   ]}')
 aws iam put-role-policy --role-name "$role" --policy-name fleet --policy-document "$policy"
+# An EC2 Fleet request needs the account's fleet service-linked role once.
+aws iam create-service-linked-role --aws-service-name ec2fleet.amazonaws.com >/dev/null 2>&1 || true
 (( new_role )) && sleep 15
 
 # ── secret, function, URL ────────────────────────────────────────────────────
@@ -150,9 +159,9 @@ aws iam put-role-policy --role-name "$role" --policy-name fleet --policy-documen
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 (umask 077; jq -n --rawfile s "$secret_file" --arg l "$label" --arg r "$repo" --arg t "$template" \
-  --arg p "$param" --arg types "$types" --arg slots "$slots" --arg max "$max_hosts" \
+  --arg p "$param" --arg types "$types" --arg subnets "$subnets" --arg slots "$slots" --arg max "$max_hosts" \
   '{Variables: {MODE: "scale", WEBHOOK_SECRET: ($s | rtrimstr("\n")), RUNNER_LABEL: $l, REPOSITORY: $r,
-    LAUNCH_TEMPLATE: $t, TOKEN_PARAMETER: $p, INSTANCE_TYPES: $types, SLOTS_PER_HOST: $slots, MAX_HOSTS: $max}}' > "$work/env.json")
+    LAUNCH_TEMPLATE: $t, TOKEN_PARAMETER: $p, INSTANCE_TYPES: $types, SUBNETS: $subnets, SLOTS_PER_HOST: $slots, MAX_HOSTS: $max}}' > "$work/env.json")
 cp "$here/wake.mjs" "$here/scale.mjs" "$here/index.mjs" "$work/"
 (cd "$work" && python3 -m zipfile -c fn.zip wake.mjs scale.mjs index.mjs)
 if aws lambda get-function --function-name "$fn" >/dev/null 2>&1; then
@@ -206,7 +215,7 @@ Webhook on ${repo}: ${hook}. To add it by hand instead (CREATE_WEBHOOK=0), use S
   Payload URL   ${url}
   Content type  application/json
   Secret        the contents of ${secret_file}
-  Events        only "Workflow jobs"
-The token in ${param} needs Actions: Read (the scaler counts the queue) and, for the
-webhook step, Webhooks: Read and write.
+  Events        "Workflow jobs" and "Workflow runs"
+The token in ${param} needs Actions: Read and write (count the queue, re-run jobs lost to a
+reclaimed host) and, for the webhook step, Webhooks: Read and write.
 DONE

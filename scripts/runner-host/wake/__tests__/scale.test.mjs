@@ -9,13 +9,17 @@ import { makeScaler } from "../scale.mjs";
 const SECRET = "s3cret";
 const NOW = 1_800_000_000_000;
 
-function fleet({ queued, idle, hosts = [], startFails = false }) {
+function fleet({ queued, idle, hosts = [], startFails = false, lost = 0 }) {
+  const reruns = [];
   const launches = [];
   const tokens = [];
   const starts = [];
   const scaler = makeScaler({
     secret: SECRET, label: "fp-ci", repo: "acme/app", slotsPerHost: 3, maxHosts: 5, bootSeconds: 180, now: () => NOW,
-    github: { queuedJobs: async () => queued, idleRunners: async () => idle },
+    github: {
+      queuedJobs: async () => queued, idleRunners: async () => idle,
+      lostJobs: async () => lost, rerunFailed: async (id) => { reruns.push(id); },
+    },
     ec2: {
       hosts: async () => hosts,
       launch: async (n, token) => { launches.push(n); tokens.push(token); return Array.from({ length: n }, (_, i) => `i-new${i}`); },
@@ -34,7 +38,15 @@ function fleet({ queued, idle, hosts = [], startFails = false }) {
     });
     return { status: res.statusCode, ...JSON.parse(res.body) };
   };
-  return { deliver, launches, tokens, starts };
+  const finish = async ({ conclusion = "failure", attempt = 1, repo = "acme/app", action = "completed" } = {}) => {
+    const body = JSON.stringify({ action, repository: { full_name: repo }, workflow_run: { id: 77, conclusion, run_attempt: attempt } });
+    const res = await scaler({
+      headers: { "x-github-event": "workflow_run", "x-hub-signature-256": `sha256=${createHmac("sha256", SECRET).update(body).digest("hex")}` },
+      body,
+    });
+    return { status: res.statusCode, ...JSON.parse(res.body) };
+  };
+  return { deliver, finish, launches, tokens, starts, reruns };
 }
 
 const up = (ageSeconds) => ({ id: "i-x", state: "running", launchedAt: NOW - ageSeconds * 1000 });
@@ -135,4 +147,25 @@ test("a completed delivery adds no demand of its own", async () => {
   const { deliver, launches } = fleet({ queued: 0, idle: 0, hosts: [up(600)] });
   assert.equal((await deliver({ action: "completed" })).launched, 0);
   assert.deepEqual(launches, []);
+});
+
+test("a failed run that lost a job to a reclaimed host re-runs its failed jobs", async () => {
+  const { finish, reruns } = fleet({ queued: 0, idle: 0, lost: 2 });
+  const r = await finish();
+  assert.equal(r.status, 200);
+  assert.deepEqual(reruns, [77]);
+});
+
+test("a run that failed on its own merits is not re-run", async () => {
+  const { finish, reruns } = fleet({ queued: 0, idle: 0, lost: 0 });
+  await finish();
+  assert.deepEqual(reruns, []);
+});
+
+test("re-runs stop at the attempt cap, successes and foreign runs are ignored", async () => {
+  for (const opts of [{ attempt: 3 }, { conclusion: "success" }, { conclusion: "cancelled" }, { repo: "evil/fork" }, { action: "requested" }]) {
+    const { finish, reruns } = fleet({ queued: 0, idle: 0, lost: 5 });
+    await finish(opts);
+    assert.deepEqual(reruns, [], JSON.stringify(opts));
+  }
 });
