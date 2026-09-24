@@ -45,8 +45,19 @@ if [[ -n "${CI_RUNNER_APP_KEY_FILE:-}" && "$CI_RUNNER_APP_KEY_FILE" != /etc/ci-r
   install -m 0600 "$CI_RUNNER_APP_KEY_FILE" /etc/ci-runner/app.pem
   CI_RUNNER_APP_KEY_FILE=/etc/ci-runner/app.pem
 fi
-[[ -n "${CI_RUNNER_APP_ID:-}" || -n "${CI_RUNNER_TOKEN:-}" ]] \
-  || die "a credential is required on the first install: CI_RUNNER_APP_ID + CI_RUNNER_APP_KEY_FILE, or CI_RUNNER_TOKEN"
+# CI_RUNNER_TOKEN_PARAMETER: an SSM SecureString holding the PAT, fetched on
+# every boot by ci-runner-credential.service instead of stored in the env
+# file. A host baked into an AMI then carries no secret, and every host
+# launched from it reads the current token.
+token_file=/etc/ci-runner/token.env
+if [[ -n "${CI_RUNNER_TOKEN_PARAMETER:-}" ]]; then
+  : "${CI_RUNNER_REGION:=$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' \
+    | xargs -I{} curl -fsS -H 'X-aws-ec2-metadata-token: {}' http://169.254.169.254/latest/meta-data/placement/region)}"
+  export CI_RUNNER_REGION
+  CI_RUNNER_TOKEN=""
+fi
+[[ -n "${CI_RUNNER_APP_ID:-}" || -n "${CI_RUNNER_TOKEN:-}" || -n "${CI_RUNNER_TOKEN_PARAMETER:-}" ]] \
+  || die "a credential is required on the first install: CI_RUNNER_APP_ID + CI_RUNNER_APP_KEY_FILE, CI_RUNNER_TOKEN, or CI_RUNNER_TOKEN_PARAMETER"
 [[ -z "${CI_RUNNER_APP_ID:-}" || -r "${CI_RUNNER_APP_KEY_FILE:-}" ]] \
   || die "CI_RUNNER_APP_ID is set but no private key: pass CI_RUNNER_APP_KEY_FILE"
 : "${CI_RUNNER_SCOPE:?CI_RUNNER_SCOPE is required (repos/<owner>/<repo> or orgs/<org>)}"
@@ -85,7 +96,7 @@ sysctl --quiet --system
 install -d "$prefix"
 install -m 0644 "$here/Dockerfile" "$prefix/Dockerfile"
 install -m 0755 "$here/entrypoint.sh" "$here/supervisor.sh" "$here/build-image.sh" \
-  "$here/status.sh" "$here/uninstall.sh" "$here/idle-stop.sh" "$prefix/"
+  "$here/status.sh" "$here/uninstall.sh" "$here/idle-stop.sh" "$here/fetch-credential.sh" "$prefix/"
 ln -sf "$prefix/status.sh" /usr/local/bin/ci-runner-status
 
 # Runner and supervisor logs go to journald; cap what they can take.
@@ -113,6 +124,8 @@ CI_RUNNER_CPUS=${CI_RUNNER_CPUS}
 CI_RUNNER_DISK=${CI_RUNNER_DISK:-}
 CI_RUNNER_JOB_TIMEOUT_MINUTES=${CI_RUNNER_JOB_TIMEOUT_MINUTES:-360}
 CI_RUNNER_IDLE_MINUTES=${CI_RUNNER_IDLE_MINUTES:-0}
+CI_RUNNER_TOKEN_PARAMETER=${CI_RUNNER_TOKEN_PARAMETER:-}
+CI_RUNNER_REGION=${CI_RUNNER_REGION:-}
 CI_RUNNER_IMAGE=${CI_RUNNER_IMAGE:-ci-runner:latest}
 CI_RUNNER_BASE_IMAGE=${CI_RUNNER_BASE_IMAGE:-ubuntu:24.04}
 ENV
@@ -120,9 +133,15 @@ umask 022
 
 # Fail here, not in a restart loop: the credential must be able to manage
 # runners on the scope. The same code path the slots use proves it.
+if [[ -n "${CI_RUNNER_TOKEN_PARAMETER:-}" ]]; then
+  "$prefix/fetch-credential.sh" || die "could not read ${CI_RUNNER_TOKEN_PARAMETER} from SSM"
+else
+  rm -f "$token_file"
+fi
 set -a
-# shellcheck disable=SC1090  # the path is ours, written above
+# shellcheck disable=SC1090  # the paths are ours, written above
 . "$envfile"
+[[ -r "$token_file" ]] && . "$token_file"
 set +a
 CI_RUNNER_CHECK_ONLY=1 "$prefix/supervisor.sh" 0 \
   || die "the credential cannot manage runners on ${CI_RUNNER_SCOPE}: a GitHub App needs Administration (repo) or Self-hosted runners (org) read/write and must be installed on it; a PAT needs the same permission"
@@ -137,7 +156,8 @@ cat > /etc/systemd/system/ci-runner@.service <<UNIT
 [Unit]
 Description=GitHub Actions runner slot %i (one job per container)
 After=docker.service network-online.target
-Wants=network-online.target
+Wants=network-online.target ci-runner-credential.service
+After=ci-runner-credential.service
 Requires=docker.service
 # Never give up on a slot: a GitHub outage or a revoked credential shows as a
 # failure in ci-runner-status and recovers by itself once it is fixed.
@@ -145,6 +165,7 @@ StartLimitIntervalSec=0
 
 [Service]
 EnvironmentFile=${envfile}
+EnvironmentFile=-${token_file}
 ExecStart=${prefix}/supervisor.sh %i
 # Stop = SIGTERM to the supervisor alone; its trap removes the container, the
 # per-job disk and the slot's own registration, then exits 143. No ExecStop:
@@ -192,6 +213,7 @@ Description=Power the CI host off when no job has run for CI_RUNNER_IDLE_MINUTES
 [Service]
 Type=oneshot
 EnvironmentFile=${envfile}
+EnvironmentFile=-${token_file}
 ExecStart=${prefix}/idle-stop.sh
 UNIT
 
@@ -208,7 +230,27 @@ AccuracySec=10s
 WantedBy=timers.target
 UNIT
 
+cat > /etc/systemd/system/ci-runner-credential.service <<UNIT
+[Unit]
+Description=Fetch the runner credential from SSM (CI_RUNNER_TOKEN_PARAMETER)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=${envfile}
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=${envfile}
+ExecStart=${prefix}/fetch-credential.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
 systemctl daemon-reload
+systemctl enable ci-runner-credential.service
 systemctl enable --now ci-runner-image.timer ci-runner-idle.timer
 # Running slots are DRAINED, never restarted: a restart removes the job a slot
 # is running. Each finishes its job (or releases its waiting runner at once),

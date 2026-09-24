@@ -26,6 +26,7 @@ if [[ -r "$envfile" && -x "$prefix/supervisor.sh" ]]; then
   set -a
   # shellcheck disable=SC1090  # the path is ours
   . "$envfile"
+  [[ -r /etc/ci-runner/token.env ]] && . /etc/ci-runner/token.env
   set +a
   if [[ -n "${CI_RUNNER_APP_ID:-}${CI_RUNNER_TOKEN:-}" ]]; then
     CI_RUNNER_DEREGISTER_ONLY=1 "$prefix/supervisor.sh" 0 \
@@ -37,7 +38,8 @@ fi
 for m in /var/lib/ci-runner/slot-*; do mountpoint -q "$m" 2>/dev/null && umount -l "$m"; done
 rm -f /etc/systemd/system/ci-runner@.service /etc/systemd/system/ci-runner-image.service \
       /etc/systemd/system/ci-runner-image.timer /etc/systemd/system/ci-runner-idle.service \
-      /etc/systemd/system/ci-runner-idle.timer /etc/systemd/journald.conf.d/ci-runner.conf \
+      /etc/systemd/system/ci-runner-idle.timer /etc/systemd/system/ci-runner-credential.service \
+      /etc/systemd/journald.conf.d/ci-runner.conf \
       /etc/sysctl.d/90-ci-runner.conf /usr/local/bin/ci-runner-status
 systemctl daemon-reload
 systemctl restart systemd-journald 2>/dev/null || true
