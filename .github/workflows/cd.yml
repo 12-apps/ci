@@ -15,7 +15,9 @@ name: CD (reusable)
 #
 # Per-vendor deploys are flag-gated by the consumer's repo Variables
 # ENABLE_DEPLOY_DIGITALOCEAN / ENABLE_DEPLOY_CLOUDFLARE / ENABLE_DEPLOY_AWS.
-# AWS is explicit (`target: aws`) and consumes an already-published ECR digest.
+# AWS is NOT a lane here: call deploy-aws.yml directly (scripts/deploy/AWS.md). A
+# nested job requesting the OIDC token permission fails EVERY caller that does not grant
+# it, at startup, even when its `if:` is false — it stopped future-pay's CD.
 
 on:
   workflow_call:
@@ -32,7 +34,7 @@ on:
         required: false
     inputs:
       target:
-        description: 'all | digitalocean | cloudflare | aws (explicit, prebuilt ECR only)'
+        description: 'all | digitalocean | cloudflare (aws: call deploy-aws.yml directly)'
         type: string
         required: false
         default: all
@@ -372,33 +374,6 @@ jobs:
   # either can be empty on a given commit. Each is therefore gated with the same
   # "if that lane had work, it must have SUCCEEDED" shape. A failed retag is
   # exactly as fatal as a failed build: the tag would not exist.
-  aws:
-    name: AWS prebuilt artifact
-    if: inputs.target == 'aws' && vars.ENABLE_DEPLOY_AWS == 'true'
-    permissions:
-      contents: read
-      id-token: write
-      actions: write
-    uses: 12-apps/ci/.github/workflows/deploy-aws.yml@v2
-    with:
-      action: ${{ inputs.action }}
-      engine_ref: ${{ inputs.aws_engine_ref }}
-      region: ${{ vars.AWS_REGION }}
-      expected_account: ${{ vars.AWS_EXPECTED_ACCOUNT }}
-      role_arn: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-      stack: ${{ vars.AWS_DEPLOY_STACK }}
-      image: ${{ inputs.aws_image }}
-      template: ${{ inputs.aws_template }}
-      parameters: ${{ inputs.aws_parameters }}
-      container: ${{ vars.AWS_CONTAINER_NAME || 'application' }}
-      mount: ${{ vars.AWS_DATA_MOUNT || '/srv/application/data' }}
-      destination: ${{ vars.AWS_DATA_DESTINATION || '/var/lib/application' }}
-      ready_file: ${{ vars.AWS_READY_FILE || '/var/lib/12-apps-controller-ready' }}
-      port: ${{ vars.AWS_APP_PORT || '8787' }}
-      health: ${{ vars.AWS_HEALTH_PATH || '/readyz' }}
-      environment: ${{ vars.AWS_DEPLOY_ENVIRONMENT || 'production' }}
-      post_cd_workflow: ${{ vars.AWS_POST_CD_WORKFLOW }}
-
   digitalocean:
     name: DigitalOcean
     needs: [discover, build-images, reuse-images]

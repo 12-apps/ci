@@ -76,7 +76,12 @@ test("AWS adapters stay off by default, prebuilt-only, scoped and pinned", async
   assert.match(workflow, /cancel-in-progress: false/);
   assert.doesNotMatch(workflow, /docker build|build-push-action|uses: \.\//);
   assert.match(cd, /if: inputs\.target != 'aws' &&/);
-  assert.match(cd, /if: inputs\.target == 'aws' && vars\.ENABLE_DEPLOY_AWS == 'true'/);
+  // cd.yml is called by every consumer. A nested job asking for id-token: write
+  // makes GitHub reject the whole call for any caller that does not grant it,
+  // at startup and whatever its `if:` says: that stopped future-pay's CD. AWS
+  // is called directly (deploy-aws.yml), never nested here.
+  assert.doesNotMatch(cd, /id-token:\s*write/);
+  assert.doesNotMatch(cd, /uses: 12-apps\/ci\/\.github\/workflows\/deploy-aws\.yml/);
   assert.equal(selfTest.match(/'scripts\/deploy\/\*\*'/g)?.length, 2, "PR and main path filters both cover the tested engine");
 });
 test("plan/status are read-only, hide unrelated outputs and never imply provisioning", async () => {

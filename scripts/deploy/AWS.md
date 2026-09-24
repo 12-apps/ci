@@ -169,16 +169,11 @@ CloudFormation create/update and the app template's IAM/resource permissions.
 Keep the host role limited to its ECR repository, one secret and SSM. Account
 checks and ownership tags supplement IAM; they are not authorization by themselves.
 
-After release, `cd.yml` has a thin `target: aws` lane (deliberately not `all`) with
-inputs `aws_engine_ref`, `aws_image`, `aws_template`, `aws_parameters`. Set repo
-variables `AWS_REGION`, `AWS_EXPECTED_ACCOUNT`, `AWS_DEPLOY_ROLE_ARN`,
-`AWS_DEPLOY_STACK`; optional `AWS_CONTAINER_NAME`, `AWS_DATA_MOUNT`,
-`AWS_DATA_DESTINATION`, `AWS_READY_FILE`, `AWS_APP_PORT`, `AWS_HEALTH_PATH`,
-`AWS_DEPLOY_ENVIRONMENT`, `AWS_POST_CD_WORKFLOW`. AWS skips the GHCR discovery/build
-lanes and never infers an ECR artifact from a source SHA. The direct pinned
-workflow is recommended for consumers with a separate artifact publication
-pipeline. Optional post-CD dispatch runs only after a verified deploy, not after
-plan/provision/status/rollback or a failed recovery.
+`cd.yml` has no AWS lane. It is the workflow every consumer calls, and a nested
+job requesting `id-token: write` makes GitHub reject the call, at startup and
+whatever that job's `if:` says, for every caller that does not grant the
+permission. It stopped future-pay's CD the hour it shipped. Call `deploy-aws.yml`
+directly, as above, from a job that grants `id-token: write`.
 
 ## Test boundary
 
