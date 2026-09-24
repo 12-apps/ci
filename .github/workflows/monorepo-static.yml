@@ -52,10 +52,16 @@ on:
           `predicate-quantifier: some` a single negation matches ANY other path
           and defeats the filter. Anything not matched (docs, shell scripts,
           workflow/docker YAML) skips the heavy lanes. The default covers the
-          common JS/TS monorepo surface plus the pnpm manifests.
+          common JS/TS monorepo surface, the pnpm manifests, and the DATABASE:
+          a `.sql` migration or a `.prisma` schema changes what every database
+          test observes, and without them a migration-only PR was "no code" —
+          the whole tests tier skipped and the new SQL never ran anywhere.
+          Which tests it runs is affected-plan's `database` block to decide.
         type: string
         required: false
         default: |
+          **/*.sql
+          **/*.prisma
           **/*.ts
           **/*.tsx
           **/*.js
