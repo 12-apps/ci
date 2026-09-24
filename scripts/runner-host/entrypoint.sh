@@ -14,6 +14,9 @@ fi
 jit="$RUNNER_JITCONFIG"
 unset RUNNER_JITCONFIG
 
+# `localhost` must be 127.0.0.1 alone, as on ubuntu-latest (localhost.sh).
+ci-runner-localhost
+
 dockerd --host=unix:///var/run/docker.sock >/var/log/dockerd.log 2>&1 &
 for _ in $(seq 1 120); do
   docker info >/dev/null 2>&1 && break

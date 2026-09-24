@@ -87,4 +87,5 @@ RUN test -n "$RUNNER_VERSION" \
  && chown -R runner:runner /home/runner
 
 COPY entrypoint.sh /usr/local/bin/ci-runner-entrypoint
+COPY localhost.sh /usr/local/bin/ci-runner-localhost
 ENTRYPOINT ["tini", "--", "/usr/local/bin/ci-runner-entrypoint"]
