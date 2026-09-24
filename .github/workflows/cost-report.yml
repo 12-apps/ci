@@ -243,6 +243,10 @@ jobs:
                 // duration would report a number that changes under the reader,
                 // so it is left out and the comment says the run is in flight.
                 if (j.conclusion === 'skipped' || !j.started_at || !j.completed_at) continue;
+                // Nor is a job that never got a runner: cancelled while queued,
+                // it still carries start and end times, 0 s apart, and would
+                // bill a phantom minute under its requested label.
+                if (!j.runner_name) continue;
                 const ms = Math.max(0, new Date(j.completed_at) - new Date(j.started_at));
                 // `labels` is what the job ASKED for (`runs-on`), which says
                 // nothing about who served it once the label comes from
