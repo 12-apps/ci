@@ -9,15 +9,30 @@ import { makeScaler } from "../scale.mjs";
 const SECRET = "s3cret";
 const NOW = 1_800_000_000_000;
 
-function fleet({ queued, idle, hosts = [] }) {
+function fleet({ queued, idle, hosts = [], startFails = false, lost = 0, issued = new Map() }) {
+  const reruns = [];
   const launches = [];
   const tokens = [];
+  const starts = [];
   const scaler = makeScaler({
     secret: SECRET, label: "fp-ci", repo: "acme/app", slotsPerHost: 3, maxHosts: 5, bootSeconds: 180, now: () => NOW,
-    github: { queuedJobs: async () => queued, idleRunners: async () => idle },
+    github: {
+      queuedJobs: async () => queued, idleRunners: async () => idle,
+      lostJobs: async () => lost, rerunFailed: async (id) => { reruns.push(id); },
+    },
     ec2: {
       hosts: async () => hosts,
-      launch: async (n, token) => { launches.push(n); tokens.push(token); return Array.from({ length: n }, (_, i) => `i-new${i}`); },
+      // EC2's ClientToken: a token already used returns its host, not a new one.
+      launch: async (batch) => {
+        launches.push(batch.length);
+        tokens.push(...batch);
+        return batch.map((t) => (issued.has(t) ? issued.get(t) : issued.set(t, `i-${issued.size}`).get(t)));
+      },
+      start: async (ids) => {
+        if (startFails) throw Object.assign(new Error("no spot capacity"), { name: "InsufficientInstanceCapacity" });
+        starts.push(...ids);
+        return ids;
+      },
     },
   });
   const deliver = async ({ action = "queued", labels = ["fp-ci"], repo = "acme/app", sig } = {}) => {
@@ -28,7 +43,15 @@ function fleet({ queued, idle, hosts = [] }) {
     });
     return { status: res.statusCode, ...JSON.parse(res.body) };
   };
-  return { deliver, launches, tokens };
+  const finish = async ({ conclusion = "failure", attempt = 1, repo = "acme/app", action = "completed" } = {}) => {
+    const body = JSON.stringify({ action, repository: { full_name: repo }, workflow_run: { id: 77, conclusion, run_attempt: attempt } });
+    const res = await scaler({
+      headers: { "x-github-event": "workflow_run", "x-hub-signature-256": `sha256=${createHmac("sha256", SECRET).update(body).digest("hex")}` },
+      body,
+    });
+    return { status: res.statusCode, ...JSON.parse(res.body) };
+  };
+  return { deliver, finish, launches, tokens, starts, reruns, issued, scaler };
 }
 
 const up = (ageSeconds) => ({ id: "i-x", state: "running", launchedAt: NOW - ageSeconds * 1000 });
@@ -79,11 +102,93 @@ test("unsigned, foreign or unrelated deliveries launch nothing", async () => {
   }
 });
 
-test("two evaluations that reach the same answer at once launch with the same idempotency token", async () => {
-  const { deliver, tokens } = fleet({ queued: 6, idle: 0 });
+test("two evaluations that reach the same answer at once launch it once", async () => {
+  const issued = new Map();
+  const a = fleet({ queued: 6, idle: 0, issued });
+  const b = fleet({ queued: 6, idle: 0, issued });
+  await Promise.all([a.deliver(), b.deliver()]);
+  assert.equal(issued.size, 2, "6 jobs / 3 slots = 2 hosts, launched once");
+  assert.deepEqual(a.tokens.map((t) => t.replace(/-\d+-/, "-W-")), ["fleet-fp-ci-W-1", "fleet-fp-ci-W-2"]);
+});
+
+test("overlapping evaluations that see different queues launch the larger answer, not the sum", async () => {
+  // Future-pay #1978's re-run: 16 and 17 queued jobs, seen a moment apart,
+  // launched 8 + 9 hosts under per-answer tokens.
+  const issued = new Map();
+  // Here: 10 and 13 queued at 3 slots a host want 4 and 5 hosts.
+  const a = fleet({ queued: 10, idle: 0, issued });
+  const b = fleet({ queued: 13, idle: 0, issued });
+  await Promise.all([a.deliver(), b.deliver()]);
+  assert.equal(issued.size, 5, "max(4, 5) hosts, not 4 + 5");
+});
+
+test("the next position after hosts already running gets a new token", async () => {
+  const issued = new Map();
+  await fleet({ queued: 3, idle: 0, issued }).deliver();
+  await fleet({ queued: 3, idle: 0, hosts: [up(600)], issued }).deliver();
+  assert.equal(issued.size, 2, "position 1, then position 2 once the first host is live and busy");
+});
+
+const parked = (id, state = "stopped") => ({ id, state, launchedAt: NOW - 86_400_000, pool: true });
+
+test("stopped pool hosts are started before anything is launched", async () => {
+  const { deliver, launches, starts } = fleet({ queued: 4, idle: 0, hosts: [parked("p1"), parked("p2"), parked("p3")] });
+  const r = await deliver();
+  assert.deepEqual(starts, ["p1", "p2"], "4 jobs need 2 hosts; the pool has them");
+  assert.deepEqual(launches, []);
+  assert.equal(r.started, 2);
+});
+
+test("a queue bigger than the pool starts all of it and launches the rest", async () => {
+  const { deliver, launches, starts } = fleet({ queued: 12, idle: 0, hosts: [parked("p1"), parked("p2")] });
   await deliver();
-  await deliver();
-  assert.equal(tokens.length, 2);
-  assert.equal(tokens[0], tokens[1], "EC2 would launch twice");
-  assert.match(tokens[0], /^fleet-fp-ci-\d+-2$/);
+  assert.deepEqual(starts, ["p1", "p2"]);
+  assert.deepEqual(launches, [2]);
+});
+
+test("a pool host that cannot start is launched instead, so the queue still gets its slots", async () => {
+  const { deliver, launches } = fleet({ queued: 6, idle: 0, hosts: [parked("p1"), parked("p2")], startFails: true });
+  const r = await deliver();
+  assert.deepEqual(launches, [2]);
+  assert.equal(r.started, 0);
+});
+
+test("a pool host still stopping is not started, and a running one is capacity like any other", async () => {
+  const { deliver, launches, starts } = fleet({ queued: 3, idle: 0, hosts: [parked("p1", "stopping"), { ...parked("p2", "running"), launchedAt: NOW - 30_000 }] });
+  assert.equal((await deliver()).launched, 0, "p2 is booting and brings 3 slots");
+  assert.deepEqual(starts, []);
+  assert.deepEqual(launches, []);
+});
+
+test("a queued delivery counts itself even before the jobs API lists it", async () => {
+  const { deliver, launches } = fleet({ queued: 0, idle: 0, hosts: [up(600)] });
+  assert.equal((await deliver()).launched, 1, "GitHub delivered the job; it is waiting somewhere");
+  assert.deepEqual(launches, [1]);
+});
+
+test("a completed delivery adds no demand of its own", async () => {
+  const { deliver, launches } = fleet({ queued: 0, idle: 0, hosts: [up(600)] });
+  assert.equal((await deliver({ action: "completed" })).launched, 0);
+  assert.deepEqual(launches, []);
+});
+
+test("a failed run that lost a job to a reclaimed host re-runs its failed jobs", async () => {
+  const { finish, reruns } = fleet({ queued: 0, idle: 0, lost: 2 });
+  const r = await finish();
+  assert.equal(r.status, 200);
+  assert.deepEqual(reruns, [77]);
+});
+
+test("a run that failed on its own merits is not re-run", async () => {
+  const { finish, reruns } = fleet({ queued: 0, idle: 0, lost: 0 });
+  await finish();
+  assert.deepEqual(reruns, []);
+});
+
+test("re-runs stop at the attempt cap, successes and foreign runs are ignored", async () => {
+  for (const opts of [{ attempt: 3 }, { conclusion: "success" }, { conclusion: "cancelled" }, { repo: "evil/fork" }, { action: "requested" }]) {
+    const { finish, reruns } = fleet({ queued: 0, idle: 0, lost: 5 });
+    await finish(opts);
+    assert.deepEqual(reruns, [], JSON.stringify(opts));
+  }
 });

@@ -8,8 +8,9 @@
 #
 #   or a fine-grained PAT: CI_RUNNER_TOKEN=github_pat_... instead of the App.
 #
-# Optional limits: CI_RUNNER_CPUS (per job, default cores/slots),
-# CI_RUNNER_MEMORY (default 90% of RAM / slots), CI_RUNNER_DISK (per job, e.g.
+# Optional limits: CI_RUNNER_PIN_CPUS (default 1: each slot owns cores/slots
+# cores), CI_RUNNER_CPUS (a quota instead, unset by default), CI_RUNNER_MEMORY
+# (default `auto`, 90% of RAM / slots at each job start), CI_RUNNER_DISK (per job, e.g.
 # 40G), CI_RUNNER_JOB_TIMEOUT_MINUTES (default 360).
 #
 # CI_RUNNER_IDLE_MINUTES: power the host off after this long with no job
@@ -69,13 +70,14 @@ cpus=$(nproc)
 slots="${1:-${CI_RUNNER_SLOTS:-$(( cpus / 2 > 0 ? cpus / 2 : 1 ))}}"
 [[ "$slots" =~ ^[1-9][0-9]*$ ]] || die "slots must be a positive integer, got '$slots'"
 # A cap per slot, so one runaway job is OOM-killed alone instead of taking the
-# host — and every other slot's job — down with it. 90% of RAM, split evenly.
-mem_mb=$(awk '/MemTotal/ {print int($2 / 1024)}' /proc/meminfo)
-CI_RUNNER_MEMORY="${explicit_memory:-$(( mem_mb * 9 / 10 / slots ))m}"
-# CPU is shared, not partitioned: each job may use up to twice its fair share,
-# so a lone job on a quiet host is not starved while one busy job cannot take
-# every core from the others.
-CI_RUNNER_CPUS="${explicit_cpus:-$(awk -v c="$cpus" -v s="$slots" 'BEGIN { v = 2 * c / s; if (v > c) v = c; printf "%.1f", v }')}"
+# host — and every other slot's job — down with it. `auto` is 90% of RAM split
+# evenly, computed by the supervisor when each job starts, so an image baked on
+# one instance size is right on another.
+CI_RUNNER_MEMORY="${explicit_memory:-auto}"
+# CPU is partitioned, not shared: each slot owns cores / slots cores
+# (supervisor.sh, CI_RUNNER_PIN_CPUS), so what a job sees is what it gets and
+# its tools size their worker pools to it. A quota is only set when asked for.
+CI_RUNNER_CPUS="${explicit_cpus:-}"
 
 # ── packages ─────────────────────────────────────────────────────────────────
 apt-get update -q
@@ -95,7 +97,7 @@ sysctl --quiet --system
 # ── files ────────────────────────────────────────────────────────────────────
 install -d "$prefix"
 install -m 0644 "$here/Dockerfile" "$prefix/Dockerfile"
-install -m 0755 "$here/entrypoint.sh" "$here/supervisor.sh" "$here/build-image.sh" \
+install -m 0755 "$here/entrypoint.sh" "$here/localhost.sh" "$here/supervisor.sh" "$here/build-image.sh" \
   "$here/status.sh" "$here/uninstall.sh" "$here/idle-stop.sh" "$here/fetch-credential.sh" "$prefix/"
 ln -sf "$prefix/status.sh" /usr/local/bin/ci-runner-status
 
@@ -121,6 +123,7 @@ CI_RUNNER_LABELS=${CI_RUNNER_LABELS}
 CI_RUNNER_SLOTS=${slots}
 CI_RUNNER_MEMORY=${CI_RUNNER_MEMORY}
 CI_RUNNER_CPUS=${CI_RUNNER_CPUS}
+CI_RUNNER_PIN_CPUS=${CI_RUNNER_PIN_CPUS:-1}
 CI_RUNNER_DISK=${CI_RUNNER_DISK:-}
 CI_RUNNER_JOB_TIMEOUT_MINUTES=${CI_RUNNER_JOB_TIMEOUT_MINUTES:-360}
 CI_RUNNER_IDLE_MINUTES=${CI_RUNNER_IDLE_MINUTES:-0}
@@ -268,5 +271,5 @@ for unit in $(systemctl list-units --all --plain --no-legend 'ci-runner@*.servic
   if (( n > slots )); then systemctl disable --now "$unit"; fi
 done
 
-echo "install: ${slots} slot(s), ${CI_RUNNER_CPUS} CPU / ${CI_RUNNER_MEMORY} / ${CI_RUNNER_DISK:-unbounded} disk each, labels '${CI_RUNNER_LABELS}' on ${CI_RUNNER_SCOPE}"
+echo "install: ${slots} slot(s), $( [[ "${CI_RUNNER_PIN_CPUS:-1}" != 0 ]] && echo "$(( cpus / slots )) pinned cores" || echo "${CI_RUNNER_CPUS:-shared} CPU" ) / ${CI_RUNNER_MEMORY} memory / ${CI_RUNNER_DISK:-unbounded} disk each, labels '${CI_RUNNER_LABELS}' on ${CI_RUNNER_SCOPE}"
 echo "install: now set the repository variable CI_RUNNER=${CI_RUNNER_LABELS%%,*}"

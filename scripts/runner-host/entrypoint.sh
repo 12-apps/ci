@@ -14,6 +14,9 @@ fi
 jit="$RUNNER_JITCONFIG"
 unset RUNNER_JITCONFIG
 
+# `localhost` must be 127.0.0.1 alone, as on ubuntu-latest (localhost.sh).
+ci-runner-localhost
+
 dockerd --host=unix:///var/run/docker.sock >/var/log/dockerd.log 2>&1 &
 for _ in $(seq 1 120); do
   docker info >/dev/null 2>&1 && break
@@ -25,7 +28,15 @@ if ! docker info >/dev/null 2>&1; then
   exit 70
 fi
 
+# Docker exports HOSTNAME=<container id>, which resolves to the container's
+# bridge address; GitHub's runner VM exports no HOSTNAME at all. The runner
+# hands its environment to every step, and servers that read it as their bind
+# address (future-pay's `process.env.HOSTNAME ?? "0.0.0.0"`) then listen on
+# 172.17.0.x alone: Playwright's web servers never answered on localhost.
+unset HOSTNAME
+
 cd /home/runner/actions-runner
-# With a per-job disk the workspace is a bind mount the host created as root.
-mkdir -p _work && chown runner:runner _work
+# The work folder is /home/runner/work, where GitHub's runners keep it
+# (supervisor.sh). With a per-job disk it is a bind mount the host created as root.
+mkdir -p /home/runner/work && chown runner:runner /home/runner/work
 exec runuser -u runner -- ./run.sh --jitconfig "$jit"

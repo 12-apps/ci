@@ -30,8 +30,16 @@
 #   CI_RUNNER_NAME    name prefix (default: the host name)
 #
 #   Limits (all optional):
-#   CI_RUNNER_MEMORY  per-job memory cap, e.g. `7000m` (swap capped to the same)
-#   CI_RUNNER_CPUS    per-job CPU cap, e.g. `2.5`
+#   CI_RUNNER_MEMORY  per-job memory cap, e.g. `7000m` (swap capped to the same),
+#                     or `auto`: 90% of this host's RAM / CI_RUNNER_SLOTS, read
+#                     when the job starts, so one image fits any instance size
+#   CI_RUNNER_CPUS    per-job CPU quota, e.g. `2.5` (unset: none)
+#   CI_RUNNER_PIN_CPUS  1 (default): slot N owns cores (N-1)*k .. N*k-1, where
+#                     k = cores / CI_RUNNER_SLOTS. Tools size their worker pools
+#                     by the cores they SEE (nproc, os.availableParallelism), and
+#                     a quota does not change that: three slots that each saw all
+#                     eight cores ran 3x too many vitest forks and timed tests
+#                     out (future-pay #1978). 0 shares every core.
 #   CI_RUNNER_DISK    per-job disk cap, e.g. `40G`: the job's workspace and its
 #                     Docker data live on a loop-mounted ext4 file of this size,
 #                     formatted fresh for every job. Unset: an anonymous volume.
@@ -155,12 +163,17 @@ remove_stale() {
 jit_config() {
   # runner_name is set by the caller: this runs in a $(…) subshell, so an
   # assignment here would never reach the state file or the logs.
+  # The work folder is GitHub's own, /home/runner/work, not the runner's
+  # default `_work` under its install directory. actions/cache stores a path
+  # outside the workspace RELATIVE to the workspace: saved on GitHub as
+  # ../../../.cache/ms-playwright, it restored under /home/runner/actions-runner
+  # here, so the Playwright browser and the pnpm store were never found.
   local body
   body=$(jq -n \
     --arg name "$runner_name" \
     --arg labels "$CI_RUNNER_LABELS" \
     --argjson group "$group_id" \
-    '{name: $name, runner_group_id: $group, work_folder: "_work",
+    '{name: $name, runner_group_id: $group, work_folder: "/home/runner/work",
       labels: ($labels | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)))}')
   api -X POST "${api_base}/${CI_RUNNER_SCOPE}/actions/runners/generate-jitconfig" -d "$body" \
     | jq -er '.encoded_jit_config'
@@ -286,15 +299,25 @@ run_one() {
     # Passed by NAME so the value never appears in this host's process list.
     --env RUNNER_JITCONFIG)
   if [[ -n "${CI_RUNNER_DISK:-}" ]]; then
-    args+=(--volume "${mnt}/docker:/var/lib/docker" --volume "${mnt}/work:/home/runner/actions-runner/_work")
+    args+=(--volume "${mnt}/docker:/var/lib/docker" --volume "${mnt}/work:/home/runner/work")
   else
     # The inner dockerd's storage must not be overlay-on-overlay, and must go
     # away with the job.
     args+=(--volume /var/lib/docker)
   fi
   [[ "${CI_RUNNER_LOG_DRIVER:-journald}" == journald ]] && args+=(--log-opt "tag=ci-runner-${slot}")
-  [[ -n "${CI_RUNNER_MEMORY:-}" ]] && args+=(--memory "$CI_RUNNER_MEMORY" --memory-swap "$CI_RUNNER_MEMORY")
+  local memory="${CI_RUNNER_MEMORY:-}" slots="${CI_RUNNER_SLOTS:-1}"
+  if [[ "$memory" == auto ]]; then
+    local mem_mb="${CI_RUNNER_MEM_MB:-$(awk '/MemTotal/ {print int($2 / 1024)}' /proc/meminfo)}"
+    memory="$(( mem_mb * 9 / 10 / slots ))m"
+  fi
+  [[ -n "$memory" ]] && args+=(--memory "$memory" --memory-swap "$memory")
   [[ -n "${CI_RUNNER_CPUS:-}" ]] && args+=(--cpus "$CI_RUNNER_CPUS")
+  local cores="${CI_RUNNER_NPROC:-$(nproc)}"
+  local per=$(( cores / slots ))
+  if [[ "${CI_RUNNER_PIN_CPUS:-1}" != 0 ]] && (( per >= 1 && slot <= slots )); then
+    args+=(--cpuset-cpus "$(( (slot - 1) * per ))-$(( slot * per - 1 ))")
+  fi
   args+=("$image")
 
   if ! RUNNER_JITCONFIG="$1" docker "${args[@]}" >/dev/null; then

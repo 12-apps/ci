@@ -18,6 +18,11 @@ docker run --rm --privileged --shm-size 2g --volume /var/lib/docker \
   --entrypoint bash "$image" -c '
 set -euo pipefail
 test "$(id -u)" = 0
+# What the entrypoint does first: `localhost` is 127.0.0.1 alone, and no
+# HOSTNAME reaches the job (servers bind to it; the GitHub VM exports none).
+ci-runner-localhost
+grep -q "^unset HOSTNAME$" /usr/local/bin/ci-runner-entrypoint \
+  || { echo "smoke: the entrypoint lets the Docker HOSTNAME reach the job" >&2; exit 1; }
 dockerd >/var/log/dockerd.log 2>&1 &
 for _ in $(seq 1 120); do docker info >/dev/null 2>&1 && break; sleep 0.5; done
 runuser -u runner -- env ${NODE_EXTRA_CA_CERTS:+NODE_EXTRA_CA_CERTS="$NODE_EXTRA_CA_CERTS"} bash -euo pipefail -c "
@@ -34,6 +39,17 @@ runuser -u runner -- env ${NODE_EXTRA_CA_CERTS:+NODE_EXTRA_CA_CERTS="$NODE_EXTRA
     /sbin/ldconfig -p | grep -q \"\$lib\" || { echo \"smoke: missing \$lib\" >&2; exit 1; }
   done
   command -v Xvfb >/dev/null || { echo \"smoke: missing Xvfb\" >&2; exit 1; }
+
+  # A server bound to localhost (the Vite default) is reachable at localhost.
+  # With the /etc/hosts Docker writes it binds ::1 alone and the client is refused.
+  node --input-type=module -e \"
+    import http from \\\"node:http\\\";
+    const srv = http.createServer((q, r) => r.end(\\\"ok\\\"));
+    await new Promise((res) => srv.listen(0, \\\"localhost\\\", res));
+    const body = await (await fetch(\\\"http://localhost:\\\" + srv.address().port)).text();
+    if (body !== \\\"ok\\\") process.exit(1);
+    srv.close();
+  \" || { echo \"smoke: a server bound to localhost is not reachable at localhost\" >&2; exit 1; }
   docker buildx version >/dev/null
   docker compose version >/dev/null
 
