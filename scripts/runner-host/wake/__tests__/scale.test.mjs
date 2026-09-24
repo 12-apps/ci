@@ -124,3 +124,15 @@ test("a pool host still stopping is not started, and a running one is capacity l
   assert.deepEqual(starts, []);
   assert.deepEqual(launches, []);
 });
+
+test("a queued delivery counts itself even before the jobs API lists it", async () => {
+  const { deliver, launches } = fleet({ queued: 0, idle: 0, hosts: [up(600)] });
+  assert.equal((await deliver()).launched, 1, "GitHub delivered the job; it is waiting somewhere");
+  assert.deepEqual(launches, [1]);
+});
+
+test("a completed delivery adds no demand of its own", async () => {
+  const { deliver, launches } = fleet({ queued: 0, idle: 0, hosts: [up(600)] });
+  assert.equal((await deliver({ action: "completed" })).launched, 0);
+  assert.deepEqual(launches, []);
+});

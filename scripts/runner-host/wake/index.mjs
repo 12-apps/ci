@@ -48,6 +48,21 @@ const github = {
   },
 };
 
+// A burst of deliveries is a burst of RunInstances calls, and a new
+// account's request bucket is small. A throttled call is retried with the SAME
+// type, hence the same ClientToken: falling through to the next type would
+// mint a new token and let two evaluations each launch the same deficit.
+async function throttled(call) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await call();
+    } catch (e) {
+      if (e.name !== "RequestLimitExceeded" || attempt >= 4) throw e;
+      await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt * (0.5 + Math.random() / 2)));
+    }
+  }
+}
+
 const fleet = {
   async hosts() {
     const out = await ec2.send(new DescribeInstancesCommand({
@@ -84,14 +99,14 @@ const fleet = {
     let lastError;
     for (const type of types.length ? types : [undefined]) {
       try {
-        const out = await ec2.send(new RunInstancesCommand({
+        const out = await throttled(() => ec2.send(new RunInstancesCommand({
           LaunchTemplate: { LaunchTemplateName: env.LAUNCH_TEMPLATE, Version: "$Default" },
           ...(type ? { InstanceType: type } : {}),
           // Idempotent per type: a retry with the next type is a new request.
           ClientToken: `${clientToken}-${type ?? "default"}`.slice(0, 64),
           MinCount: 1,
           MaxCount: n,
-        }));
+        })));
         const ids = (out.Instances ?? []).map((i) => i.InstanceId);
         console.log(`launched ${ids.length}/${n} ${type ?? ""}: ${ids.join(" ")}`);
         return ids;

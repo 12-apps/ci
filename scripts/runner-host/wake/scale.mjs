@@ -44,8 +44,12 @@ export function makeScaler({ secret, label, repo, github, ec2, slotsPerHost = 3,
     }
   }
 
-  async function evaluate() {
-    const [queued, idle, hosts] = await Promise.all([github.queuedJobs(label), github.idleRunners(label), ec2.hosts()]);
+  // `delivered` is the job this delivery announces: GitHub can deliver it a
+  // few seconds before its jobs API lists it as queued, so a `queued`
+  // delivery counts as at least one job waiting.
+  async function evaluate(delivered) {
+    const [listed, idle, hosts] = await Promise.all([github.queuedJobs(label), github.idleRunners(label), ec2.hosts()]);
+    const queued = Math.max(listed, delivered);
     const live = hosts.filter((h) => h.state === "pending" || h.state === "running");
     // A host that has not registered its runners yet is capacity on the way.
     const booting = live.filter((h) => h.state === "pending" || now() - h.launchedAt < bootSeconds * 1000);
@@ -79,6 +83,6 @@ export function makeScaler({ secret, label, repo, github, ec2, slotsPerHost = 3,
     if (payload.repository?.full_name !== repo) return reply(403, "not this repository");
     if (!["queued", "completed"].includes(payload.action)) return reply(202, `ignored action ${payload.action}`);
     if (!(payload.workflow_job?.labels ?? []).includes(label)) return reply(202, "job is not for this fleet");
-    return reply(200, "evaluated", await evaluate());
+    return reply(200, "evaluated", await evaluate(payload.action === "queued" ? 1 : 0));
   };
 }
