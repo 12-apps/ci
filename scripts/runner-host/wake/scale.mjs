@@ -8,9 +8,9 @@
 // Called for every `workflow_job` delivery. `queued` and `completed` both
 // re-evaluate: the first adds demand, the second is the moment a burst that
 // arrived faster than hosts boot is noticed again. Evaluations can overlap (a
-// new account cannot reserve Lambda concurrency), so a launch carries an EC2
-// ClientToken made of the 30-second window and the fleet size it aims for:
-// two evaluations that reach the same answer at once launch it once. Hosts
+// new account cannot reserve Lambda concurrency), so every host launched
+// carries an EC2 ClientToken made of the 30-second window and its position in
+// the fleet: two evaluations that want the same position get one host. Hosts
 // still booting count as capacity, so a burst of a hundred deliveries
 // launches what the queue needs, not a hundred hosts.
 //
@@ -38,7 +38,7 @@ const reply = (statusCode, message, extra = {}) => ({ statusCode, body: JSON.str
 /**
  * @param {object} cfg
  * @param {{ queuedJobs(label: string): Promise<number>, idleRunners(label: string): Promise<number>, lostJobs(runId: number, attempt: number): Promise<number>, rerunFailed(runId: number): Promise<void> }} cfg.github
- * @param {{ hosts(): Promise<{ id: string, state: string, launchedAt: number, pool?: boolean }[]>, launch(n: number, token: string): Promise<string[]>, start(ids: string[]): Promise<string[]> }} cfg.ec2
+ * @param {{ hosts(): Promise<{ id: string, state: string, launchedAt: number, pool?: boolean }[]>, launch(tokens: string[]): Promise<string[]>, start(ids: string[]): Promise<string[]> }} cfg.ec2
  */
 export const MAX_ATTEMPTS = 3;
 
@@ -77,8 +77,15 @@ export function makeScaler({ secret, label, repo, github, ec2, slotsPerHost = 3,
     const parked = hosts.filter((h) => h.pool && h.state === "stopped").slice(0, launch).map((h) => h.id);
     const started = parked.length ? await startPool(parked) : [];
     const rest = launch - started.length;
-    const token = `fleet-${label}-${Math.floor(now() / 30_000)}-${live.length + launch}`;
-    const launched = rest > 0 ? await ec2.launch(rest, token) : [];
+    // One host per token, named by the fleet size it brings the fleet to. Two
+    // evaluations that overlap in time see different queues (a pull request
+    // fans out over seconds) and aim at different sizes: with one token per
+    // ANSWER, 16 and 17 queued jobs launched 8 + 9 hosts. With one token per
+    // POSITION they launch positions 6..13 and 6..14, and EC2 returns the
+    // same host for each position both asked for: 9 hosts.
+    const window = Math.floor(now() / 30_000);
+    const tokens = Array.from({ length: rest }, (_, i) => `fleet-${label}-${window}-${live.length + started.length + i + 1}`);
+    const launched = rest > 0 ? await ec2.launch(tokens) : [];
     const decision = { queued, idle, hosts: live.length, booting: booting.length, started: started.length, launched: launched.length };
     console.log(JSON.stringify(decision));
     if (deficit > 0 && room === 0) console.log(`at the ${maxHosts}-host cap; ${deficit} job(s) wait`);

@@ -119,13 +119,13 @@ const fleet = {
     if (started.length) console.log(`started ${started.length}/${ids.length} pool hosts: ${started.join(" ")}`);
     return started;
   },
-  // One instant EC2 Fleet request across every type in INSTANCE_TYPES and
+  // One instant EC2 Fleet request per host, across every type in INSTANCE_TYPES and
   // every subnet in SUBNETS (one per availability zone). The
   // price-capacity-optimized strategy puts the hosts in the spot pools least
   // likely to be reclaimed: on the first real burst, every host sat in one
   // zone on one type, and that pool was both out of capacity and the one
   // AWS reclaimed a host from, mid-job.
-  async launch(n, clientToken) {
+  async launch(tokens) {
     const list = (v) => (v ?? "").split(",").map((t) => t.trim()).filter(Boolean);
     const types = list(env.INSTANCE_TYPES);
     const subnets = list(env.SUBNETS);
@@ -133,23 +133,37 @@ const fleet = {
       (subnets.length ? subnets : [undefined]).map((subnet) => ({
         ...(type ? { InstanceType: type } : {}), ...(subnet ? { SubnetId: subnet } : {}),
       })));
-    const out = await throttled(() => ec2.send(new CreateFleetCommand({
-      Type: "instant",
-      ClientToken: clientToken.slice(0, 64),
-      TargetCapacitySpecification: { TotalTargetCapacity: n, DefaultTargetCapacityType: "spot" },
-      SpotOptions: { AllocationStrategy: "price-capacity-optimized", InstanceInterruptionBehavior: "terminate" },
-      LaunchTemplateConfigs: [{
-        LaunchTemplateSpecification: { LaunchTemplateName: env.LAUNCH_TEMPLATE, Version: "$Default" },
-        Overrides: overrides,
-      }],
-    })));
-    const ids = (out.Instances ?? []).flatMap((i) => i.InstanceIds ?? []);
-    for (const e of out.Errors ?? []) {
-      const where = e.LaunchTemplateAndOverrides?.Overrides ?? {};
-      console.log(`fleet: ${where.InstanceType ?? "?"} in ${where.SubnetId ?? "?"}: ${e.ErrorCode} ${e.ErrorMessage}`);
+    const one = async (clientToken) => {
+      try {
+        const out = await throttled(() => ec2.send(new CreateFleetCommand({
+          Type: "instant",
+          ClientToken: clientToken.slice(0, 64),
+          TargetCapacitySpecification: { TotalTargetCapacity: 1, DefaultTargetCapacityType: "spot" },
+          SpotOptions: { AllocationStrategy: "price-capacity-optimized", InstanceInterruptionBehavior: "terminate" },
+          LaunchTemplateConfigs: [{
+            LaunchTemplateSpecification: { LaunchTemplateName: env.LAUNCH_TEMPLATE, Version: "$Default" },
+            Overrides: overrides,
+          }],
+        })));
+        const ids = (out.Instances ?? []).flatMap((i) => i.InstanceIds ?? []);
+        if (ids.length === 0) {
+          const e = out.Errors?.[0];
+          console.log(`fleet: ${clientToken}: nothing launched (${e?.ErrorCode ?? "no error"}: ${e?.ErrorMessage ?? ""})`);
+        }
+        return ids;
+      } catch (e) {
+        // Another evaluation is launching this very position right now.
+        if (e.name === "IdempotentCallInProgress") return [];
+        console.log(`fleet: ${clientToken}: ${e.name} ${e.message}`);
+        return [];
+      }
+    };
+    // A few at a time: a new account's CreateFleet request bucket is small.
+    const ids = [];
+    for (let i = 0; i < tokens.length; i += 5) {
+      ids.push(...(await Promise.all(tokens.slice(i, i + 5).map(one))).flat());
     }
-    console.log(`launched ${ids.length}/${n}: ${ids.join(" ")}`);
-    if (ids.length === 0 && out.Errors?.length) throw new Error(`fleet launched nothing: ${out.Errors[0].ErrorCode}`);
+    console.log(`launched ${ids.length}/${tokens.length}: ${ids.join(" ")}`);
     return ids;
   },
 };

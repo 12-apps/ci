@@ -9,7 +9,7 @@ import { makeScaler } from "../scale.mjs";
 const SECRET = "s3cret";
 const NOW = 1_800_000_000_000;
 
-function fleet({ queued, idle, hosts = [], startFails = false, lost = 0 }) {
+function fleet({ queued, idle, hosts = [], startFails = false, lost = 0, issued = new Map() }) {
   const reruns = [];
   const launches = [];
   const tokens = [];
@@ -22,7 +22,12 @@ function fleet({ queued, idle, hosts = [], startFails = false, lost = 0 }) {
     },
     ec2: {
       hosts: async () => hosts,
-      launch: async (n, token) => { launches.push(n); tokens.push(token); return Array.from({ length: n }, (_, i) => `i-new${i}`); },
+      // EC2's ClientToken: a token already used returns its host, not a new one.
+      launch: async (batch) => {
+        launches.push(batch.length);
+        tokens.push(...batch);
+        return batch.map((t) => (issued.has(t) ? issued.get(t) : issued.set(t, `i-${issued.size}`).get(t)));
+      },
       start: async (ids) => {
         if (startFails) throw Object.assign(new Error("no spot capacity"), { name: "InsufficientInstanceCapacity" });
         starts.push(...ids);
@@ -46,7 +51,7 @@ function fleet({ queued, idle, hosts = [], startFails = false, lost = 0 }) {
     });
     return { status: res.statusCode, ...JSON.parse(res.body) };
   };
-  return { deliver, finish, launches, tokens, starts, reruns };
+  return { deliver, finish, launches, tokens, starts, reruns, issued, scaler };
 }
 
 const up = (ageSeconds) => ({ id: "i-x", state: "running", launchedAt: NOW - ageSeconds * 1000 });
@@ -97,13 +102,31 @@ test("unsigned, foreign or unrelated deliveries launch nothing", async () => {
   }
 });
 
-test("two evaluations that reach the same answer at once launch with the same idempotency token", async () => {
-  const { deliver, tokens } = fleet({ queued: 6, idle: 0 });
-  await deliver();
-  await deliver();
-  assert.equal(tokens.length, 2);
-  assert.equal(tokens[0], tokens[1], "EC2 would launch twice");
-  assert.match(tokens[0], /^fleet-fp-ci-\d+-2$/);
+test("two evaluations that reach the same answer at once launch it once", async () => {
+  const issued = new Map();
+  const a = fleet({ queued: 6, idle: 0, issued });
+  const b = fleet({ queued: 6, idle: 0, issued });
+  await Promise.all([a.deliver(), b.deliver()]);
+  assert.equal(issued.size, 2, "6 jobs / 3 slots = 2 hosts, launched once");
+  assert.deepEqual(a.tokens.map((t) => t.replace(/-\d+-/, "-W-")), ["fleet-fp-ci-W-1", "fleet-fp-ci-W-2"]);
+});
+
+test("overlapping evaluations that see different queues launch the larger answer, not the sum", async () => {
+  // Future-pay #1978's re-run: 16 and 17 queued jobs, seen a moment apart,
+  // launched 8 + 9 hosts under per-answer tokens.
+  const issued = new Map();
+  // Here: 10 and 13 queued at 3 slots a host want 4 and 5 hosts.
+  const a = fleet({ queued: 10, idle: 0, issued });
+  const b = fleet({ queued: 13, idle: 0, issued });
+  await Promise.all([a.deliver(), b.deliver()]);
+  assert.equal(issued.size, 5, "max(4, 5) hosts, not 4 + 5");
+});
+
+test("the next position after hosts already running gets a new token", async () => {
+  const issued = new Map();
+  await fleet({ queued: 3, idle: 0, issued }).deliver();
+  await fleet({ queued: 3, idle: 0, hosts: [up(600)], issued }).deliver();
+  assert.equal(issued.size, 2, "position 1, then position 2 once the first host is live and busy");
 });
 
 const parked = (id, state = "stopped") => ({ id, state, launchedAt: NOW - 86_400_000, pool: true });
