@@ -58,8 +58,15 @@ RUN curl -fsSL "https://nodejs.org/dist/${SYSTEM_NODE}/node-${SYSTEM_NODE}-linux
  && node --version
 
 # Chromium's shared libraries and fonts, installed once here instead of by
-# `playwright install --with-deps` on every job.
+# `playwright install --with-deps` on every job. Then what Electron adds on
+# top — GTK 3, libnotify, libsecret, FUSE for AppImages, and Xvfb — which
+# ubuntu-latest also carries: printer-agent's packaged-start proof died with
+# `libgtk-3.so.0: cannot open shared object file` without them.
 RUN npx -y "playwright@${PLAYWRIGHT_VERSION}" install-deps chromium \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      libfuse2t64 libgtk-3-0t64 libnotify4 libsecret-1-0 libxss1 libxtst6 \
+      xdg-utils xvfb \
  && rm -rf /root/.npm /var/lib/apt/lists/*
 
 # The job user: passwordless sudo and the docker group, as on ubuntu-latest,

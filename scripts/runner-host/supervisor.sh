@@ -209,6 +209,40 @@ deregister_self() {
     && log "deregistered ${runner_name}" || true
 }
 on_exit() { cleanup; deregister_self; live=0; phase=stopped; save_state 2>/dev/null || true; }
+
+# ── draining ─────────────────────────────────────────────────────────────────
+# New scripts or a new image must never cost a running job: a restart removes
+# the container mid-build (it cost a production CD job on 2026-09-24).
+# install.sh asks for a drain by touching $state_dir/drain instead of
+# restarting. A slot with no job answers at once; a slot with a job answers
+# when the job ends, then exits for systemd to start the new scripts.
+#
+# A waiting runner is released through the API first. GitHub refuses to delete
+# a runner it has just handed a job (422, busy), so the release cannot race an
+# assignment; only after the delete succeeds is the container removed. A stale
+# image alone (the weekly rebuild) recycles a waiting runner the same way,
+# without exiting.
+drain_file="${state_dir}/drain"
+started_epoch=$(date +%s)
+drain_requested() {
+  [[ -e "$drain_file" ]] && (( $(stat -c %Y "$drain_file") > started_epoch ))
+}
+image_stale() {
+  local want have
+  want=$(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null) || return 1
+  have=$(docker inspect -f '{{.Image}}' "$container" 2>/dev/null) || return 1
+  [[ -n "$want" && "$want" != "$have" ]]
+}
+release_idle() {
+  local id
+  auth || return 1
+  id=$(api --max-time 10 "${api_base}/${CI_RUNNER_SCOPE}/actions/runners?per_page=100" \
+    | jq -r --arg n "$runner_name" '.runners[] | select(.name == $n) | .id') || return 1
+  [[ -n "$id" ]] || return 1
+  api --max-time 10 -X DELETE "${api_base}/${CI_RUNNER_SCOPE}/actions/runners/${id}" >/dev/null || return 1
+  docker rm -f "$container" >/dev/null 2>&1 || true
+  live=0
+}
 trap on_exit EXIT
 trap 'exit 143' TERM INT
 
@@ -224,6 +258,9 @@ watch_job() {
       if [[ -n "$out" ]]; then
         job="${out#Running job: }"; started_at=$(date +%s); job_started="$(date -u +%FT%TZ)"
         phase=running; log "running job '${job}' as ${runner_name}"
+      elif { drain_requested || image_stale; } && release_idle; then
+        log "released waiting runner ${runner_name} (drain or new image)"
+        return 0
       fi
     elif (( $(date +%s) - started_at > job_timeout )); then
       fail "job '${job}' exceeded ${job_timeout}s; killing it"
@@ -270,7 +307,25 @@ run_one() {
   live=0
 }
 
-# ── one-shot modes (install.sh / uninstall.sh) ───────────────────────────────
+# ── one-shot modes (install.sh / uninstall.sh / idle-stop.sh) ────────────────
+# RELEASE_WAITING: delete this slot's runner if it is still waiting, so the slot
+# can be stopped without killing a job. Exit 0 when nothing is left to lose
+# (released, or no runner), 3 when the runner has a job — GitHub answers 422
+# to deleting a runner it has just handed one, so this cannot race it.
+if [[ "${CI_RUNNER_RELEASE_WAITING:-}" == 1 ]]; then
+  trap - EXIT
+  [[ "$(jq -r '.phase // ""' "$state" 2>/dev/null)" == running ]] && exit 3
+  runner_name=$(jq -r '.runner // ""' "$state" 2>/dev/null || true)
+  [[ -n "$runner_name" ]] || exit 0
+  auth || { log "the credential was refused"; exit 1; }
+  id=$(api "${api_base}/${CI_RUNNER_SCOPE}/actions/runners?per_page=100" \
+    | jq -r --arg n "$runner_name" '.runners[] | select(.name == $n) | .id') || exit 1
+  [[ -n "$id" ]] || exit 0
+  api -X DELETE "${api_base}/${CI_RUNNER_SCOPE}/actions/runners/${id}" >/dev/null || exit 3
+  log "released waiting runner ${runner_name}"
+  exit 0
+fi
+
 # CHECK_ONLY: prove the credential can manage runners on the scope, then exit.
 # DEREGISTER_ONLY: remove every runner this HOST registered (any slot, any
 # status), then exit.
@@ -298,6 +353,11 @@ while true; do
     run_one "$jit" || true
     unset jit
     cleanup
+    if drain_requested; then
+      log "drained; exiting so systemd starts the current scripts"
+      phase=stopped; save_state
+      exit 0
+    fi
   else
     failures=$((failures + 1))
     fail "could not register a runner (attempt ${failures}/${max_failures})"

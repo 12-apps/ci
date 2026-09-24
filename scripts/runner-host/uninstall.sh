@@ -36,7 +36,8 @@ fi
 # 3. Files, units, state, per-job disks, logs config.
 for m in /var/lib/ci-runner/slot-*; do mountpoint -q "$m" 2>/dev/null && umount -l "$m"; done
 rm -f /etc/systemd/system/ci-runner@.service /etc/systemd/system/ci-runner-image.service \
-      /etc/systemd/system/ci-runner-image.timer /etc/systemd/journald.conf.d/ci-runner.conf \
+      /etc/systemd/system/ci-runner-image.timer /etc/systemd/system/ci-runner-idle.service \
+      /etc/systemd/system/ci-runner-idle.timer /etc/systemd/journald.conf.d/ci-runner.conf \
       /etc/sysctl.d/90-ci-runner.conf /usr/local/bin/ci-runner-status
 systemctl daemon-reload
 systemctl restart systemd-journald 2>/dev/null || true

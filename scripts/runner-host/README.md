@@ -149,7 +149,8 @@ ci-runner-status                          # every slot: service, phase, job, PID
 ci-runner-status --json                   # same, for a probe (exit 1 when a slot is unhealthy)
 journalctl -u 'ci-runner@*' -f            # registrations, job start/finish, failures
 journalctl -t ci-runner-3 -f              # slot 3's runner output
-systemctl restart 'ci-runner@*'           # cancels running jobs; slots re-register
+touch /run/ci-runner/drain                # restart every slot once its job is done
+systemctl restart 'ci-runner@*'           # KILLS running jobs; slots re-register
 systemctl stop 'ci-runner@*'              # stop taking jobs (jobs queue on GitHub)
 systemctl start ci-runner-image           # rebuild the image now (also weekly)
 ```
@@ -169,12 +170,35 @@ under Settings → Runners. Registration failures back off exponentially. After 
 slot's process exits, systemd restarts it 30 s later, and `ci-runner-status`
 shows the failure until it clears.
 
+### Stopping when idle, starting on demand
+
+With `CI_RUNNER_IDLE_MINUTES=20`, the host powers itself off after 20 minutes
+without a job (`idle-stop.sh`, every minute from `ci-runner-idle.timer`), and
+a GitHub webhook and a Lambda start it again when a job for it is queued
+([wake/README.md](wake/README.md)). The stop never costs a job:
+- Each slot's waiting runner is released through the API before its slot
+  stops.
+- GitHub refuses that for a runner it has just handed a job, and one refusal
+  cancels the stop.
+
+The default is `0` (never stop). Leave it there until the wake is in place,
+or queued jobs wait for a person.
+
 ### Upgrading
 
 ```bash
 cd /opt/src/ci && git pull && cd scripts/runner-host && ./install.sh   # scripts + image
 systemctl start ci-runner-image                                         # image only
 ```
+
+Neither interrupts a job. `install.sh` does not restart a running slot: it
+touches `/run/ci-runner/drain`, and each slot finishes its job (or releases a
+runner still waiting, at once), exits, and comes back on the new scripts. A new
+image needs no drain: a waiting runner on the old image is released and
+re-registered on the new one, and a running job keeps its image until it ends.
+A waiting runner is released by deleting it through the API before its
+container goes, and GitHub refuses that for a runner it has just handed a job,
+so a release never races an assignment.
 
 ### Rotating or revoking the credential
 

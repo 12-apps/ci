@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { spawnSync, execFileSync } from "node:child_process";
-import { chmodSync, closeSync, mkdtempSync, openSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdtempSync, openSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,7 +30,7 @@ const INSTALL_TOKEN = "ghs_INSTALLATION_TOKEN_VALUE";
  * docker: `inspect ...Running` answers true for `runPolls` calls, then false;
  * `logs` prints `logs`. That is how a job's life is simulated.
  */
-function stubs({ jitFails = false, runPolls = 0, logs = "" } = {}) {
+function stubs({ jitFails = false, runPolls = 0, logs = "", staleImage = false, busy = false, drain = false, state = null } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), "supervisor-"));
   const log = path.join(dir, "calls.jsonl");
   const record = (bin) => `#!/usr/bin/env bash
@@ -42,6 +42,10 @@ jq -cn --arg bin ${bin} --arg jit "\${RUNNER_JITCONFIG:-}" '{bin:$bin, argv:$ARG
 url=""
 for a in "$@"; do case "$a" in https://*) url="$a";; esac; done
 case "$url" in
+  */actions/runners/[0-9]*)
+    # busy: GitHub answers 422 to deleting a runner it has handed a job.
+    if [[ " $* " == *" DELETE "* && ${busy ? 1 : 0} == 1 ]]; then exit 22; fi
+    echo '{}' ;;
   */generate-jitconfig)
     prev=""; for a in "$@"; do [[ "$prev" == -d ]] && jq -r .name <<<"$a" > "${dir}/registered"; prev="$a"; done
     ${jitFails ? "exit 22" : `echo '{"encoded_jit_config":"${JIT}"}'`} ;;
@@ -64,8 +68,10 @@ esac
     path.join(dir, "docker"),
     `${record("docker")}
 case "$1" in
+  image) echo sha-current ;;
   inspect)
-    if [[ "$*" == *Running* ]]; then
+    if [[ "$*" == *'{{.Image}}'* ]]; then echo ${staleImage ? "sha-previous" : "sha-current"}
+    elif [[ "$*" == *Running* ]]; then
       n=$(cat "${counter}"); echo $((n + 1)) > "${counter}"
       if (( n < ${runPolls} )); then echo true; else echo false; fi
     else echo 4242; fi ;;
@@ -76,6 +82,15 @@ exit 0
 `,
   );
   for (const bin of ["curl", "docker"]) chmodSync(path.join(dir, bin), 0o755);
+  if (state) writeFileSync(path.join(dir, "slot-1.json"), JSON.stringify(state));
+  if (drain) {
+    // install.sh touches it AFTER the slot started: an mtime in the future
+    // stands for that without sleeping in the test.
+    const f = path.join(dir, "drain");
+    writeFileSync(f, "");
+    const later = new Date(Date.now() + 60_000);
+    utimesSync(f, later, later);
+  }
   return { dir, log };
 }
 
@@ -192,6 +207,73 @@ test("a slot stopped while its runner waits deregisters that runner, and only it
 test("a runner whose job finished is not deregistered again on exit", () => {
   const { calls } = runOnce({}, { runPolls: 2, logs: "Running job: build\nJob build completed with result: Succeeded\n" });
   assert.deepEqual(deletedIds(calls), ["7"]);
+});
+
+const dockerRuns = (calls) => calls.filter((c) => c.bin === "docker" && c.argv[0] === "run").length;
+
+test("a drain lets the running job finish, then exits for a restart", () => {
+  const job = "Running job: build\nJob build completed with result: Succeeded\n";
+  // No CI_RUNNER_ONCE: without the drain this loops for ever and times out.
+  const { status, stderr, calls } = runOnce({ CI_RUNNER_ONCE: "" }, { runPolls: 3, logs: job, drain: true, stopAfterMs: 10_000 });
+  assert.equal(status, 0, `the slot did not exit on its own after the job:\n${stderr}`);
+  assert.equal(dockerRuns(calls), 1, "the slot took another job after the drain");
+  assert.deepEqual(deletedIds(calls), ["7"], "a runner with a job must not be released");
+});
+
+test("a drain releases a waiting runner at once and exits", () => {
+  const { status, stderr, calls } = runOnce({ CI_RUNNER_ONCE: "" }, { runPolls: 1000, drain: true, stopAfterMs: 10_000 });
+  assert.equal(status, 0, `the waiting slot did not drain:\n${stderr}`);
+  assert.deepEqual(deletedIds(calls), ["7", "99"]);
+  const del = calls.findIndex((c) => c.bin === "curl" && c.argv.includes("DELETE") && c.argv.some((a) => a.endsWith("/99")));
+  const rm = calls.findLastIndex((c) => c.bin === "docker" && c.argv[0] === "rm");
+  assert.ok(del >= 0 && rm > del, "the container went before GitHub agreed to delete the runner");
+});
+
+test("a waiting runner on a replaced image is recycled onto the new one", () => {
+  const { status, stderr, calls } = runOnce({}, { runPolls: 1000, staleImage: true, stopAfterMs: 10_000 });
+  assert.equal(status, 0, stderr);
+  assert.match(stderr, /released waiting runner/);
+  assert.deepEqual(deletedIds(calls), ["7", "99"]);
+});
+
+test("a runner GitHub reports busy is never released", () => {
+  // The DELETE of runner 99 answers 422: GitHub has just handed it a job.
+  const { status, stderr } = runOnce({}, { runPolls: 1000, staleImage: true, busy: true, stopAfterMs: 1500 });
+  assert.equal(status, 143, `the slot let go of a busy runner:\n${stderr}`);
+  assert.doesNotMatch(stderr, /released waiting runner/);
+});
+
+test("RELEASE_WAITING deletes this slot's waiting runner, by name", () => {
+  const { status, stderr, calls } = runOnce(
+    { CI_RUNNER_RELEASE_WAITING: "1" },
+    { state: { phase: "idle", runner: "host-1-1700000001" } },
+  );
+  assert.equal(status, 0, stderr);
+  assert.deepEqual(deletedIds(calls), ["8"]);
+  assert.ok(!calls.some((c) => c.bin === "docker" && c.argv[0] === "run"), "a release must not start a job");
+});
+
+test("RELEASE_WAITING answers 3 for a runner GitHub has handed a job", () => {
+  const { status } = runOnce(
+    { CI_RUNNER_RELEASE_WAITING: "1" },
+    { state: { phase: "idle", runner: "host-1-1700000001" }, busy: true },
+  );
+  assert.equal(status, 3);
+});
+
+test("RELEASE_WAITING answers 3 for a slot already running a job, without asking GitHub", () => {
+  const { status, calls } = runOnce(
+    { CI_RUNNER_RELEASE_WAITING: "1" },
+    { state: { phase: "running", runner: "host-1-1700000001" } },
+  );
+  assert.equal(status, 3);
+  assert.deepEqual(deletedIds(calls), []);
+});
+
+test("RELEASE_WAITING with no runner has nothing to lose", () => {
+  const { status, calls } = runOnce({ CI_RUNNER_RELEASE_WAITING: "1" }, { state: { phase: "stopped", runner: "" } });
+  assert.equal(status, 0);
+  assert.deepEqual(deletedIds(calls), []);
 });
 
 test("records the job, then a job that outlives its cap is killed and recorded", () => {
