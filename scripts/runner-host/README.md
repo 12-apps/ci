@@ -170,6 +170,20 @@ under Settings → Runners. Registration failures back off exponentially. After 
 slot's process exits, systemd restarts it 30 s later, and `ci-runner-status`
 shows the failure until it clears.
 
+### Stopping when idle, starting on demand
+
+With `CI_RUNNER_IDLE_MINUTES=20`, the host powers itself off after 20 minutes
+without a job (`idle-stop.sh`, every minute from `ci-runner-idle.timer`), and
+a GitHub webhook and a Lambda start it again when a job for it is queued
+([wake/README.md](wake/README.md)). The stop never costs a job:
+- Each slot's waiting runner is released through the API before its slot
+  stops.
+- GitHub refuses that for a runner it has just handed a job, and one refusal
+  cancels the stop.
+
+The default is `0` (never stop). Leave it there until the wake is in place,
+or queued jobs wait for a person.
+
 ### Upgrading
 
 ```bash

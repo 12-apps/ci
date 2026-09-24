@@ -269,7 +269,7 @@ jobs:
       # CI just queues, or Chromium crashes mid-suite.
       - name: Runner host supervisor
         shell: bash
-        run: node --test scripts/runner-host/__tests__/supervisor.test.mjs
+        run: node --test scripts/runner-host/__tests__/*.test.mjs scripts/runner-host/wake/__tests__/*.test.mjs
 
       # No shell step truncates a pipeline with `head`.
       #

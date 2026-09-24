@@ -30,7 +30,7 @@ const INSTALL_TOKEN = "ghs_INSTALLATION_TOKEN_VALUE";
  * docker: `inspect ...Running` answers true for `runPolls` calls, then false;
  * `logs` prints `logs`. That is how a job's life is simulated.
  */
-function stubs({ jitFails = false, runPolls = 0, logs = "", staleImage = false, busy = false, drain = false } = {}) {
+function stubs({ jitFails = false, runPolls = 0, logs = "", staleImage = false, busy = false, drain = false, state = null } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), "supervisor-"));
   const log = path.join(dir, "calls.jsonl");
   const record = (bin) => `#!/usr/bin/env bash
@@ -42,7 +42,8 @@ jq -cn --arg bin ${bin} --arg jit "\${RUNNER_JITCONFIG:-}" '{bin:$bin, argv:$ARG
 url=""
 for a in "$@"; do case "$a" in https://*) url="$a";; esac; done
 case "$url" in
-  */actions/runners/99)
+  */actions/runners/[0-9]*)
+    # busy: GitHub answers 422 to deleting a runner it has handed a job.
     if [[ " $* " == *" DELETE "* && ${busy ? 1 : 0} == 1 ]]; then exit 22; fi
     echo '{}' ;;
   */generate-jitconfig)
@@ -81,6 +82,7 @@ exit 0
 `,
   );
   for (const bin of ["curl", "docker"]) chmodSync(path.join(dir, bin), 0o755);
+  if (state) writeFileSync(path.join(dir, "slot-1.json"), JSON.stringify(state));
   if (drain) {
     // install.sh touches it AFTER the slot started: an mtime in the future
     // stands for that without sleeping in the test.
@@ -239,6 +241,39 @@ test("a runner GitHub reports busy is never released", () => {
   const { status, stderr } = runOnce({}, { runPolls: 1000, staleImage: true, busy: true, stopAfterMs: 1500 });
   assert.equal(status, 143, `the slot let go of a busy runner:\n${stderr}`);
   assert.doesNotMatch(stderr, /released waiting runner/);
+});
+
+test("RELEASE_WAITING deletes this slot's waiting runner, by name", () => {
+  const { status, stderr, calls } = runOnce(
+    { CI_RUNNER_RELEASE_WAITING: "1" },
+    { state: { phase: "idle", runner: "host-1-1700000001" } },
+  );
+  assert.equal(status, 0, stderr);
+  assert.deepEqual(deletedIds(calls), ["8"]);
+  assert.ok(!calls.some((c) => c.bin === "docker" && c.argv[0] === "run"), "a release must not start a job");
+});
+
+test("RELEASE_WAITING answers 3 for a runner GitHub has handed a job", () => {
+  const { status } = runOnce(
+    { CI_RUNNER_RELEASE_WAITING: "1" },
+    { state: { phase: "idle", runner: "host-1-1700000001" }, busy: true },
+  );
+  assert.equal(status, 3);
+});
+
+test("RELEASE_WAITING answers 3 for a slot already running a job, without asking GitHub", () => {
+  const { status, calls } = runOnce(
+    { CI_RUNNER_RELEASE_WAITING: "1" },
+    { state: { phase: "running", runner: "host-1-1700000001" } },
+  );
+  assert.equal(status, 3);
+  assert.deepEqual(deletedIds(calls), []);
+});
+
+test("RELEASE_WAITING with no runner has nothing to lose", () => {
+  const { status, calls } = runOnce({ CI_RUNNER_RELEASE_WAITING: "1" }, { state: { phase: "stopped", runner: "" } });
+  assert.equal(status, 0);
+  assert.deepEqual(deletedIds(calls), []);
 });
 
 test("records the job, then a job that outlives its cap is killed and recorded", () => {

@@ -12,6 +12,10 @@
 # CI_RUNNER_MEMORY (default 90% of RAM / slots), CI_RUNNER_DISK (per job, e.g.
 # 40G), CI_RUNNER_JOB_TIMEOUT_MINUTES (default 360).
 #
+# CI_RUNNER_IDLE_MINUTES: power the host off after this long with no job
+# (default 0, never). Set it only once something starts the host again when a
+# job is queued — wake/README.md — or queued jobs wait for a person.
+#
 # Idempotent: re-run it to change the slot count or limits, rotate the
 # credential, or pick up a new version of these scripts. Values not passed are
 # kept from /etc/ci-runner/env. See README.md for sizing and the switch.
@@ -81,7 +85,7 @@ sysctl --quiet --system
 install -d "$prefix"
 install -m 0644 "$here/Dockerfile" "$prefix/Dockerfile"
 install -m 0755 "$here/entrypoint.sh" "$here/supervisor.sh" "$here/build-image.sh" \
-  "$here/status.sh" "$here/uninstall.sh" "$prefix/"
+  "$here/status.sh" "$here/uninstall.sh" "$here/idle-stop.sh" "$prefix/"
 ln -sf "$prefix/status.sh" /usr/local/bin/ci-runner-status
 
 # Runner and supervisor logs go to journald; cap what they can take.
@@ -108,6 +112,7 @@ CI_RUNNER_MEMORY=${CI_RUNNER_MEMORY}
 CI_RUNNER_CPUS=${CI_RUNNER_CPUS}
 CI_RUNNER_DISK=${CI_RUNNER_DISK:-}
 CI_RUNNER_JOB_TIMEOUT_MINUTES=${CI_RUNNER_JOB_TIMEOUT_MINUTES:-360}
+CI_RUNNER_IDLE_MINUTES=${CI_RUNNER_IDLE_MINUTES:-0}
 CI_RUNNER_IMAGE=${CI_RUNNER_IMAGE:-ci-runner:latest}
 CI_RUNNER_BASE_IMAGE=${CI_RUNNER_BASE_IMAGE:-ubuntu:24.04}
 ENV
@@ -180,8 +185,31 @@ Persistent=true
 WantedBy=timers.target
 UNIT
 
+cat > /etc/systemd/system/ci-runner-idle.service <<UNIT
+[Unit]
+Description=Power the CI host off when no job has run for CI_RUNNER_IDLE_MINUTES
+
+[Service]
+Type=oneshot
+EnvironmentFile=${envfile}
+ExecStart=${prefix}/idle-stop.sh
+UNIT
+
+cat > /etc/systemd/system/ci-runner-idle.timer <<'UNIT'
+[Unit]
+Description=Check every minute whether the CI host has gone idle
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
+UNIT
+
 systemctl daemon-reload
-systemctl enable --now ci-runner-image.timer
+systemctl enable --now ci-runner-image.timer ci-runner-idle.timer
 # Running slots are DRAINED, never restarted: a restart removes the job a slot
 # is running. Each finishes its job (or releases its waiting runner at once),
 # exits, and systemd starts it again on the scripts just installed. The

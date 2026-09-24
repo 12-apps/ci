@@ -307,7 +307,25 @@ run_one() {
   live=0
 }
 
-# ── one-shot modes (install.sh / uninstall.sh) ───────────────────────────────
+# ── one-shot modes (install.sh / uninstall.sh / idle-stop.sh) ────────────────
+# RELEASE_WAITING: delete this slot's runner if it is still waiting, so the slot
+# can be stopped without killing a job. Exit 0 when nothing is left to lose
+# (released, or no runner), 3 when the runner has a job — GitHub answers 422
+# to deleting a runner it has just handed one, so this cannot race it.
+if [[ "${CI_RUNNER_RELEASE_WAITING:-}" == 1 ]]; then
+  trap - EXIT
+  [[ "$(jq -r '.phase // ""' "$state" 2>/dev/null)" == running ]] && exit 3
+  runner_name=$(jq -r '.runner // ""' "$state" 2>/dev/null || true)
+  [[ -n "$runner_name" ]] || exit 0
+  auth || { log "the credential was refused"; exit 1; }
+  id=$(api "${api_base}/${CI_RUNNER_SCOPE}/actions/runners?per_page=100" \
+    | jq -r --arg n "$runner_name" '.runners[] | select(.name == $n) | .id') || exit 1
+  [[ -n "$id" ]] || exit 0
+  api -X DELETE "${api_base}/${CI_RUNNER_SCOPE}/actions/runners/${id}" >/dev/null || exit 3
+  log "released waiting runner ${runner_name}"
+  exit 0
+fi
+
 # CHECK_ONLY: prove the credential can manage runners on the scope, then exit.
 # DEREGISTER_ONLY: remove every runner this HOST registered (any slot, any
 # status), then exit.
