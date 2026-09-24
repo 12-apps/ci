@@ -96,5 +96,5 @@ export const handler = (env.MODE ?? "scale") === "wake"
     })
   : makeScaler({
       secret: env.WEBHOOK_SECRET, label: env.RUNNER_LABEL, repo: env.REPOSITORY, github, ec2: fleet,
-      slotsPerHost: Number(env.SLOTS_PER_HOST ?? 3), maxHosts: Number(env.MAX_HOSTS ?? 15),
+      slotsPerHost: Number(env.SLOTS_PER_HOST ?? 3), maxHosts: Number(env.MAX_HOSTS ?? 30),
     });

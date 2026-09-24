@@ -12,7 +12,8 @@
 #
 # Env: AWS_REGION (us-east-1), REPOSITORY (12-apps/future-pay), RUNNER_LABEL
 # (future-pay-ci), INSTANCE_TYPES (c7a.2xlarge,c6a.2xlarge,m7a.2xlarge),
-# SLOTS_PER_HOST (3), MAX_HOSTS (15), TOKEN_PARAMETER
+# SLOTS_PER_HOST (3), MAX_HOSTS (30; 30 × 8 vCPU must fit the account's spot vCPU
+# quota, L-34B43A08), TOKEN_PARAMETER
 # (/ci-runner/github-app-key), FUNCTION_NAME (ci-runner-scale),
 # WAKE_SECRET_FILE (~/.ci-runner-wake-secret, created 0600, never printed).
 set -euo pipefail
@@ -23,7 +24,7 @@ repo="${REPOSITORY:-12-apps/future-pay}"
 label="${RUNNER_LABEL:-future-pay-ci}"
 types="${INSTANCE_TYPES:-c7a.2xlarge,c6a.2xlarge,m7a.2xlarge}"
 slots="${SLOTS_PER_HOST:-3}"
-max_hosts="${MAX_HOSTS:-15}"
+max_hosts="${MAX_HOSTS:-30}"
 param="${TOKEN_PARAMETER:-/ci-runner/github-app-key}"
 fn="${FUNCTION_NAME:-ci-runner-scale}"
 role="$fn"

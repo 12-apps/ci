@@ -47,4 +47,6 @@ After that, the golden host can be terminated. Re-run `deploy.sh` with a new gol
 
 - **Deliveries.** Webhooks → Recent Deliveries shows each evaluation, for example `{"queued":7,"idle":0,"hosts":2,"booting":0,"launched":1}`.
 - **Function logs.** `aws logs tail /aws/lambda/ci-runner-scale --follow` shows each launch and any capacity failure.
-- **Cap.** A deficit at `MAX_HOSTS` is logged as `at the N-host cap`. Raise `MAX_HOSTS` and re-deploy.
+- **Cap.** A deficit at `MAX_HOSTS` (default 30) is logged as `at the N-host cap`. Raise `MAX_HOSTS` and re-deploy.
+- **Quota.** Launches past the account's spot vCPU quota fail with `MaxSpotInstanceCountExceeded` in the function log. A new account starts at 32 vCPUs (four hosts). 30 hosts need 240 vCPUs of the "All Standard Spot Instance Requests" quota (`L-34B43A08`).
+- **Sizing.** future-pay's CI fans one pull request out to 20–30 parallel jobs, so a few open pull requests need 60–90 slots at once. Size the cap to the peak, not the average.

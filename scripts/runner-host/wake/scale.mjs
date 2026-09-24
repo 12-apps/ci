@@ -24,7 +24,7 @@ const reply = (statusCode, message, extra = {}) => ({ statusCode, body: JSON.str
  * @param {{ queuedJobs(label: string): Promise<number>, idleRunners(label: string): Promise<number> }} cfg.github
  * @param {{ hosts(): Promise<{ id: string, state: string, launchedAt: number }[]>, launch(n: number): Promise<string[]> }} cfg.ec2
  */
-export function makeScaler({ secret, label, repo, github, ec2, slotsPerHost = 3, maxHosts = 15, bootSeconds = 180, now = () => Date.now() }) {
+export function makeScaler({ secret, label, repo, github, ec2, slotsPerHost = 3, maxHosts = 30, bootSeconds = 180, now = () => Date.now() }) {
   async function evaluate() {
     const [queued, idle, hosts] = await Promise.all([github.queuedJobs(label), github.idleRunners(label), ec2.hosts()]);
     const live = hosts.filter((h) => h.state === "pending" || h.state === "running");
