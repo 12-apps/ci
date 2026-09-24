@@ -163,12 +163,17 @@ remove_stale() {
 jit_config() {
   # runner_name is set by the caller: this runs in a $(…) subshell, so an
   # assignment here would never reach the state file or the logs.
+  # The work folder is GitHub's own, /home/runner/work, not the runner's
+  # default `_work` under its install directory. actions/cache stores a path
+  # outside the workspace RELATIVE to the workspace: saved on GitHub as
+  # ../../../.cache/ms-playwright, it restored under /home/runner/actions-runner
+  # here, so the Playwright browser and the pnpm store were never found.
   local body
   body=$(jq -n \
     --arg name "$runner_name" \
     --arg labels "$CI_RUNNER_LABELS" \
     --argjson group "$group_id" \
-    '{name: $name, runner_group_id: $group, work_folder: "_work",
+    '{name: $name, runner_group_id: $group, work_folder: "/home/runner/work",
       labels: ($labels | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)))}')
   api -X POST "${api_base}/${CI_RUNNER_SCOPE}/actions/runners/generate-jitconfig" -d "$body" \
     | jq -er '.encoded_jit_config'
@@ -294,7 +299,7 @@ run_one() {
     # Passed by NAME so the value never appears in this host's process list.
     --env RUNNER_JITCONFIG)
   if [[ -n "${CI_RUNNER_DISK:-}" ]]; then
-    args+=(--volume "${mnt}/docker:/var/lib/docker" --volume "${mnt}/work:/home/runner/actions-runner/_work")
+    args+=(--volume "${mnt}/docker:/var/lib/docker" --volume "${mnt}/work:/home/runner/work")
   else
     # The inner dockerd's storage must not be overlay-on-overlay, and must go
     # away with the job.

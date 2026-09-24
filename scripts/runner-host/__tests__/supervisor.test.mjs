@@ -146,6 +146,9 @@ test("registers a JIT runner with the labels, group and a slot-scoped name", () 
   // Whitespace and empty entries are dropped: a label GitHub stores as " gpu "
   // is a label `runs-on: gpu` never matches, and the job queues forever.
   assert.deepEqual(body.labels, ["acme-ci", "gpu"]);
+  // GitHub's own work folder: actions/cache restores paths outside the
+  // workspace relative to it, so any other depth restores them elsewhere.
+  assert.equal(body.work_folder, "/home/runner/work");
   assert.equal(body.runner_group_id, 1);
   assert.match(body.name, /^host-1-\d+$/);
 });

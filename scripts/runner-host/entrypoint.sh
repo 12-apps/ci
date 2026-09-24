@@ -36,6 +36,7 @@ fi
 unset HOSTNAME
 
 cd /home/runner/actions-runner
-# With a per-job disk the workspace is a bind mount the host created as root.
-mkdir -p _work && chown runner:runner _work
+# The work folder is /home/runner/work, where GitHub's runners keep it
+# (supervisor.sh). With a per-job disk it is a bind mount the host created as root.
+mkdir -p /home/runner/work && chown runner:runner /home/runner/work
 exec runuser -u runner -- ./run.sh --jitconfig "$jit"
