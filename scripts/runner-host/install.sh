@@ -182,9 +182,15 @@ UNIT
 
 systemctl daemon-reload
 systemctl enable --now ci-runner-image.timer
+# Running slots are DRAINED, never restarted: a restart removes the job a slot
+# is running. Each finishes its job (or releases its waiting runner at once),
+# exits, and systemd starts it again on the scripts just installed. The
+# request is touched before new slots start, so they do not answer it.
+install -d /run/ci-runner
+touch /run/ci-runner/drain
 for i in $(seq 1 "$slots"); do
   systemctl enable "ci-runner@${i}.service"
-  systemctl restart "ci-runner@${i}.service"
+  systemctl is-active --quiet "ci-runner@${i}.service" || systemctl start "ci-runner@${i}.service"
 done
 # Shrinking: stop the slots above the new count.
 for unit in $(systemctl list-units --all --plain --no-legend 'ci-runner@*.service' | awk '{print $1}'); do
