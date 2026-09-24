@@ -6,7 +6,7 @@
 //   LAUNCH_TEMPLATE, OVERRIDES (type@subnet,...), INSTANCE_TYPES, SUBNETS, TOKEN_PARAMETER, SLOTS_PER_HOST, MAX_HOSTS   scale
 import { CreateFleetCommand, DescribeInstancesCommand, EC2Client, StartInstancesCommand } from "@aws-sdk/client-ec2";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
-import { makeScaler } from "./scale.mjs";
+import { makeScaler, openPools } from "./scale.mjs";
 import { makeHandler } from "./wake.mjs";
 
 const env = process.env;
@@ -128,7 +128,24 @@ const fleet = {
         (subnets.length ? subnets : [undefined]).map((subnet) => ({
           ...(type ? { InstanceType: type } : {}), ...(subnet ? { SubnetId: subnet } : {}),
         })));
-    const request = (clientToken, market) => throttled(() => ec2.send(new CreateFleetCommand({
+    // At most MAX_PER_POOL live hosts in one spot pool (type + zone). Each
+    // position is its own request, so without a cap every host of a burst goes
+    // to whichever pool looks best at that second: on 2026-09-24 seven landed
+    // in m7i-flex/us-east-1b, and AWS reclaimed nine hosts from that one pool.
+    const perPool = Number(env.MAX_PER_POOL ?? 2);
+    const key = (type, subnet) => `${type}@${subnet}`;
+    const inPool = new Map();
+    const live = await ec2.send(new DescribeInstancesCommand({
+      Filters: [
+        { Name: `tag:${FLEET_TAG}`, Values: [env.RUNNER_LABEL] },
+        { Name: "instance-state-name", Values: ["pending", "running"] },
+      ],
+    }));
+    for (const i of (live.Reservations ?? []).flatMap((r) => r.Instances ?? [])) {
+      inPool.set(key(i.InstanceType, i.SubnetId), (inPool.get(key(i.InstanceType, i.SubnetId)) ?? 0) + 1);
+    }
+    const open = () => openPools(overrides, inPool, perPool);
+    const request = (clientToken, market, allowed) => throttled(() => ec2.send(new CreateFleetCommand({
       Type: "instant",
       ClientToken: clientToken.slice(0, 64),
       TargetCapacitySpecification: { TotalTargetCapacity: 1, DefaultTargetCapacityType: market },
@@ -137,7 +154,7 @@ const fleet = {
         : { OnDemandOptions: { AllocationStrategy: "lowest-price" } }),
       LaunchTemplateConfigs: [{
         LaunchTemplateSpecification: { LaunchTemplateName: env.LAUNCH_TEMPLATE, Version: "$Default" },
-        Overrides: overrides,
+        Overrides: allowed,
       }],
     })));
     const launched = (out) => (out.Instances ?? []).flatMap((i) => i.InstanceIds ?? []);
@@ -149,29 +166,32 @@ const fleet = {
     const SPOT_EXHAUSTED = new Set(["InsufficientInstanceCapacity", "UnfulfillableCapacity", "MaxSpotInstanceCountExceeded", "SpotMaxPriceTooLow"]);
     const one = async (clientToken) => {
       try {
-        const spot = await request(clientToken, "spot");
+        const spot = await request(clientToken, "spot", open());
+        for (const i of spot.Instances ?? []) {
+          const o = i.LaunchTemplateAndOverrides?.Overrides ?? {};
+          inPool.set(key(o.InstanceType, o.SubnetId), (inPool.get(key(o.InstanceType, o.SubnetId)) ?? 0) + (i.InstanceIds?.length ?? 0));
+        }
         if (launched(spot).length) return launched(spot);
         const why = codes(spot);
         if (!why.length || !why.every((c) => SPOT_EXHAUSTED.has(c))) {
           console.log(`fleet: ${clientToken}: nothing launched (${why.join(", ") || "no error"}): ${spot.Errors?.[0]?.ErrorMessage ?? ""}`);
           return [];
         }
-        const onDemand = await request(`${clientToken}-od`, "on-demand");
+        const onDemand = await request(`${clientToken}-od`, "on-demand", overrides);
         const ids = launched(onDemand);
         console.log(`fleet: ${clientToken}: no spot capacity (${why.join(", ")}); on-demand ${ids.length ? ids.join(" ") : `refused too (${codes(onDemand).join(", ")})`}`);
         return ids;
       } catch (e) {
-        // Another evaluation is launching this very position right now.
-        if (e.name === "IdempotentCallInProgress") return [];
+        // Another evaluation is launching this very position right now, or
+        // already launched it with a different pool list.
+        if (e.name === "IdempotentCallInProgress" || e.name === "IdempotentParameterMismatch") return [];
         console.log(`fleet: ${clientToken}: ${e.name} ${e.message}`);
         return [];
       }
     };
-    // A few at a time: a new account's CreateFleet request bucket is small.
+    // One at a time, so each launch sees where the previous ones landed.
     const ids = [];
-    for (let i = 0; i < tokens.length; i += 5) {
-      ids.push(...(await Promise.all(tokens.slice(i, i + 5).map(one))).flat());
-    }
+    for (const t of tokens) ids.push(...(await one(t)));
     console.log(`launched ${ids.length}/${tokens.length}: ${ids.join(" ")}`);
     return ids;
   },
