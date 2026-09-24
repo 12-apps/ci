@@ -43,15 +43,39 @@ const reply = (statusCode, message, extra = {}) => ({ statusCode, body: JSON.str
 export const MAX_ATTEMPTS = 3;
 
 /**
- * The spot pools (type@subnet) a launch may still use: those holding fewer
- * than `perPool` live hosts. When every pool is at the cap the whole list
- * comes back, because a job waiting costs more than a crowded pool.
- * @param {{ InstanceType: string, SubnetId: string }[]} overrides
- * @param {Map<string, number>} inPool live hosts per `type@subnet`
+ * Where a spot launch is tried, in order: every region's pools (type@subnet)
+ * holding fewer than `perPool` live hosts, region by region. Only when no
+ * region has a pool below the cap does each region come back whole, because
+ * a job waiting costs more than a crowded pool.
+ * @param {string[]} regions in preference order (regionOrder)
+ * @param {Map<string, { InstanceType: string, SubnetId: string }[]>} offered pools per region
+ * @param {Map<string, number>} inPool live hosts per `type@subnet` (subnet ids are unique across regions)
+ * @returns {{ region: string, overrides: { InstanceType: string, SubnetId: string }[] }[]}
  */
-export function openPools(overrides, inPool, perPool) {
-  const room = overrides.filter((o) => (inPool.get(`${o.InstanceType}@${o.SubnetId}`) ?? 0) < perPool);
-  return room.length ? room : overrides;
+export function spotAttempts(regions, offered, inPool, perPool) {
+  const pools = (r) => offered.get(r) ?? [];
+  const room = regions.map((region) => ({
+    region, overrides: pools(region).filter((o) => (inPool.get(`${o.InstanceType}@${o.SubnetId}`) ?? 0) < perPool),
+  })).filter((a) => a.overrides.length);
+  return room.length ? room : regions.map((region) => ({ region, overrides: pools(region) })).filter((a) => a.overrides.length);
+}
+
+/**
+ * Regions in the order a launch tries them. AWS's spot placement score (1-10)
+ * says how likely a request is to be filled and to stay filled; it is read in
+ * three tiers (7+ likely, 4-6 maybe, 1-3 unlikely) so that a one-point
+ * difference does not send the fleet to a dearer region. Within a tier the
+ * configured order (cheapest first) decides. A region without a score (the
+ * call failed) is treated as likely: the configured order alone then decides.
+ * @param {string[]} regions configured preference order
+ * @param {Map<string, number>} scores
+ */
+export function regionOrder(regions, scores) {
+  const tier = (r) => {
+    const s = scores.get(r);
+    return s === undefined || s >= 7 ? 2 : s >= 4 ? 1 : 0;
+  };
+  return regions.map((r, i) => ({ r, i })).sort((a, b) => tier(b.r) - tier(a.r) || a.i - b.i).map((x) => x.r);
 }
 
 export function makeScaler({ secret, label, repo, github, ec2, slotsPerHost = 3, maxHosts = 30, bootSeconds = 180, now = () => Date.now() }) {

@@ -3,10 +3,13 @@
 // deploy.sh sets the environment:
 //   WEBHOOK_SECRET, RUNNER_LABEL, REPOSITORY          both modes
 //   INSTANCE_ID                                       wake
-//   LAUNCH_TEMPLATE, OVERRIDES (type@subnet,...), INSTANCE_TYPES, SUBNETS, TOKEN_PARAMETER, SLOTS_PER_HOST, MAX_HOSTS   scale
-import { CreateFleetCommand, DescribeInstancesCommand, EC2Client, StartInstancesCommand } from "@aws-sdk/client-ec2";
+//   LAUNCH_TEMPLATE, REGIONS, INSTANCE_TYPES, TOKEN_PARAMETER, SLOTS_PER_HOST, MAX_HOSTS   scale
+import {
+  CreateFleetCommand, DescribeInstanceTypeOfferingsCommand, DescribeInstancesCommand, DescribeSubnetsCommand,
+  EC2Client, GetSpotPlacementScoresCommand, StartInstancesCommand,
+} from "@aws-sdk/client-ec2";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
-import { makeScaler, openPools } from "./scale.mjs";
+import { makeScaler, regionOrder, spotAttempts } from "./scale.mjs";
 import { makeHandler } from "./wake.mjs";
 
 const env = process.env;
@@ -80,19 +83,96 @@ async function throttled(call) {
   }
 }
 
+// The fleet spans REGIONS, cheapest first (deploy.sh copies the AMI and the
+// launch template, same name, into each). A spot pool's price and its odds of
+// being reclaimed move with the local working day, so a launch goes where AWS
+// says a request is most likely to be filled and kept (regionOrder), and falls
+// through region by region. A host anywhere reads its token from the home
+// region's SSM (CI_RUNNER_REGION is baked into the image), so nothing on the
+// host changes.
+const list = (v) => (v ?? "").split(",").map((t) => t.trim()).filter(Boolean);
+const regions = list(env.REGIONS).length ? list(env.REGIONS) : [env.AWS_REGION];
+const types = list(env.INSTANCE_TYPES);
+const clients = new Map(regions.map((r) => [r, new EC2Client({ region: r })]));
+const client = (r) => clients.get(r) ?? ec2;
+
+// The (type, subnet) pairs each region offers, one default subnet per zone.
+// A type a zone lacks makes an instant fleet refuse the whole request
+// (InvalidFleetConfiguration: m7i-flex in us-east-1e), so only offered pairs
+// are listed. Read once per container; a region that cannot be read is left
+// out of this evaluation and read again next time.
+let offered;
+async function offerings() {
+  if (offered) return offered;
+  const found = new Map();
+  await Promise.all(regions.map(async (r) => {
+    try {
+      const { Subnets: subnets = [] } = await client(r).send(new DescribeSubnetsCommand({ Filters: [{ Name: "default-for-az", Values: ["true"] }] }));
+      const { InstanceTypeOfferings: offers = [] } = await client(r).send(new DescribeInstanceTypeOfferingsCommand({
+        LocationType: "availability-zone", MaxResults: 1000, Filters: [{ Name: "instance-type", Values: types }],
+      }));
+      found.set(r, offers.flatMap((o) => subnets.filter((sn) => sn.AvailabilityZone === o.Location)
+        .map((sn) => ({ InstanceType: o.InstanceType, SubnetId: sn.SubnetId }))));
+    } catch (e) {
+      console.log(`fleet: ${r}: cannot list pools: ${e.name} ${e.message}`);
+    }
+  }));
+  if (regions.every((r) => found.has(r))) offered = found;
+  return found;
+}
+
+// Spot placement scores, read at most every five minutes. The request is the
+// same every time (fixed capacity, the same types), because AWS limits how
+// many different configurations an account may score in a day.
+let scores = { at: 0, byRegion: new Map() };
+async function placementScores() {
+  if (regions.length < 2 || Date.now() - scores.at < 5 * 60_000) return scores.byRegion;
+  let byRegion = new Map();
+  try {
+    const out = await ec2.send(new GetSpotPlacementScoresCommand({
+      InstanceTypes: types, TargetCapacity: 10, TargetCapacityUnitType: "units", RegionNames: regions, SingleAvailabilityZone: false,
+    }));
+    byRegion = new Map((out.SpotPlacementScores ?? []).map((p) => [p.Region, p.Score]));
+    console.log(`fleet: placement scores ${[...byRegion].map(([r, n]) => `${r}=${n}`).join(" ")}`);
+  } catch (e) {
+    console.log(`fleet: placement scores unavailable (${e.name}); configured order`);
+  }
+  scores = { at: Date.now(), byRegion };
+  return byRegion;
+}
+
+const liveFilter = (states) => [
+  { Name: `tag:${FLEET_TAG}`, Values: [env.RUNNER_LABEL] },
+  { Name: "instance-state-name", Values: states },
+];
+const instancesIn = async (r, states) => (await client(r).send(new DescribeInstancesCommand({ Filters: liveFilter(states) })))
+  .Reservations?.flatMap((res) => res.Instances ?? []) ?? [];
+// Which region each host was last seen in, for start().
+const regionOf = new Map();
+
+// No spot capacity in a region, or no quota left there: the next region, then on-demand.
+const NO_ROOM = new Set([
+  "InsufficientInstanceCapacity", "UnfulfillableCapacity", "MaxSpotInstanceCountExceeded", "SpotMaxPriceTooLow",
+  "VcpuLimitExceeded", "InstanceLimitExceeded",
+]);
+
 const fleet = {
   async hosts() {
-    const out = await ec2.send(new DescribeInstancesCommand({
-      Filters: [
-        { Name: `tag:${FLEET_TAG}`, Values: [env.RUNNER_LABEL] },
-        { Name: "instance-state-name", Values: ["pending", "running", "stopping", "stopped"] },
-      ],
+    const all = await Promise.all(regions.map(async (r) => {
+      try {
+        return (await instancesIn(r, ["pending", "running", "stopping", "stopped"])).map((i) => ({ r, i }));
+      } catch (e) {
+        console.log(`fleet: ${r}: cannot list hosts: ${e.name} ${e.message}`);
+        return [];
+      }
     }));
-    return (out.Reservations ?? []).flatMap((r) => r.Instances ?? [])
-      .map((i) => ({
+    return all.flat().map(({ r, i }) => {
+      regionOf.set(i.InstanceId, r);
+      return {
         id: i.InstanceId, state: i.State?.Name, launchedAt: new Date(i.LaunchTime).getTime(),
         pool: (i.Tags ?? []).some((t) => t.Key === POOL_TAG),
-      }));
+      };
+    });
   },
   // One call per host: a spot host with no capacity to start fails alone, and
   // the scaler launches a fresh host for it.
@@ -100,7 +180,7 @@ const fleet = {
     const started = [];
     for (const id of ids) {
       try {
-        await ec2.send(new StartInstancesCommand({ InstanceIds: [id] }));
+        await client(regionOf.get(id)).send(new StartInstancesCommand({ InstanceIds: [id] }));
         started.push(id);
       } catch (e) {
         console.log(`start of pool host ${id} failed: ${e.name} ${e.message}`);
@@ -109,43 +189,27 @@ const fleet = {
     if (started.length) console.log(`started ${started.length}/${ids.length} pool hosts: ${started.join(" ")}`);
     return started;
   },
-  // One instant EC2 Fleet request per host, across every type in INSTANCE_TYPES and
-  // every subnet in SUBNETS (one per availability zone). The
-  // price-capacity-optimized strategy puts the hosts in the spot pools least
-  // likely to be reclaimed: on the first real burst, every host sat in one
-  // zone on one type, and that pool was both out of capacity and the one
-  // AWS reclaimed a host from, mid-job.
+  // One instant EC2 Fleet request per host, across every offered type and
+  // zone of a region. The price-capacity-optimized strategy puts the host in
+  // the spot pool least likely to be reclaimed: on the first real burst,
+  // every host sat in one zone on one type, and that pool was both out of
+  // capacity and the one AWS reclaimed a host from, mid-job.
   async launch(tokens) {
-    const list = (v) => (v ?? "").split(",").map((t) => t.trim()).filter(Boolean);
-    const types = list(env.INSTANCE_TYPES);
-    const subnets = list(env.SUBNETS);
-    // OVERRIDES (deploy.sh) lists only the pairs EC2 offers; one it does not
-    // makes the whole instant fleet fail with InvalidFleetConfiguration.
-    const pairs = list(env.OVERRIDES).map((p) => p.split("@"));
-    const overrides = pairs.length
-      ? pairs.map(([type, subnet]) => ({ InstanceType: type, SubnetId: subnet }))
-      : (types.length ? types : [undefined]).flatMap((type) =>
-        (subnets.length ? subnets : [undefined]).map((subnet) => ({
-          ...(type ? { InstanceType: type } : {}), ...(subnet ? { SubnetId: subnet } : {}),
-        })));
+    const byRegion = await offerings();
+    const order = regionOrder(regions, await placementScores()).filter((r) => byRegion.get(r)?.length);
     // At most MAX_PER_POOL live hosts in one spot pool (type + zone). Each
     // position is its own request, so without a cap every host of a burst goes
     // to whichever pool looks best at that second: on 2026-09-24 seven landed
     // in m7i-flex/us-east-1b, and AWS reclaimed nine hosts from that one pool.
     const perPool = Number(env.MAX_PER_POOL ?? 2);
-    const key = (type, subnet) => `${type}@${subnet}`;
     const inPool = new Map();
-    const live = await ec2.send(new DescribeInstancesCommand({
-      Filters: [
-        { Name: `tag:${FLEET_TAG}`, Values: [env.RUNNER_LABEL] },
-        { Name: "instance-state-name", Values: ["pending", "running"] },
-      ],
+    const add = (type, subnet, n) => inPool.set(`${type}@${subnet}`, (inPool.get(`${type}@${subnet}`) ?? 0) + n);
+    await Promise.all(order.map(async (r) => {
+      for (const i of await instancesIn(r, ["pending", "running"]).catch(() => [])) add(i.InstanceType, i.SubnetId, 1);
     }));
-    for (const i of (live.Reservations ?? []).flatMap((r) => r.Instances ?? [])) {
-      inPool.set(key(i.InstanceType, i.SubnetId), (inPool.get(key(i.InstanceType, i.SubnetId)) ?? 0) + 1);
-    }
-    const open = () => openPools(overrides, inPool, perPool);
-    const request = (clientToken, market, allowed) => throttled(() => ec2.send(new CreateFleetCommand({
+    // A ClientToken is unique per region, so the same token is reused across
+    // regions: a region that refused it launched nothing under it.
+    const request = (r, clientToken, market, allowed) => throttled(() => client(r).send(new CreateFleetCommand({
       Type: "instant",
       ClientToken: clientToken.slice(0, 64),
       TargetCapacitySpecification: { TotalTargetCapacity: 1, DefaultTargetCapacityType: market },
@@ -157,42 +221,64 @@ const fleet = {
         Overrides: allowed,
       }],
     })));
-    const launched = (out) => (out.Instances ?? []).flatMap((i) => i.InstanceIds ?? []);
-    const codes = (out) => [...new Set((out.Errors ?? []).map((e) => e.ErrorCode))];
-    // When no spot pool has capacity, a job waiting costs more than an
-    // on-demand host: measured, every one of 25 spot pools refused at once on
-    // 2026-09-24 while seven future-pay jobs queued. The on-demand host
-    // terminates when idle like any other.
-    const SPOT_EXHAUSTED = new Set(["InsufficientInstanceCapacity", "UnfulfillableCapacity", "MaxSpotInstanceCountExceeded", "SpotMaxPriceTooLow"]);
-    const one = async (clientToken) => {
+    // Regions this evaluation has seen refuse: full (spot, then on-demand) or
+    // broken (anything else, which on-demand would hit too).
+    const spotFull = new Set();
+    const onDemandFull = new Set();
+    const broken = new Set();
+    const TAKEN = Symbol("taken");
+    const attempt = async (r, clientToken, market, allowed) => {
       try {
-        const spot = await request(clientToken, "spot", open());
-        for (const i of spot.Instances ?? []) {
+        const out = await request(r, clientToken, market, allowed);
+        for (const i of out.Instances ?? []) {
           const o = i.LaunchTemplateAndOverrides?.Overrides ?? {};
-          inPool.set(key(o.InstanceType, o.SubnetId), (inPool.get(key(o.InstanceType, o.SubnetId)) ?? 0) + (i.InstanceIds?.length ?? 0));
+          add(o.InstanceType, o.SubnetId, i.InstanceIds?.length ?? 0);
         }
-        if (launched(spot).length) return launched(spot);
-        const why = codes(spot);
-        if (!why.length || !why.every((c) => SPOT_EXHAUSTED.has(c))) {
-          console.log(`fleet: ${clientToken}: nothing launched (${why.join(", ") || "no error"}): ${spot.Errors?.[0]?.ErrorMessage ?? ""}`);
-          return [];
-        }
-        const onDemand = await request(`${clientToken}-od`, "on-demand", overrides);
-        const ids = launched(onDemand);
-        console.log(`fleet: ${clientToken}: no spot capacity (${why.join(", ")}); on-demand ${ids.length ? ids.join(" ") : `refused too (${codes(onDemand).join(", ")})`}`);
-        return ids;
+        const ids = (out.Instances ?? []).flatMap((i) => i.InstanceIds ?? []);
+        if (ids.length) return ids;
+        const why = [...new Set((out.Errors ?? []).map((e) => e.ErrorCode))];
+        if (why.length && why.every((c) => NO_ROOM.has(c))) (market === "spot" ? spotFull : onDemandFull).add(r);
+        else broken.add(r);
+        console.log(`fleet: ${clientToken}: ${r} ${market}: nothing launched (${why.join(", ") || "no error"}): ${out.Errors?.[0]?.ErrorMessage ?? ""}`);
+        return [];
       } catch (e) {
         // Another evaluation is launching this very position right now, or
         // already launched it with a different pool list.
-        if (e.name === "IdempotentCallInProgress" || e.name === "IdempotentParameterMismatch") return [];
-        console.log(`fleet: ${clientToken}: ${e.name} ${e.message}`);
+        if (e.name === "IdempotentCallInProgress" || e.name === "IdempotentParameterMismatch") return TAKEN;
+        console.log(`fleet: ${clientToken}: ${r} ${market}: ${e.name} ${e.message}`);
+        broken.add(r);
         return [];
       }
+    };
+    const one = async (clientToken) => {
+      const usable = (set) => order.filter((r) => !set.has(r) && !broken.has(r));
+      for (const { region, overrides } of spotAttempts(usable(spotFull), byRegion, inPool, perPool)) {
+        const ids = await attempt(region, clientToken, "spot", overrides);
+        if (ids === TAKEN) return [];
+        if (ids.length) {
+          if (region !== order[0]) console.log(`fleet: ${clientToken}: spot in ${region}`);
+          return ids;
+        }
+      }
+      // When no spot pool anywhere has capacity, a job waiting costs more
+      // than an on-demand host: measured, every one of 25 spot pools in
+      // us-east-1 refused at once on 2026-09-24 while seven future-pay jobs
+      // queued. The on-demand host terminates when idle like any other. Only
+      // regions whose spot was merely full are tried.
+      for (const r of usable(onDemandFull).filter((x) => spotFull.has(x))) {
+        const ids = await attempt(r, `${clientToken}-od`, "on-demand", byRegion.get(r));
+        if (ids === TAKEN) return [];
+        if (ids.length) {
+          console.log(`fleet: ${clientToken}: no spot capacity; on-demand in ${r}: ${ids.join(" ")}`);
+          return ids;
+        }
+      }
+      return [];
     };
     // One at a time, so each launch sees where the previous ones landed.
     const ids = [];
     for (const t of tokens) ids.push(...(await one(t)));
-    console.log(`launched ${ids.length}/${tokens.length}: ${ids.join(" ")}`);
+    console.log(`launched ${ids.length}/${tokens.length} (${order.join(" > ")}): ${ids.join(" ")}`);
     return ids;
   },
 };
