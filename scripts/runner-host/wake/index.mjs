@@ -4,11 +4,13 @@
 //   WEBHOOK_SECRET, RUNNER_LABEL, REPOSITORY          both modes
 //   INSTANCE_ID                                       wake
 //   LAUNCH_TEMPLATE, REGIONS, INSTANCE_TYPES, TOKEN_PARAMETER, SLOTS_PER_HOST, MAX_HOSTS   scale
+//   DAILY_BUDGET, DEGRADED_MAX_HOSTS, BUDGET_UTC_OFFSET, SPEND_PARAMETER, ALERT_PARAMETER   scale (budget.mjs)
 import {
   CreateFleetCommand, DescribeInstanceTypeOfferingsCommand, DescribeInstancesCommand, DescribeSubnetsCommand,
-  EC2Client, GetSpotPlacementScoresCommand, StartInstancesCommand,
+  DescribeSpotPriceHistoryCommand, EC2Client, GetSpotPlacementScoresCommand, StartInstancesCommand,
 } from "@aws-sdk/client-ec2";
-import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
+import { GetParameterCommand, PutParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
+import { accrue, hostCap } from "./budget.mjs";
 import { makeScaler, regionOrder, spotAttempts } from "./scale.mjs";
 import { makeHandler } from "./wake.mjs";
 
@@ -17,9 +19,10 @@ const ec2 = new EC2Client({});
 const FLEET_TAG = "ci-runner-fleet";
 const POOL_TAG = "ci-runner-pool";
 
+const ssm = new SSMClient({});
 let token;
 async function githubToken() {
-  token ??= (await new SSMClient({}).send(new GetParameterCommand({ Name: env.TOKEN_PARAMETER, WithDecryption: true })))
+  token ??= (await ssm.send(new GetParameterCommand({ Name: env.TOKEN_PARAMETER, WithDecryption: true })))
     .Parameter.Value.trim();
   return token;
 }
@@ -156,6 +159,124 @@ const NO_ROOM = new Set([
   "VcpuLimitExceeded", "InstanceLimitExceeded",
 ]);
 
+// ── Daily budget (budget.mjs) ────────────────────────────────────────────────
+// Once today's spend reaches DAILY_BUDGET the fleet shrinks to
+// DEGRADED_MAX_HOSTS spot hosts with no on-demand fallback: jobs queue and run
+// slowly instead of failing, until the budget resets at local midnight. The
+// crossing fires the alert hook once a day.
+const budgetCfg = {
+  budget: Number(env.DAILY_BUDGET ?? 10),
+  maxHosts: Number(env.MAX_HOSTS ?? 30),
+  degradedMaxHosts: Number(env.DEGRADED_MAX_HOSTS ?? 2),
+  utcOffsetHours: Number(env.BUDGET_UTC_OFFSET ?? -3),
+  parameter: env.SPEND_PARAMETER ?? `/ci-runner/spend-${env.RUNNER_LABEL}`,
+};
+// On-demand USD/hour, us-east-1 (the dearest of the fleet's regions, so a
+// host billed from this table is never under-counted). Only used when a host
+// is not spot or its pool's price cannot be read.
+const ON_DEMAND = {
+  "m7a.2xlarge": 0.4637, "m6a.2xlarge": 0.3456, "m7i.2xlarge": 0.4032, "m6i.2xlarge": 0.384,
+  "r7a.2xlarge": 0.6086, "r6a.2xlarge": 0.4536, "r7i.2xlarge": 0.5292, "r6i.2xlarge": 0.504,
+};
+// A host's gp3 root (120 GB, 6000 IOPS, 500 MB/s: $39.6 a month) and its public IPv4.
+const PER_HOST_EXTRAS = 0.054 + 0.005;
+const spotPrices = new Map(); // region -> { at, byPool: Map<"type@az", usd> }
+async function spotPrice(region, type, az) {
+  let cached = spotPrices.get(region);
+  if (!cached || Date.now() - cached.at > 10 * 60_000) {
+    const out = await client(region).send(new DescribeSpotPriceHistoryCommand({
+      InstanceTypes: types, ProductDescriptions: ["Linux/UNIX"], StartTime: new Date(),
+    }));
+    cached = { at: Date.now(), byPool: new Map((out.SpotPriceHistory ?? []).map((p) => [`${p.InstanceType}@${p.AvailabilityZone}`, Number(p.SpotPrice)])) };
+    spotPrices.set(region, cached);
+  }
+  return cached.byPool.get(`${type}@${az}`);
+}
+async function hourlyRate(region, i) {
+  const onDemand = ON_DEMAND[i.InstanceType] ?? Math.max(...Object.values(ON_DEMAND));
+  if (i.InstanceLifecycle !== "spot") return onDemand + PER_HOST_EXTRAS;
+  const spot = await spotPrice(region, i.InstanceType, i.Placement?.AvailabilityZone).catch(() => undefined);
+  return (spot ?? onDemand) + PER_HOST_EXTRAS;
+}
+
+async function readSpend() {
+  try {
+    return JSON.parse((await ssm.send(new GetParameterCommand({ Name: budgetCfg.parameter }))).Parameter.Value);
+  } catch (e) {
+    if (e.name !== "ParameterNotFound") console.log(`budget: cannot read ${budgetCfg.parameter}: ${e.name}`);
+    return null;
+  }
+}
+async function writeSpend(state) {
+  try {
+    await ssm.send(new PutParameterCommand({ Name: budgetCfg.parameter, Value: JSON.stringify(state), Type: "String", Overwrite: true }));
+  } catch (e) {
+    // A burst of deliveries can outrun PutParameter's rate; the next sweep
+    // bills from each host's last accounted moment, so nothing is lost.
+    console.log(`budget: cannot write ${budgetCfg.parameter}: ${e.name}`);
+  }
+}
+
+// The alert hook is a JSON SecureString at ALERT_PARAMETER:
+//   { "url": "https://…", "headers": { "Authorization": "Bearer …" } }
+// It is POSTed { "text": "…" } — the shape an agent routine's API trigger takes.
+// No parameter, no alert; the guard itself does not depend on it.
+async function alert(text) {
+  let hook;
+  try {
+    hook = JSON.parse((await ssm.send(new GetParameterCommand({ Name: env.ALERT_PARAMETER ?? "/ci-runner/budget-alert", WithDecryption: true }))).Parameter.Value);
+  } catch (e) {
+    console.log(`budget: no alert hook (${e.name}); ${text}`);
+    return false;
+  }
+  const res = await fetch(hook.url, {
+    method: "POST", headers: { "Content-Type": "application/json", ...(hook.headers ?? {}) }, body: JSON.stringify({ text }),
+  });
+  console.log(`budget: alert hook answered ${res.status}`);
+  return res.ok;
+}
+
+// Sweep at most every 30 s: a burst of deliveries reuses the last sweep.
+let sweptAt = 0;
+let lastState = null;
+async function sweepSpend({ force = false } = {}) {
+  if (!force && lastState && Date.now() - sweptAt < 30_000) return lastState;
+  const stored = await readSpend();
+  if (!force && stored && Date.now() - (stored.at ?? 0) < 30_000) {
+    sweptAt = Date.now();
+    return (lastState = stored);
+  }
+  const alive = (await Promise.all(regions.map(async (r) => {
+    const found = await instancesIn(r, ["pending", "running", "stopping", "shutting-down"]).catch(() => null);
+    if (found === null) throw new Error(`budget: cannot list hosts in ${r}`);
+    return Promise.all(found.map(async (i) => ({
+      id: i.InstanceId, launchedAt: new Date(i.LaunchTime).getTime(),
+      // Only a host the ledger has not priced yet needs its rate looked up.
+      rate: stored?.live?.[i.InstanceId]?.[1] ?? await hourlyRate(r, i),
+    })));
+  }))).flat();
+  const state = accrue(stored, alive, Date.now(), { utcOffsetHours: budgetCfg.utcOffsetHours });
+  // `alerted` holds the budget it fired for, so changing the budget re-arms it.
+  if (budgetCfg.budget > 0 && state.spent >= budgetCfg.budget && state.alerted !== budgetCfg.budget) {
+    state.alerted = budgetCfg.budget;
+    console.log(`budget: ${state.day} spent $${state.spent.toFixed(2)} of $${budgetCfg.budget}; fleet capped at ${budgetCfg.degradedMaxHosts} hosts`);
+    await alert(
+      `CI fleet (${env.RUNNER_LABEL}) passed its daily budget: $${state.spent.toFixed(2)} spent on ${state.day} ` +
+        `(budget $${budgetCfg.budget}). Until local midnight the fleet is capped at ${budgetCfg.degradedMaxHosts} ` +
+        `spot hosts with no on-demand fallback, so jobs queue longer. ${Object.keys(state.live).length} host(s) up now.`,
+    ).catch((e) => console.log(`budget: alert failed: ${e.name} ${e.message}`));
+  }
+  await writeSpend(state);
+  sweptAt = Date.now();
+  return (lastState = state);
+}
+// A sweep that fails must not stop the fleet: it keeps the last known state.
+const currentCap = async () => hostCap(await sweepSpend().catch((e) => {
+  console.log(`budget: sweep failed (${e.message}); last known state`);
+  return lastState;
+}), budgetCfg);
+const overBudget = () => hostCap(lastState, budgetCfg) < budgetCfg.maxHosts;
+
 const fleet = {
   async hosts() {
     const all = await Promise.all(regions.map(async (r) => {
@@ -265,6 +386,8 @@ const fleet = {
       // us-east-1 refused at once on 2026-09-24 while seven future-pay jobs
       // queued. The on-demand host terminates when idle like any other. Only
       // regions whose spot was merely full are tried.
+      // Over the daily budget the fleet waits for spot instead.
+      if (overBudget()) return [];
       for (const r of usable(onDemandFull).filter((x) => spotFull.has(x))) {
         const ids = await attempt(r, `${clientToken}-od`, "on-demand", byRegion.get(r));
         if (ids === TAKEN) return [];
@@ -319,8 +442,20 @@ const serve = (env.MODE ?? "scale") === "wake"
     })
   : makeScaler({
       secret: env.WEBHOOK_SECRET, label: env.RUNNER_LABEL, repo: env.REPOSITORY, github, ec2: fleet,
-      slotsPerHost: Number(env.SLOTS_PER_HOST ?? 2), maxHosts: Number(env.MAX_HOSTS ?? 30),
+      slotsPerHost: Number(env.SLOTS_PER_HOST ?? 2), maxHosts: currentCap,
     });
 
+// IAM-only calls (`aws lambda invoke`; never reachable through the public URL,
+// whose events always carry requestContext.http).
+async function internal(event) {
+  if (event.setup === "webhook") return ensureWebhook(event.url);
+  if (event.budget === "status") {
+    const state = await sweepSpend({ force: true });
+    return { ...state, budget: budgetCfg.budget, cap: hostCap(state, budgetCfg) };
+  }
+  if (event.budget === "test-alert") return { delivered: await alert(`Test alert from the CI fleet (${env.RUNNER_LABEL}): the budget hook works.`) };
+  return { error: "unknown internal call" };
+}
+
 export const handler = async (event) =>
-  event?.setup === "webhook" && !event.requestContext ? ensureWebhook(event.url) : serve(event);
+  (event?.setup || event?.budget) && !event.requestContext ? internal(event) : serve(event);

@@ -38,6 +38,7 @@ const reply = (statusCode, message, extra = {}) => ({ statusCode, body: JSON.str
 /**
  * @param {object} cfg
  * @param {{ queuedJobs(label: string): Promise<number>, idleRunners(label: string): Promise<number>, lostJobs(runId: number, attempt: number): Promise<number>, rerunFailed(runId: number): Promise<void> }} cfg.github
+ * @param {number | (() => number | Promise<number>)} [cfg.maxHosts] the fleet's ceiling, or a function of the moment
  * @param {{ hosts(): Promise<{ id: string, state: string, launchedAt: number, pool?: boolean }[]>, launch(tokens: string[]): Promise<string[]>, start(ids: string[]): Promise<string[]> }} cfg.ec2
  */
 export const MAX_ATTEMPTS = 3;
@@ -102,13 +103,15 @@ export function makeScaler({ secret, label, repo, github, ec2, slotsPerHost = 3,
   // few seconds before its jobs API lists it as queued, so a `queued`
   // delivery counts as at least one job waiting.
   async function evaluate(delivered) {
+    // A function when the cap moves (the daily budget, budget.mjs).
+    const cap = typeof maxHosts === "function" ? await maxHosts() : maxHosts;
     const [listed, idle, hosts] = await Promise.all([github.queuedJobs(label), github.idleRunners(label), ec2.hosts()]);
     const queued = Math.max(listed, delivered);
     const live = hosts.filter((h) => h.state === "pending" || h.state === "running");
     // A host that has not registered its runners yet is capacity on the way.
     const booting = live.filter((h) => h.state === "pending" || now() - h.launchedAt < bootSeconds * 1000);
     const deficit = queued - idle - booting.length * slotsPerHost;
-    const room = Math.max(0, maxHosts - live.length);
+    const room = Math.max(0, cap - live.length);
     const launch = Math.min(room, Math.max(0, Math.ceil(deficit / slotsPerHost)));
     const parked = hosts.filter((h) => h.pool && h.state === "stopped").slice(0, launch).map((h) => h.id);
     const started = parked.length ? await startPool(parked) : [];
@@ -122,9 +125,9 @@ export function makeScaler({ secret, label, repo, github, ec2, slotsPerHost = 3,
     const window = Math.floor(now() / 30_000);
     const tokens = Array.from({ length: rest }, (_, i) => `fleet-${label}-${window}-${live.length + started.length + i + 1}`);
     const launched = rest > 0 ? await ec2.launch(tokens) : [];
-    const decision = { queued, idle, hosts: live.length, booting: booting.length, started: started.length, launched: launched.length };
+    const decision = { queued, idle, hosts: live.length, booting: booting.length, started: started.length, launched: launched.length, cap };
     console.log(JSON.stringify(decision));
-    if (deficit > 0 && room === 0) console.log(`at the ${maxHosts}-host cap; ${deficit} job(s) wait`);
+    if (deficit > 0 && room === 0) console.log(`at the ${cap}-host cap; ${deficit} job(s) wait`);
     return decision;
   }
 
