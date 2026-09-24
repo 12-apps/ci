@@ -15,7 +15,7 @@
 # first-generation EPYC is slower per core than the runner the lanes are tuned for),
 # SLOTS_PER_HOST (2: a 4-core, 14 GB slot, like the 4-vCPU runner the lanes are
 # tuned for), MAX_HOSTS (30; 30 × 8 vCPU must fit the account's spot vCPU
-# quota, L-34B43A08), POOL_SIZE (2 stopped hosts kept warm), TOKEN_PARAMETER
+# quota, L-34B43A08), POOL_SIZE (0; stopped hosts kept warm, see README), TOKEN_PARAMETER
 # (/ci-runner/github-app-key), FUNCTION_NAME (ci-runner-scale),
 # WAKE_SECRET_FILE (~/.ci-runner-wake-secret, created 0600, never printed).
 set -euo pipefail
@@ -27,7 +27,7 @@ label="${RUNNER_LABEL:-future-pay-ci}"
 types="${INSTANCE_TYPES:-m7a.2xlarge,m6a.2xlarge,m7i.2xlarge,m7i-flex.2xlarge,m6i.2xlarge}"
 slots="${SLOTS_PER_HOST:-2}"
 max_hosts="${MAX_HOSTS:-30}"
-pool_size="${POOL_SIZE:-2}"
+pool_size="${POOL_SIZE:-0}"
 param="${TOKEN_PARAMETER:-/ci-runner/github-app-key}"
 fn="${FUNCTION_NAME:-ci-runner-scale}"
 role="$fn"

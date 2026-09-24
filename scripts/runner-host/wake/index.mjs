@@ -59,7 +59,8 @@ const github = {
       Filters: [
         { Name: `tag:${FLEET_TAG}`, Values: [env.RUNNER_LABEL] },
         { Name: "private-ip-address", Values: [...ips.keys()] },
-        { Name: "state-reason-code", Values: ["Server.SpotInstanceTermination"] },
+        // Terminated (one-time spot) or stopped (a pool host's persistent request).
+        { Name: "state-reason-code", Values: ["Server.SpotInstanceTermination", "Server.SpotInstanceShutdown"] },
       ],
     }));
     const reclaimed = (out.Reservations ?? []).flatMap((r) => r.Instances ?? []).map((i) => i.PrivateIpAddress);
