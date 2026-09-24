@@ -441,7 +441,7 @@ export function wiringOf(source, lines, resolveSibling) {
       continue;
     }
     const code = (all[line - 1] ?? "").replace(/\/\/.*$/, "");
-    const hit = [...importsBy].filter(([name]) => new RegExp(`(?<![\\w$.])${name.replace(/\$/g, "\\$")}\\s*\\(`).test(code)).map(([, f]) => f);
+    const hit = [...importsBy].filter(([name]) => new RegExp(`(?<![\\w$.])${escape(name)}\\s*\\(`).test(code)).map(([, f]) => f);
     if (hit.length > 0) wired.set(line, [...new Set(hit)]);
     else rest.push(line);
   }
