@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { createHmac } from "node:crypto";
 import { test } from "node:test";
-import { makeScaler, openPools } from "../scale.mjs";
+import { makeScaler, regionOrder, spotAttempts } from "../scale.mjs";
 
 // The fleet grows to the queue and never past the cap. Getting it wrong one
 // way leaves PRs waiting for a slot; the other way bills idle machines.
@@ -193,13 +193,36 @@ test("re-runs stop at the attempt cap, successes and foreign runs are ignored", 
   }
 });
 
+const pools = (...names) => names.map((n) => ({ InstanceType: n.split("@")[0], SubnetId: n.split("@")[1] }));
+const plan = (attempts) => attempts.map((a) => `${a.region}: ${a.overrides.map((p) => `${p.InstanceType}@${p.SubnetId}`).join(" ")}`);
+
 test("a pool at the cap is skipped, so a burst spreads across pools", () => {
-  const o = [{ InstanceType: "m7a", SubnetId: "a" }, { InstanceType: "m7a", SubnetId: "b" }, { InstanceType: "r7a", SubnetId: "a" }];
+  const offered = new Map([["ohio", pools("m7a@a", "m7a@b", "r7a@a")]]);
   const inPool = new Map([["m7a@a", 2], ["m7a@b", 1]]);
-  assert.deepEqual(openPools(o, inPool, 2).map((p) => `${p.InstanceType}@${p.SubnetId}`), ["m7a@b", "r7a@a"]);
+  assert.deepEqual(plan(spotAttempts(["ohio"], offered, inPool, 2)), ["ohio: m7a@b r7a@a"]);
 });
 
-test("when every pool is at the cap, all of them stay open: a waiting job costs more", () => {
-  const o = [{ InstanceType: "m7a", SubnetId: "a" }, { InstanceType: "r7a", SubnetId: "a" }];
-  assert.equal(openPools(o, new Map([["m7a@a", 2], ["r7a@a", 5]]), 2).length, 2);
+test("a region whose pools are all at the cap is passed over for the next one", () => {
+  const offered = new Map([["ohio", pools("m7a@a")], ["virginia", pools("m7a@x", "r7a@y")]]);
+  assert.deepEqual(plan(spotAttempts(["ohio", "virginia"], offered, new Map([["m7a@a", 2]]), 2)), ["virginia: m7a@x r7a@y"]);
+});
+
+test("when every pool of every region is at the cap, all of them stay open: a waiting job costs more", () => {
+  const offered = new Map([["ohio", pools("m7a@a", "r7a@a")], ["virginia", pools("m7a@x")], ["nowhere", []]]);
+  const inPool = new Map([["m7a@a", 2], ["r7a@a", 5], ["m7a@x", 2]]);
+  assert.deepEqual(plan(spotAttempts(["ohio", "virginia", "nowhere"], offered, inPool, 2)), ["ohio: m7a@a r7a@a", "virginia: m7a@x"]);
+});
+
+test("regions go by placement tier, then by the configured (cheapest-first) order", () => {
+  const regions = ["us-east-2", "eu-north-1", "us-east-1"];
+  assert.deepEqual(regionOrder(regions, new Map([["us-east-2", 9], ["eu-north-1", 9], ["us-east-1", 9]])), regions);
+  // One point is noise: Ohio at 7 still beats Virginia at 9.
+  assert.deepEqual(regionOrder(regions, new Map([["us-east-2", 7], ["eu-north-1", 8], ["us-east-1", 9]])), regions);
+  // A crowded Ohio drops behind both.
+  assert.deepEqual(regionOrder(regions, new Map([["us-east-2", 3], ["eu-north-1", 5], ["us-east-1", 9]])), ["us-east-1", "eu-north-1", "us-east-2"]);
+});
+
+test("without scores the configured order decides", () => {
+  assert.deepEqual(regionOrder(["b", "a"], new Map()), ["b", "a"]);
+  assert.deepEqual(regionOrder(["b", "a"], new Map([["a", 2]])), ["b", "a"]);
 });

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Stand up the runner fleet: an AMI, a launch template for throwaway spot
-# hosts, and the Lambda that sizes the fleet to the queue (scale.mjs).
+# hosts in each region, and the Lambda that sizes the fleet to the queue
+# (scale.mjs) and picks the region to launch in (index.mjs).
 #
 #   AWS_PROFILE=ci-runner-admin GOLDEN_INSTANCE_ID=i-0123... ./deploy.sh
 #
@@ -20,7 +21,11 @@
 # quota, L-34B43A08), POOL_SIZE (0; stopped hosts kept warm, see README), TOKEN_PARAMETER
 # (/ci-runner/github-app-key), FUNCTION_NAME (ci-runner-scale),
 # WAKE_SECRET_FILE (~/.ci-runner-wake-secret, created 0600, never printed),
-# ROOT_IOPS (6000) and ROOT_THROUGHPUT (500 MB/s) for the hosts' gp3 root volume.
+# ROOT_IOPS (6000) and ROOT_THROUGHPUT (500 MB/s) for the hosts' gp3 root volume,
+# REGIONS (us-east-2,eu-north-1,AWS_REGION): where hosts may run, cheapest
+# first. The AMI is copied (by name) into each and gets a launch template of
+# the same name there; a region that cannot be set up is left out with a
+# warning. The hosts of every region read the token from AWS_REGION's SSM.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -42,7 +47,22 @@ fn="${FUNCTION_NAME:-ci-runner-scale}"
 role="$fn"
 template="ci-runner-fleet-${label}"
 secret_file="${WAKE_SECRET_FILE:-$HOME/.ci-runner-wake-secret}"
+regions="${REGIONS:-us-east-2,eu-north-1,${region}}"
 aws() { command aws --region "$region" --output text "$@"; }
+# The same call in another region.
+in_region() { local r=$1; shift; command aws --region "$r" --output text "$@"; }
+# An image's snapshot takes minutes to tens of minutes; the CLI waiter gives up at ten.
+wait_image() {
+  local r=$1 id=$2 state=""
+  for _ in $(seq 1 270); do
+    state=$(in_region "$r" ec2 describe-images --image-ids "$id" --query 'Images[0].State') || return 1
+    [[ "$state" == available ]] && return 0
+    [[ "$state" == failed ]] && { echo "deploy: ${id} in ${r} failed" >&2; return 1; }
+    sleep 20
+  done
+  echo "deploy: ${id} in ${r} still ${state} after 90 minutes" >&2
+  return 1
+}
 account=$(aws sts get-caller-identity --query Account)
 
 # ── image ────────────────────────────────────────────────────────────────────
@@ -53,14 +73,7 @@ if [[ -z "${AMI_ID:-}" ]]; then
   AMI_ID=$(aws ec2 create-image --instance-id "$GOLDEN_INSTANCE_ID" --name "$name" \
     --tag-specifications "ResourceType=image,Tags=[{Key=Project,Value=ci-runner}]" \
     "ResourceType=snapshot,Tags=[{Key=Project,Value=ci-runner}]" --query ImageId)
-  # A 100+ GB root takes longer than the CLI waiter's 10 minutes to snapshot.
-  for _ in $(seq 1 180); do
-    state=$(aws ec2 describe-images --image-ids "$AMI_ID" --query 'Images[0].State')
-    [[ "$state" == available ]] && break
-    [[ "$state" == failed ]] && { echo "deploy: ${AMI_ID} failed" >&2; exit 1; }
-    sleep 20
-  done
-  [[ "$state" == available ]] || { echo "deploy: ${AMI_ID} still ${state} after an hour" >&2; exit 1; }
+  wait_image "$region" "$AMI_ID" || exit 1
 fi
 # The root volume can be no smaller than the image's snapshot.
 root_gb=$(aws ec2 describe-images --image-ids "$AMI_ID" --query 'Images[0].BlockDeviceMappings[0].Ebs.VolumeSize')
@@ -73,51 +86,78 @@ else
   : "${SUBNET_ID:?}" "${SECURITY_GROUP_ID:?}" "${INSTANCE_PROFILE_ARN:?}"
   subnet=$SUBNET_ID sg=$SECURITY_GROUP_ID profile_arn=$INSTANCE_PROFILE_ARN
 fi
-# Every default subnet of the VPC, one per zone: the fleet spreads across them.
-vpc=$(aws ec2 describe-subnets --subnet-ids "$subnet" --query 'Subnets[0].VpcId')
-subnets=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=${vpc}" "Name=default-for-az,Values=true" \
-  --query 'Subnets[].SubnetId' | tr '\t' ',')
-[[ -n "$subnets" ]] || subnets=$subnet
-# Only the (type, subnet) pairs EC2 offers: one type a zone lacks (m7i-flex in
-# us-east-1e) makes an instant fleet refuse the whole request
-# (InvalidFleetConfiguration), and the queue waits.
-overrides=""
-while read -r sn az; do
-  [[ -n "$sn" ]] || continue
-  for t in $(aws ec2 describe-instance-type-offerings --location-type availability-zone \
-      --filters "Name=location,Values=${az}" "Name=instance-type,Values=${types}" --query 'InstanceTypeOfferings[].InstanceType'); do
-    overrides+="${overrides:+,}${t}@${sn}"
-  done
-done < <(IFS=, read -ra ids <<< "$subnets"; aws ec2 describe-subnets --subnet-ids "${ids[@]}" --query 'Subnets[].[SubnetId,AvailabilityZone]')
-[[ -n "$overrides" ]] || { echo "deploy: none of ${types} is offered in any subnet of ${vpc}" >&2; exit 1; }
 host_role=$(aws iam get-instance-profile --instance-profile-name "${profile_arn##*/}" --query 'InstanceProfile.Roles[0].Arn')
 
 # ── launch template: throwaway hosts that terminate when idle ───────────────
 # No market options here: the scaler's fleet request asks for spot and falls
-# back to on-demand when no spot pool has capacity (index.mjs).
-data=$(jq -n --arg ami "$AMI_ID" --arg type "${types%%,*}" --arg profile "$profile_arn" \
-  --arg sg "$sg" --arg label "$label" \
-  --arg dev "$root_device" --argjson gb "$root_gb" --argjson iops "$root_iops" --argjson tput "$root_throughput" '{
-  ImageId: $ami, InstanceType: $type,
-  IamInstanceProfile: {Arn: $profile},
-  SecurityGroupIds: [$sg],
-  MetadataOptions: {HttpTokens: "required", HttpEndpoint: "enabled"},
-  InstanceInitiatedShutdownBehavior: "terminate",
-  BlockDeviceMappings: [{DeviceName: $dev, Ebs: {VolumeSize: $gb, VolumeType: "gp3", Iops: $iops, Throughput: $tput, Encrypted: true, DeleteOnTermination: true}}],
-  TagSpecifications: [
-    {ResourceType: "instance", Tags: [{Key: "Project", Value: "ci-runner"}, {Key: "Name", Value: "ci-runner-fleet"}, {Key: "ci-runner-fleet", Value: $label}]},
-    {ResourceType: "volume", Tags: [{Key: "Project", Value: "ci-runner"}]}
-  ]}')
-if aws ec2 describe-launch-templates --launch-template-names "$template" >/dev/null 2>&1; then
-  v=$(aws ec2 create-launch-template-version --launch-template-name "$template" --launch-template-data "$data" \
-    --query LaunchTemplateVersion.VersionNumber)
-  aws ec2 modify-launch-template --launch-template-name "$template" --default-version "$v" >/dev/null
-else
-  aws ec2 create-launch-template --launch-template-name "$template" --launch-template-data "$data" \
-    --tag-specifications "ResourceType=launch-template,Tags=[{Key=Project,Value=ci-runner}]" >/dev/null
-fi
-template_arn="arn:aws:ec2:${region}:${account}:launch-template/$(aws ec2 describe-launch-templates \
-  --launch-template-names "$template" --query 'LaunchTemplates[0].LaunchTemplateId')"
+# back to on-demand when no spot pool has capacity (index.mjs). No subnet
+# either: the request names one per zone, from the region's default VPC.
+# Prints the template's ARN.
+put_template() {
+  local r=$1 ami=$2 sg=$3 data v
+  data=$(jq -n --arg ami "$ami" --arg type "${types%%,*}" --arg profile "$profile_arn" \
+    --arg sg "$sg" --arg label "$label" \
+    --arg dev "$root_device" --argjson gb "$root_gb" --argjson iops "$root_iops" --argjson tput "$root_throughput" '{
+    ImageId: $ami, InstanceType: $type,
+    IamInstanceProfile: {Arn: $profile},
+    SecurityGroupIds: [$sg],
+    MetadataOptions: {HttpTokens: "required", HttpEndpoint: "enabled"},
+    InstanceInitiatedShutdownBehavior: "terminate",
+    BlockDeviceMappings: [{DeviceName: $dev, Ebs: {VolumeSize: $gb, VolumeType: "gp3", Iops: $iops, Throughput: $tput, Encrypted: true, DeleteOnTermination: true}}],
+    TagSpecifications: [
+      {ResourceType: "instance", Tags: [{Key: "Project", Value: "ci-runner"}, {Key: "Name", Value: "ci-runner-fleet"}, {Key: "ci-runner-fleet", Value: $label}]},
+      {ResourceType: "volume", Tags: [{Key: "Project", Value: "ci-runner"}]}
+    ]}')
+  if in_region "$r" ec2 describe-launch-templates --launch-template-names "$template" >/dev/null 2>&1; then
+    v=$(in_region "$r" ec2 create-launch-template-version --launch-template-name "$template" --launch-template-data "$data" \
+      --query LaunchTemplateVersion.VersionNumber) || return 1
+    in_region "$r" ec2 modify-launch-template --launch-template-name "$template" --default-version "$v" >/dev/null || return 1
+  else
+    in_region "$r" ec2 create-launch-template --launch-template-name "$template" --launch-template-data "$data" \
+      --tag-specifications "ResourceType=launch-template,Tags=[{Key=Project,Value=ci-runner}]" >/dev/null || return 1
+  fi
+  echo "arn:aws:ec2:${r}:${account}:launch-template/$(in_region "$r" ec2 describe-launch-templates \
+    --launch-template-names "$template" --query 'LaunchTemplates[0].LaunchTemplateId')"
+}
+
+# Another region: the image copied under the same name (reused when a copy
+# exists), a security group with no inbound rule in its default VPC, and the
+# template. Prints the template's ARN.
+setup_region() {
+  local r=$1 name ami vpc sg
+  name=$(aws ec2 describe-images --image-ids "$AMI_ID" --query 'Images[0].Name') || return 1
+  ami=$(in_region "$r" ec2 describe-images --owners self --filters "Name=name,Values=${name}" --query 'Images[0].ImageId') || return 1
+  if [[ -z "$ami" || "$ami" == None ]]; then
+    echo "deploy: copying ${AMI_ID} to ${r}..." >&2
+    ami=$(in_region "$r" ec2 copy-image --source-region "$region" --source-image-id "$AMI_ID" --name "$name" \
+      --copy-image-tags --query ImageId) || return 1
+  fi
+  wait_image "$r" "$ami" || return 1
+  vpc=$(in_region "$r" ec2 describe-vpcs --filters Name=is-default,Values=true --query 'Vpcs[0].VpcId') || return 1
+  [[ -n "$vpc" && "$vpc" != None ]] || { echo "deploy: ${r} has no default VPC" >&2; return 1; }
+  sg=$(in_region "$r" ec2 describe-security-groups --filters "Name=vpc-id,Values=${vpc}" "Name=group-name,Values=ci-runner-host" \
+    --query 'SecurityGroups[0].GroupId') || return 1
+  if [[ -z "$sg" || "$sg" == None ]]; then
+    sg=$(in_region "$r" ec2 create-security-group --vpc-id "$vpc" --group-name ci-runner-host \
+      --description "CI runner hosts: outbound only" --query GroupId) || return 1
+  fi
+  put_template "$r" "$ami" "$sg"
+}
+
+template_arns=$(put_template "$region" "$AMI_ID" "$sg") || { echo "deploy: no launch template in ${region}" >&2; exit 1; }
+live_regions=""
+IFS=, read -ra wanted <<< "$regions"
+for r in "${wanted[@]}"; do
+  if [[ "$r" == "$region" ]]; then
+    live_regions+="${live_regions:+,}${r}"
+  elif arn=$(setup_region "$r"); then
+    template_arns+=" ${arn}"
+    live_regions+="${live_regions:+,}${r}"
+  else
+    echo "deploy: WARNING: ${r} left out of the fleet (see above)" >&2
+  fi
+done
+[[ ",${live_regions}," == *",${region},"* ]] || live_regions+="${live_regions:+,}${region}"
 
 # ── warm pool: stopped hosts whose disks have booted before ─────────────────
 # A fresh host reads its root volume from the snapshot on first touch, which
@@ -156,20 +196,21 @@ if ! aws iam get-role --role-name "$role" >/dev/null 2>&1; then
     --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}' >/dev/null
   new_role=1
 fi
-policy=$(jq -n --arg lt "$template_arn" --arg hostrole "$host_role" --arg label "$label" \
+policy=$(jq -n --arg lts "$template_arns" --arg hostrole "$host_role" --arg label "$label" \
   --arg param "arn:aws:ssm:${region}:${account}:parameter${param}" \
   --arg logs "arn:aws:logs:${region}:${account}:log-group:/aws/lambda/${fn}" '{
   Version: "2012-10-17",
   Statement: [
-    {Effect: "Allow", Action: "ec2:RunInstances", Resource: "*", Condition: {ArnLike: {"ec2:LaunchTemplate": $lt}}},
+    {Effect: "Allow", Action: "ec2:RunInstances", Resource: "*", Condition: {ArnLike: {"ec2:LaunchTemplate": ($lts | split(" "))}}},
     {Effect: "Allow", Action: "ec2:CreateFleet", Resource: "*"},
     {Effect: "Allow", Action: "ec2:CreateTags", Resource: "*", Condition: {StringEquals: {"ec2:CreateAction": ["RunInstances", "CreateFleet"]}}},
-    {Effect: "Allow", Action: ["ec2:DescribeLaunchTemplateVersions", "ec2:DescribeImages", "ec2:DescribeSubnets"], Resource: "*"},
+    {Effect: "Allow", Action: ["ec2:DescribeLaunchTemplateVersions", "ec2:DescribeImages", "ec2:DescribeSubnets",
+      "ec2:DescribeInstanceTypeOfferings", "ec2:GetSpotPlacementScores"], Resource: "*"},
     {Effect: "Allow", Action: "ec2:StartInstances", Resource: "*", Condition: {StringEquals: {"aws:ResourceTag/ci-runner-pool": $label}}},
     {Effect: "Allow", Action: "iam:PassRole", Resource: $hostrole},
     {Effect: "Allow", Action: "ec2:DescribeInstances", Resource: "*"},
     {Effect: "Allow", Action: "ssm:GetParameter", Resource: $param},
-    {Effect: "Allow", Action: "kms:Decrypt", Resource: "*", Condition: {StringEquals: {"kms:ViaService": "ssm.\($lt | split(":")[3]).amazonaws.com"}}},
+    {Effect: "Allow", Action: "kms:Decrypt", Resource: "*", Condition: {StringEquals: {"kms:ViaService": "ssm.\($param | split(":")[3]).amazonaws.com"}}},
     {Effect: "Allow", Action: "logs:CreateLogGroup", Resource: $logs},
     {Effect: "Allow", Action: ["logs:CreateLogStream", "logs:PutLogEvents"], Resource: ($logs + ":*")}
   ]}')
@@ -183,18 +224,18 @@ aws iam create-service-linked-role --aws-service-name ec2fleet.amazonaws.com >/d
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 (umask 077; jq -n --rawfile s "$secret_file" --arg l "$label" --arg r "$repo" --arg t "$template" \
-  --arg p "$param" --arg types "$types" --arg subnets "$subnets" --arg overrides "$overrides" --arg slots "$slots" --arg max "$max_hosts" \
+  --arg p "$param" --arg types "$types" --arg regions "$live_regions" --arg slots "$slots" --arg max "$max_hosts" \
   '{Variables: {MODE: "scale", WEBHOOK_SECRET: ($s | rtrimstr("\n")), RUNNER_LABEL: $l, REPOSITORY: $r,
-    LAUNCH_TEMPLATE: $t, TOKEN_PARAMETER: $p, INSTANCE_TYPES: $types, SUBNETS: $subnets, OVERRIDES: $overrides, SLOTS_PER_HOST: $slots, MAX_HOSTS: $max}}' > "$work/env.json")
+    LAUNCH_TEMPLATE: $t, TOKEN_PARAMETER: $p, INSTANCE_TYPES: $types, REGIONS: $regions, SLOTS_PER_HOST: $slots, MAX_HOSTS: $max}}' > "$work/env.json")
 cp "$here/wake.mjs" "$here/scale.mjs" "$here/index.mjs" "$work/"
 (cd "$work" && python3 -m zipfile -c fn.zip wake.mjs scale.mjs index.mjs)
 if aws lambda get-function --function-name "$fn" >/dev/null 2>&1; then
   aws lambda update-function-code --function-name "$fn" --zip-file "fileb://$work/fn.zip" >/dev/null
   aws lambda wait function-updated-v2 --function-name "$fn"
-  aws lambda update-function-configuration --function-name "$fn" --environment "file://$work/env.json" --timeout 60 >/dev/null
+  aws lambda update-function-configuration --function-name "$fn" --environment "file://$work/env.json" --timeout 120 >/dev/null
 else
   aws lambda create-function --function-name "$fn" --runtime nodejs22.x --handler index.handler \
-    --role "arn:aws:iam::${account}:role/${role}" --timeout 60 --memory-size 256 \
+    --role "arn:aws:iam::${account}:role/${role}" --timeout 120 --memory-size 256 \
     --zip-file "fileb://$work/fn.zip" --environment "file://$work/env.json" --tags Project=ci-runner >/dev/null
 fi
 aws lambda wait function-updated-v2 --function-name "$fn"
@@ -231,7 +272,8 @@ if [[ "${CREATE_WEBHOOK:-1}" == 1 ]]; then
 fi
 
 cat <<DONE
-deploy: fleet ready. AMI ${AMI_ID}, template ${template}, up to ${max_hosts} hosts × ${slots} slots,
+deploy: fleet ready. AMI ${AMI_ID}, template ${template} in ${live_regions} (tried in that order,
+then by spot placement score), up to ${max_hosts} hosts × ${slots} slots,
 the first ${pool_size} started from the warm pool.
 Scaler: ${url}
 
