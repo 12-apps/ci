@@ -141,5 +141,15 @@ The discovery/build core needs no changes.
 ## Enable / disable
 
 Repo → Settings → Secrets and variables → Actions → **Variables**:
-`ENABLE_DEPLOY_DIGITALOCEAN`, `ENABLE_DEPLOY_CLOUDFLARE` = `true|false`
+`ENABLE_DEPLOY_DIGITALOCEAN`, `ENABLE_DEPLOY_CLOUDFLARE`, `ENABLE_DEPLOY_AWS` = `true|false`
 (default off, so a merge never triggers a live deploy).
+
+## AWS prebuilt-artifact adapter
+
+AWS is an explicit `target: aws` lane, independent of discovery/GHCR builds and
+excluded from `all`. It consumes a prebuilt ECR digest with account/stack guards,
+private host-side secret delivery, app/database readiness and stop-first recovery
+for a single durable controller. Provisioning is explicit and no destroy action
+is provided. See [the AWS contract and examples](../../scripts/deploy/AWS.md) for
+app-owned infrastructure outputs, host/bootstrap requirements, scoped OIDC,
+pre-release SHA pins and the integration-test boundary.

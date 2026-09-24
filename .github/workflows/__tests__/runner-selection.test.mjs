@@ -33,6 +33,7 @@ const SELECTED = "${{ vars.CI_RUNNER || 'ubuntu-latest' }}";
  */
 const PINNED = new Map([
   ["expo-apk.yml:apk", "gradle needs the Android SDK ubuntu-latest ships preinstalled"],
+  ["deploy-aws.yml:deploy", "scripts/deploy/aws.mjs runs the aws CLI ubuntu-latest ships preinstalled"],
 ]);
 
 const isReusable = (source) => /^ {2}workflow_call:/m.test(source);

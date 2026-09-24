@@ -2,6 +2,13 @@
   "$schema": "./targets.schema.json",
   "vendors": [
     {
+      "name": "aws",
+      "enabledVar": "ENABLE_DEPLOY_AWS",
+      "workflow": "deploy-aws.yml",
+      "consumes": ["container"],
+      "description": "Single persistent EC2 controller; scoped OIDC, immutable prebuilt ECR digest, encrypted EBS data, SSM readiness-checked rollout and rollback. Explicit provisioning only. Off by default."
+    },
+    {
       "name": "digitalocean",
       "enabledVar": "ENABLE_DEPLOY_DIGITALOCEAN",
       "workflow": "deploy-digitalocean.yml",

@@ -1,5 +1,10 @@
 # Consuming the CD framework
 
+For the opt-in AWS single-controller adapter, see the [AWS deployment contract](scripts/deploy/AWS.md).
+It consumes a prebuilt ECR digest and app-owned CloudFormation, requires explicit
+`target: aws`, and is disabled unless `ENABLE_DEPLOY_AWS=true`. Before release,
+pin the tested feature commit; the existing major tag does not contain new files.
+
 A repo opts in by adding one caller workflow plus the per-repo config the engine
 discovers. Everything vendor-specific (descriptors, compose files, secrets,
 feature flags) stays in the consumer; the pipeline logic lives in `12-apps/ci`.
