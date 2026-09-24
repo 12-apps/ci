@@ -103,8 +103,11 @@ rotate the credential. Values you leave out keep what is installed.
 
 | setting | default | what it does |
 |---|---|---|
-| `CI_RUNNER_MEMORY` | 90% of RAM ÷ slots | hard cap, swap included; the job is OOM-killed alone |
-| `CI_RUNNER_CPUS` | 2 × cores ÷ slots | CPU quota; a job can use up to twice its fair share |
+| `CI_RUNNER_MEMORY` | `auto`: 90% of RAM ÷ slots, read when each job starts | hard cap, swap included; the job is OOM-killed alone |
+| `CI_RUNNER_PIN_CPUS` | `1` | slot N owns its own cores ÷ slots cores, and that is all it sees; `0` shares every core |
+| `CI_RUNNER_CPUS` | unset | a CPU quota on top, for a host that shares cores |
+
+Size a slot like the runner it replaces. future-pay's test lanes are tuned for GitHub's 4-vCPU, 16 GB runner (four vitest forks, FUT-801), so the fleet runs **two slots on an 8-vCPU, 32 GB host**. Three slots on 8 cores, each seeing all eight under a quota, ran three times the forks the cores could serve. Vitest's transform took 37 s instead of 11 s, a 20-second `findBy` timed out, and a Playwright web server missed its 180-second boot (future-pay #1978).
 | `CI_RUNNER_DISK` | unbounded | the workspace and the job's Docker data on a fresh ext4 file of this size |
 | `CI_RUNNER_JOB_TIMEOUT_MINUTES` | 360 | wall-clock cap from the moment a job starts; waiting for a job is not capped |
 

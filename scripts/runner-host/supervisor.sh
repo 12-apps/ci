@@ -30,8 +30,16 @@
 #   CI_RUNNER_NAME    name prefix (default: the host name)
 #
 #   Limits (all optional):
-#   CI_RUNNER_MEMORY  per-job memory cap, e.g. `7000m` (swap capped to the same)
-#   CI_RUNNER_CPUS    per-job CPU cap, e.g. `2.5`
+#   CI_RUNNER_MEMORY  per-job memory cap, e.g. `7000m` (swap capped to the same),
+#                     or `auto`: 90% of this host's RAM / CI_RUNNER_SLOTS, read
+#                     when the job starts, so one image fits any instance size
+#   CI_RUNNER_CPUS    per-job CPU quota, e.g. `2.5` (unset: none)
+#   CI_RUNNER_PIN_CPUS  1 (default): slot N owns cores (N-1)*k .. N*k-1, where
+#                     k = cores / CI_RUNNER_SLOTS. Tools size their worker pools
+#                     by the cores they SEE (nproc, os.availableParallelism), and
+#                     a quota does not change that: three slots that each saw all
+#                     eight cores ran 3x too many vitest forks and timed tests
+#                     out (future-pay #1978). 0 shares every core.
 #   CI_RUNNER_DISK    per-job disk cap, e.g. `40G`: the job's workspace and its
 #                     Docker data live on a loop-mounted ext4 file of this size,
 #                     formatted fresh for every job. Unset: an anonymous volume.
@@ -293,8 +301,18 @@ run_one() {
     args+=(--volume /var/lib/docker)
   fi
   [[ "${CI_RUNNER_LOG_DRIVER:-journald}" == journald ]] && args+=(--log-opt "tag=ci-runner-${slot}")
-  [[ -n "${CI_RUNNER_MEMORY:-}" ]] && args+=(--memory "$CI_RUNNER_MEMORY" --memory-swap "$CI_RUNNER_MEMORY")
+  local memory="${CI_RUNNER_MEMORY:-}" slots="${CI_RUNNER_SLOTS:-1}"
+  if [[ "$memory" == auto ]]; then
+    local mem_mb="${CI_RUNNER_MEM_MB:-$(awk '/MemTotal/ {print int($2 / 1024)}' /proc/meminfo)}"
+    memory="$(( mem_mb * 9 / 10 / slots ))m"
+  fi
+  [[ -n "$memory" ]] && args+=(--memory "$memory" --memory-swap "$memory")
   [[ -n "${CI_RUNNER_CPUS:-}" ]] && args+=(--cpus "$CI_RUNNER_CPUS")
+  local cores="${CI_RUNNER_NPROC:-$(nproc)}"
+  local per=$(( cores / slots ))
+  if [[ "${CI_RUNNER_PIN_CPUS:-1}" != 0 ]] && (( per >= 1 && slot <= slots )); then
+    args+=(--cpuset-cpus "$(( (slot - 1) * per ))-$(( slot * per - 1 ))")
+  fi
   args+=("$image")
 
   if ! RUNNER_JITCONFIG="$1" docker "${args[@]}" >/dev/null; then

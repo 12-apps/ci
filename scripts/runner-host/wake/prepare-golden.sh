@@ -12,7 +12,7 @@
 set -euo pipefail
 [[ ${EUID} -eq 0 ]] || { echo "prepare-golden: run as root" >&2; exit 1; }
 here="$(cd "$(dirname "$0")" && pwd)"
-slots="${1:-3}"
+slots="${1:-2}"
 
 CI_RUNNER_TOKEN="" CI_RUNNER_TOKEN_PARAMETER="${CI_RUNNER_TOKEN_PARAMETER:-/ci-runner/github-app-key}" \
 CI_RUNNER_IDLE_MINUTES="${CI_RUNNER_IDLE_MINUTES:-5}" \

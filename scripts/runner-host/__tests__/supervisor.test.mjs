@@ -101,7 +101,7 @@ function runOnce(env = {}, opts = {}) {
   // it writes to in production, never goes away under it.
   const errPath = path.join(dir, "stderr.txt");
   const errFd = openSync(errPath, "w");
-  const result = spawnSync("bash", [SCRIPT, "1"], {
+  const result = spawnSync("bash", [SCRIPT, opts.slot ?? "1"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", errFd],
     timeout: opts.stopAfterMs ?? 30_000,
@@ -167,6 +167,26 @@ test("starts the job container isolated, capped, sized for Chromium, without the
   assert.equal(argAfter(a, "--env"), "RUNNER_JITCONFIG", "the JIT must be passed by name");
   assert.ok(!a.some((x) => x.includes(JIT)), "the JIT config leaked onto docker's argv");
   assert.equal(run.jit, JIT, "docker did not receive the JIT config through its environment");
+});
+
+test("each slot owns its own cores, so the tools inside size themselves to what they get", () => {
+  const cpuset = (slot, env = {}) =>
+    argAfter(dockerRun(runOnce({ CI_RUNNER_SLOTS: "2", CI_RUNNER_NPROC: "8", ...env }, { slot }).calls).argv, "--cpuset-cpus");
+  assert.equal(cpuset("1"), "0-3");
+  assert.equal(cpuset("2"), "4-7");
+  assert.equal(cpuset("2", { CI_RUNNER_SLOTS: "3" }), "2-3", "8 cores / 3 slots = 2 each; the spare core is left over");
+});
+
+test("pinning is off on request, and when there are fewer cores than slots", () => {
+  const argv = (env) => dockerRun(runOnce({ CI_RUNNER_SLOTS: "2", CI_RUNNER_NPROC: "8", ...env }).calls).argv;
+  assert.ok(!argv({ CI_RUNNER_PIN_CPUS: "0" }).includes("--cpuset-cpus"));
+  assert.ok(!argv({ CI_RUNNER_SLOTS: "4", CI_RUNNER_NPROC: "2" }).includes("--cpuset-cpus"));
+});
+
+test("memory `auto` is 90% of this host's RAM split across the slots, read at job start", () => {
+  const run = dockerRun(runOnce({ CI_RUNNER_MEMORY: "auto", CI_RUNNER_SLOTS: "2", CI_RUNNER_MEM_MB: "32000" }).calls);
+  assert.equal(argAfter(run.argv, "--memory"), "14400m");
+  assert.equal(argAfter(run.argv, "--memory-swap"), "14400m");
 });
 
 test("the container is removed after the job, whatever it did", () => {
