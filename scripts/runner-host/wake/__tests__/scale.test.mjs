@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { createHmac } from "node:crypto";
 import { test } from "node:test";
-import { makeScaler } from "../scale.mjs";
+import { makeScaler, openPools } from "../scale.mjs";
 
 // The fleet grows to the queue and never past the cap. Getting it wrong one
 // way leaves PRs waiting for a slot; the other way bills idle machines.
@@ -191,4 +191,15 @@ test("re-runs stop at the attempt cap, successes and foreign runs are ignored", 
     await finish(opts);
     assert.deepEqual(reruns, [], JSON.stringify(opts));
   }
+});
+
+test("a pool at the cap is skipped, so a burst spreads across pools", () => {
+  const o = [{ InstanceType: "m7a", SubnetId: "a" }, { InstanceType: "m7a", SubnetId: "b" }, { InstanceType: "r7a", SubnetId: "a" }];
+  const inPool = new Map([["m7a@a", 2], ["m7a@b", 1]]);
+  assert.deepEqual(openPools(o, inPool, 2).map((p) => `${p.InstanceType}@${p.SubnetId}`), ["m7a@b", "r7a@a"]);
+});
+
+test("when every pool is at the cap, all of them stay open: a waiting job costs more", () => {
+  const o = [{ InstanceType: "m7a", SubnetId: "a" }, { InstanceType: "r7a", SubnetId: "a" }];
+  assert.equal(openPools(o, new Map([["m7a@a", 2], ["r7a@a", 5]]), 2).length, 2);
 });

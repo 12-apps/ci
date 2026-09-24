@@ -13,7 +13,8 @@
 # Env: AWS_REGION (us-east-1), REPOSITORY (12-apps/future-pay), RUNNER_LABEL
 # (future-pay-ci), INSTANCE_TYPES (current 8-vCPU x86 types, 32 GB m and 64 GB r:
 # more spot pools, fewer reclaims; m5a is left out, its first-generation EPYC is
-# slower per core than the runner the lanes are tuned for),
+# slower per core than the runner the lanes are tuned for, and m7i-flex, the
+# shallowest pool: nine of eighteen reclaims on 2026-09-24),
 # SLOTS_PER_HOST (2: a 4-core, 14 GB slot, like the 4-vCPU runner the lanes are
 # tuned for), MAX_HOSTS (30; 30 × 8 vCPU must fit the account's spot vCPU
 # quota, L-34B43A08), POOL_SIZE (0; stopped hosts kept warm, see README), TOKEN_PARAMETER
@@ -26,7 +27,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 region="${AWS_REGION:-us-east-1}"
 repo="${REPOSITORY:-12-apps/future-pay}"
 label="${RUNNER_LABEL:-future-pay-ci}"
-types="${INSTANCE_TYPES:-m7a.2xlarge,m6a.2xlarge,m7i.2xlarge,m7i-flex.2xlarge,m6i.2xlarge,r7a.2xlarge,r6a.2xlarge,r7i.2xlarge,r6i.2xlarge}"
+types="${INSTANCE_TYPES:-m7a.2xlarge,m6a.2xlarge,m7i.2xlarge,m6i.2xlarge,r7a.2xlarge,r6a.2xlarge,r7i.2xlarge,r6i.2xlarge}"
 slots="${SLOTS_PER_HOST:-2}"
 max_hosts="${MAX_HOSTS:-30}"
 pool_size="${POOL_SIZE:-0}"
@@ -190,10 +191,10 @@ cp "$here/wake.mjs" "$here/scale.mjs" "$here/index.mjs" "$work/"
 if aws lambda get-function --function-name "$fn" >/dev/null 2>&1; then
   aws lambda update-function-code --function-name "$fn" --zip-file "fileb://$work/fn.zip" >/dev/null
   aws lambda wait function-updated-v2 --function-name "$fn"
-  aws lambda update-function-configuration --function-name "$fn" --environment "file://$work/env.json" --timeout 30 >/dev/null
+  aws lambda update-function-configuration --function-name "$fn" --environment "file://$work/env.json" --timeout 60 >/dev/null
 else
   aws lambda create-function --function-name "$fn" --runtime nodejs22.x --handler index.handler \
-    --role "arn:aws:iam::${account}:role/${role}" --timeout 30 --memory-size 256 \
+    --role "arn:aws:iam::${account}:role/${role}" --timeout 60 --memory-size 256 \
     --zip-file "fileb://$work/fn.zip" --environment "file://$work/env.json" --tags Project=ci-runner >/dev/null
 fi
 aws lambda wait function-updated-v2 --function-name "$fn"

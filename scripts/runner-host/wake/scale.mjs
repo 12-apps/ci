@@ -42,6 +42,18 @@ const reply = (statusCode, message, extra = {}) => ({ statusCode, body: JSON.str
  */
 export const MAX_ATTEMPTS = 3;
 
+/**
+ * The spot pools (type@subnet) a launch may still use: those holding fewer
+ * than `perPool` live hosts. When every pool is at the cap the whole list
+ * comes back, because a job waiting costs more than a crowded pool.
+ * @param {{ InstanceType: string, SubnetId: string }[]} overrides
+ * @param {Map<string, number>} inPool live hosts per `type@subnet`
+ */
+export function openPools(overrides, inPool, perPool) {
+  const room = overrides.filter((o) => (inPool.get(`${o.InstanceType}@${o.SubnetId}`) ?? 0) < perPool);
+  return room.length ? room : overrides;
+}
+
 export function makeScaler({ secret, label, repo, github, ec2, slotsPerHost = 3, maxHosts = 30, bootSeconds = 180, now = () => Date.now() }) {
   async function recover(run) {
     if (run.conclusion !== "failure") return reply(202, `run ${run.conclusion}`);
