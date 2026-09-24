@@ -83,7 +83,30 @@ const fleet = {
   },
 };
 
-export const handler = (env.MODE ?? "scale") === "wake"
+// Called by deploy.sh with `aws lambda invoke` (IAM-authorised; never reachable
+// through the public URL, whose events always carry requestContext.http):
+// create or update the repository webhook that points at this function.
+async function ensureWebhook(url) {
+  const token = await githubToken();
+  const call = async (method, path, body) => {
+    const res = await fetch(`https://api.github.com/repos/${env.REPOSITORY}${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
+      body: body && JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`GitHub ${res.status} on ${method} ${path}: ${await res.text()}`);
+    return res.json();
+  };
+  const hook = {
+    name: "web", active: true, events: ["workflow_job"],
+    config: { url, content_type: "json", insecure_ssl: "0", secret: env.WEBHOOK_SECRET },
+  };
+  const existing = (await call("GET", "/hooks?per_page=100")).find((h) => h.config?.url === url);
+  const saved = existing ? await call("PATCH", `/hooks/${existing.id}`, hook) : await call("POST", "/hooks", hook);
+  return { webhook: existing ? "updated" : "created", id: saved.id };
+}
+
+const serve = (env.MODE ?? "scale") === "wake"
   ? makeHandler({
       secret: env.WEBHOOK_SECRET, instanceId: env.INSTANCE_ID, label: env.RUNNER_LABEL, repo: env.REPOSITORY,
       ec2: {
@@ -98,3 +121,6 @@ export const handler = (env.MODE ?? "scale") === "wake"
       secret: env.WEBHOOK_SECRET, label: env.RUNNER_LABEL, repo: env.REPOSITORY, github, ec2: fleet,
       slotsPerHost: Number(env.SLOTS_PER_HOST ?? 3), maxHosts: Number(env.MAX_HOSTS ?? 30),
     });
+
+export const handler = async (event) =>
+  event?.setup === "webhook" && !event.requestContext ? ensureWebhook(event.url) : serve(event);

@@ -41,8 +41,18 @@ if [[ -z "${AMI_ID:-}" ]]; then
   AMI_ID=$(aws ec2 create-image --instance-id "$GOLDEN_INSTANCE_ID" --name "$name" \
     --tag-specifications "ResourceType=image,Tags=[{Key=Project,Value=ci-runner}]" \
     "ResourceType=snapshot,Tags=[{Key=Project,Value=ci-runner}]" --query ImageId)
-  aws ec2 wait image-available --image-ids "$AMI_ID"
+  # A 100+ GB root takes longer than the CLI waiter's 10 minutes to snapshot.
+  for _ in $(seq 1 180); do
+    state=$(aws ec2 describe-images --image-ids "$AMI_ID" --query 'Images[0].State')
+    [[ "$state" == available ]] && break
+    [[ "$state" == failed ]] && { echo "deploy: ${AMI_ID} failed" >&2; exit 1; }
+    sleep 20
+  done
+  [[ "$state" == available ]] || { echo "deploy: ${AMI_ID} still ${state} after an hour" >&2; exit 1; }
 fi
+# The root volume can be no smaller than the image's snapshot.
+root_gb=$(aws ec2 describe-images --image-ids "$AMI_ID" --query 'Images[0].BlockDeviceMappings[0].Ebs.VolumeSize')
+root_device=$(aws ec2 describe-images --image-ids "$AMI_ID" --query 'Images[0].RootDeviceName')
 src="${GOLDEN_INSTANCE_ID:-}"
 if [[ -n "$src" ]]; then
   read -r subnet sg profile_arn < <(aws ec2 describe-instances --instance-ids "$src" \
@@ -55,14 +65,15 @@ host_role=$(aws iam get-instance-profile --instance-profile-name "${profile_arn#
 
 # ── launch template: throwaway spot hosts that terminate when idle ──────────
 data=$(jq -n --arg ami "$AMI_ID" --arg type "${types%%,*}" --arg profile "$profile_arn" \
-  --arg subnet "$subnet" --arg sg "$sg" --arg label "$label" '{
+  --arg subnet "$subnet" --arg sg "$sg" --arg label "$label" \
+  --arg dev "$root_device" --argjson gb "$root_gb" '{
   ImageId: $ami, InstanceType: $type,
   IamInstanceProfile: {Arn: $profile},
   NetworkInterfaces: [{DeviceIndex: 0, SubnetId: $subnet, Groups: [$sg], AssociatePublicIpAddress: true}],
   MetadataOptions: {HttpTokens: "required", HttpEndpoint: "enabled"},
   InstanceMarketOptions: {MarketType: "spot", SpotOptions: {SpotInstanceType: "one-time", InstanceInterruptionBehavior: "terminate"}},
   InstanceInitiatedShutdownBehavior: "terminate",
-  BlockDeviceMappings: [{DeviceName: "/dev/sda1", Ebs: {VolumeSize: 80, VolumeType: "gp3", Encrypted: true, DeleteOnTermination: true}}],
+  BlockDeviceMappings: [{DeviceName: $dev, Ebs: {VolumeSize: $gb, VolumeType: "gp3", Encrypted: true, DeleteOnTermination: true}}],
   TagSpecifications: [
     {ResourceType: "instance", Tags: [{Key: "Project", Value: "ci-runner"}, {Key: "Name", Value: "ci-runner-fleet"}, {Key: "ci-runner-fleet", Value: $label}]},
     {ResourceType: "volume", Tags: [{Key: "Project", Value: "ci-runner"}]}
@@ -143,14 +154,25 @@ for _ in 1 2 3 4 5 6; do
 done
 [[ "$answer" == *pong* ]] || { echo "deploy: the function URL did not answer a signed ping: $answer" >&2; exit 1; }
 
+# ── webhook: the function creates it (token from SSM needs Webhooks: write) ─
+hook="not created (CREATE_WEBHOOK=0)"
+if [[ "${CREATE_WEBHOOK:-1}" == 1 ]]; then
+  jq -n --arg u "$url" '{setup: "webhook", url: $u}' > "$work/setup.json"
+  aws lambda invoke --function-name "$fn" --cli-binary-format raw-in-base64-out \
+    --payload "file://$work/setup.json" "$work/setup.out" >/dev/null
+  hook=$(jq -r 'if .webhook then "\(.webhook) (id \(.id))" else "FAILED: \(.errorMessage // .)" end' "$work/setup.out")
+  [[ "$hook" != FAILED* ]] || { echo "deploy: webhook ${hook}" >&2; exit 1; }
+fi
+
 cat <<DONE
 deploy: fleet ready. AMI ${AMI_ID}, template ${template}, up to ${max_hosts} hosts × ${slots} slots.
 Scaler: ${url}
 
-If the webhook is not there yet, add it on github.com/${repo} → Settings → Webhooks:
+Webhook on ${repo}: ${hook}. To add it by hand instead (CREATE_WEBHOOK=0), use Settings → Webhooks:
   Payload URL   ${url}
   Content type  application/json
   Secret        the contents of ${secret_file}
   Events        only "Workflow jobs"
-The token in ${param} must also have Actions: Read, so the scaler can count the queue.
+The token in ${param} needs Actions: Read (the scaler counts the queue) and, for the
+webhook step, Webhooks: Read and write.
 DONE
