@@ -60,7 +60,7 @@ const fleet = {
   },
   // Spot capacity for one type can run out; the next type in INSTANCE_TYPES
   // (same size class) is tried before the queue is left waiting.
-  async launch(n) {
+  async launch(n, clientToken) {
     const types = (env.INSTANCE_TYPES ?? "").split(",").map((t) => t.trim()).filter(Boolean);
     let lastError;
     for (const type of types.length ? types : [undefined]) {
@@ -68,6 +68,8 @@ const fleet = {
         const out = await ec2.send(new RunInstancesCommand({
           LaunchTemplate: { LaunchTemplateName: env.LAUNCH_TEMPLATE, Version: "$Default" },
           ...(type ? { InstanceType: type } : {}),
+          // Idempotent per type: a retry with the next type is a new request.
+          ClientToken: `${clientToken}-${type ?? "default"}`.slice(0, 64),
           MinCount: 1,
           MaxCount: n,
         }));

@@ -11,12 +11,13 @@ const NOW = 1_800_000_000_000;
 
 function fleet({ queued, idle, hosts = [] }) {
   const launches = [];
+  const tokens = [];
   const scaler = makeScaler({
     secret: SECRET, label: "fp-ci", repo: "acme/app", slotsPerHost: 3, maxHosts: 5, bootSeconds: 180, now: () => NOW,
     github: { queuedJobs: async () => queued, idleRunners: async () => idle },
     ec2: {
       hosts: async () => hosts,
-      launch: async (n) => { launches.push(n); return Array.from({ length: n }, (_, i) => `i-new${i}`); },
+      launch: async (n, token) => { launches.push(n); tokens.push(token); return Array.from({ length: n }, (_, i) => `i-new${i}`); },
     },
   });
   const deliver = async ({ action = "queued", labels = ["fp-ci"], repo = "acme/app", sig } = {}) => {
@@ -27,7 +28,7 @@ function fleet({ queued, idle, hosts = [] }) {
     });
     return { status: res.statusCode, ...JSON.parse(res.body) };
   };
-  return { deliver, launches };
+  return { deliver, launches, tokens };
 }
 
 const up = (ageSeconds) => ({ id: "i-x", state: "running", launchedAt: NOW - ageSeconds * 1000 });
@@ -76,4 +77,13 @@ test("unsigned, foreign or unrelated deliveries launch nothing", async () => {
     await deliver(opts);
     assert.deepEqual(launches, [], JSON.stringify(opts));
   }
+});
+
+test("two evaluations that reach the same answer at once launch with the same idempotency token", async () => {
+  const { deliver, tokens } = fleet({ queued: 6, idle: 0 });
+  await deliver();
+  await deliver();
+  assert.equal(tokens.length, 2);
+  assert.equal(tokens[0], tokens[1], "EC2 would launch twice");
+  assert.match(tokens[0], /^fleet-fp-ci-\d+-2$/);
 });

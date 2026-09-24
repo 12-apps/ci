@@ -7,9 +7,12 @@
 //
 // Called for every `workflow_job` delivery. `queued` and `completed` both
 // re-evaluate: the first adds demand, the second is the moment a burst that
-// arrived faster than hosts boot is noticed again. The function runs with a
-// reserved concurrency of 1, so evaluations never overlap and a burst of a
-// hundred deliveries launches what the queue needs, not a hundred hosts.
+// arrived faster than hosts boot is noticed again. Evaluations can overlap (a
+// new account cannot reserve Lambda concurrency), so a launch carries an EC2
+// ClientToken made of the 30-second window and the fleet size it aims for:
+// two evaluations that reach the same answer at once launch it once. Hosts
+// still booting count as capacity, so a burst of a hundred deliveries
+// launches what the queue needs, not a hundred hosts.
 //
 //   deficit = queued jobs − idle runners − slots on hosts still booting
 //   launch  = ceil(deficit / slotsPerHost), capped at maxHosts
@@ -22,7 +25,7 @@ const reply = (statusCode, message, extra = {}) => ({ statusCode, body: JSON.str
 /**
  * @param {object} cfg
  * @param {{ queuedJobs(label: string): Promise<number>, idleRunners(label: string): Promise<number> }} cfg.github
- * @param {{ hosts(): Promise<{ id: string, state: string, launchedAt: number }[]>, launch(n: number): Promise<string[]> }} cfg.ec2
+ * @param {{ hosts(): Promise<{ id: string, state: string, launchedAt: number }[]>, launch(n: number, token: string): Promise<string[]> }} cfg.ec2
  */
 export function makeScaler({ secret, label, repo, github, ec2, slotsPerHost = 3, maxHosts = 30, bootSeconds = 180, now = () => Date.now() }) {
   async function evaluate() {
@@ -33,7 +36,8 @@ export function makeScaler({ secret, label, repo, github, ec2, slotsPerHost = 3,
     const deficit = queued - idle - booting.length * slotsPerHost;
     const room = Math.max(0, maxHosts - live.length);
     const launch = Math.min(room, Math.max(0, Math.ceil(deficit / slotsPerHost)));
-    const launched = launch > 0 ? await ec2.launch(launch) : [];
+    const token = `fleet-${label}-${Math.floor(now() / 30_000)}-${live.length + launch}`;
+    const launched = launch > 0 ? await ec2.launch(launch, token) : [];
     const decision = { queued, idle, hosts: live.length, booting: booting.length, launched: launched.length };
     console.log(JSON.stringify(decision));
     if (deficit > 0 && room === 0) console.log(`at the ${maxHosts}-host cap; ${deficit} job(s) wait`);

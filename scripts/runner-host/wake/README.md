@@ -7,7 +7,7 @@ queue at once, and every host terminates itself when it goes idle.
 ```
 GitHub ──workflow_job──▶ Lambda (scale.mjs) ──RunInstances(template)──▶ N spot hosts
                               │  queued jobs − idle runners − booting slots
-                              └─ reserved concurrency 1: one evaluation at a time
+                              └─ launches carry an idempotent ClientToken
 host: boots from the AMI → token from SSM → 3 slots → idle 5 min → terminates
 ```
 

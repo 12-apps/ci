@@ -133,8 +133,9 @@ else
     --zip-file "fileb://$work/fn.zip" --environment "file://$work/env.json" --tags Project=ci-runner >/dev/null
 fi
 aws lambda wait function-updated-v2 --function-name "$fn"
-# One evaluation at a time: a burst of deliveries must not launch a host each.
-aws lambda put-function-concurrency --function-name "$fn" --reserved-concurrent-executions 1 >/dev/null
+# Overlapping evaluations are made safe by the launch's ClientToken
+# (scale.mjs). A new account's 10-execution Lambda limit refuses any
+# reservation, so none is made.
 
 url=$(aws lambda get-function-url-config --function-name "$fn" --query FunctionUrl 2>/dev/null || true)
 [[ -n "$url" && "$url" != None ]] || url=$(aws lambda create-function-url-config --function-name "$fn" --auth-type NONE --query FunctionUrl)
