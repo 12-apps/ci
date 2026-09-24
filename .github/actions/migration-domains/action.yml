@@ -1,0 +1,48 @@
+name: 'Migration domains'
+description: >-
+  Refuse the tree unless EVERY committed migration declares the domains it
+  affects — `-- @domains: orders, payments` — and the declaration is true: every
+  table its SQL changes belongs to a declared domain, every declared domain is
+  one it changes, and the consumer's registry places every table in exactly one
+  domain. Reads files only (no install, no database), so it can run first and
+  stop the pipeline before any test lane exists. The same parse powers the
+  database-aware selection in affected-plan.
+
+inputs:
+  registry:
+    description: >-
+      Repo-relative path to the domain registry JSON:
+      `{ "domains": { "<id>": { "description": "…", "tables": ["…"] } } }`.
+    required: true
+  schema:
+    description: >-
+      Comma-separated Prisma schema files or directories. Optional; when set,
+      every table a model maps must belong to a domain too, so a table can never
+      exist without an owner a future migration could declare.
+    required: false
+    default: ''
+  migrations:
+    description: >-
+      Path glob selecting the migration files (`**` any depth, `*` one path
+      segment). Every committed match is checked — the whole history, not only
+      the diff.
+    required: false
+    default: '**/prisma/migrations/*/migration.sql'
+  working-directory:
+    description: 'Consumer checkout root the paths are relative to.'
+    required: false
+    default: '.'
+
+runs:
+  using: composite
+  steps:
+    - name: Every migration declares, truthfully, the domains it affects
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        SCHEMA: ${{ inputs.schema }}
+        MIGRATIONS: ${{ inputs.migrations }}
+      run: |
+        set -euo pipefail
+        node "$GITHUB_ACTION_PATH/check.mjs" --registry "$REGISTRY" --schema "$SCHEMA" --migrations "$MIGRATIONS"

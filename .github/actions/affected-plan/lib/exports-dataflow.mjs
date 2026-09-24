@@ -47,7 +47,9 @@ const LOCAL_EXPORT_LIST = /^export\s*\{([^}]*)\}\s*;?$/;
  * bracketed safely (see the module docblock).
  *
  * @param {string} source
- * @returns {{name: string, exported: boolean, refs: Set<string>}[] | null}
+ * @returns {{name: string, exported: boolean, refs: Set<string>, text: string}[] | null}
+ *   `text` is the declaration's own source, comments stripped — what a caller
+ *   searching for a pattern needs to say WHICH declaration holds it.
  */
 export function declarationsOf(source) {
   const lines = stripComments(source).split(/\r?\n/);
@@ -88,7 +90,7 @@ export function declarationsOf(source) {
       if (re) {
         for (const spec of re[1].split(",").map((x) => x.trim()).filter(Boolean)) {
           const [orig, alias] = spec.split(/\s+as\s+/).map((x) => x.trim());
-          decls.push({ name: alias ?? orig, exported: true, refs: new Set([`${re[2]}#${orig}`]) });
+          decls.push({ name: alias ?? orig, exported: true, refs: new Set([`${re[2]}#${orig}`]), text: line });
         }
         continue;
       }
@@ -110,14 +112,17 @@ export function declarationsOf(source) {
       }
 
       const m = DECL.exec(line);
-      if (m) current = { name: m[3], exported: Boolean(m[1]), refs: new Set() };
+      if (m) current = { name: m[3], exported: Boolean(m[1]), refs: new Set(), text: "" };
       // A continuation of a multi-line type union or a chained call never opens
       // a top-level statement; anything else at depth 0 is a side effect.
       else if (line && !/^[|&?:,.)}\]]/.test(line)) return null;
       if (current) decls.push(current);
     }
 
-    if (current) for (const id of raw.match(/[A-Za-z_$][\w$]*/g) ?? []) current.refs.add(id);
+    if (current) {
+      for (const id of raw.match(/[A-Za-z_$][\w$]*/g) ?? []) current.refs.add(id);
+      current.text += `${raw}\n`;
+    }
     depth = Math.max(0, depth + opens - closes);
     // A declaration ends when the braces balance AND the line terminates it. A
     // multi-line union type never opens a brace, so `;` is what closes it.

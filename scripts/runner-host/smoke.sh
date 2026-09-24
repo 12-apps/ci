@@ -22,9 +22,13 @@ dockerd >/var/log/dockerd.log 2>&1 &
 for _ in $(seq 1 120); do docker info >/dev/null 2>&1 && break; sleep 0.5; done
 runuser -u runner -- env ${NODE_EXTRA_CA_CERTS:+NODE_EXTRA_CA_CERTS="$NODE_EXTRA_CA_CERTS"} bash -euo pipefail -c "
   sudo -n true
-  for t in git git-lfs jq gh curl zip unzip xz zstd ssh rsync python3 gcc make docker; do
+  # node before any setup-node: workflows call it in their first steps.
+  for t in git git-lfs jq gh curl zip unzip xz zstd ssh rsync python3 gcc make docker \
+           shellcheck node npm npx; do
     command -v \$t >/dev/null || { echo \"smoke: missing \$t\" >&2; exit 1; }
   done
+  node -e \"process.exit(Number(process.versions.node.split(\\\".\\\")[0]) >= 20 ? 0 : 1)\" \
+    || { echo \"smoke: system node is older than 20\" >&2; exit 1; }
   docker buildx version >/dev/null
   docker compose version >/dev/null
 

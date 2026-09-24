@@ -102,12 +102,23 @@ export function selectAffected(options) {
   // and strictly wider than ignoring it — the two things a codegen input must
   // sit between. Routing is opt-in per repo and per lane, because only the
   // caller knows whether its generator's output really is that one file.
+  //
+  // A route may also answer with an OBJECT, `{ entries }`, and that form is
+  // classified even when the list is empty: the database router proves some
+  // changes observable by nothing (a comment added to a migration, a plain
+  // index), and "routed to nothing" must not read as "unclassified". An entry
+  // may name symbols — `file#a,b` — and only those are seeded, so a route can
+  // be as narrow as the change it stands for.
   const routedFrom = new Map();
   const direct = [];
+  const unobservable = [];
   for (const file of relevant) {
-    const entries = routeOf(file);
+    const routed = routeOf(file);
+    const classified = !Array.isArray(routed);
+    const entries = classified ? routed.entries : routed;
     if (entries.length === 0) {
-      direct.push(file);
+      if (classified) unobservable.push(file);
+      else direct.push(file);
       continue;
     }
     for (const entry of entries) {
@@ -226,17 +237,24 @@ export function selectAffected(options) {
   // is reported rather than silently dropped.
   for (const [file, syms] of affected) if (syms !== "*" && syms.size === 0) affected.delete(file);
 
-  // Routed entries are seeded AFTER that pruning, and always as `*`: the entry
-  // file's own bytes did not move, so a symbol diff over it would find nothing
-  // and prune it away — which would silently drop the change that routed here.
+  // Routed entries are seeded AFTER that pruning: the entry file's own bytes
+  // did not move, so a symbol diff over it would find nothing and prune it
+  // away — which would silently drop the change that routed here. A bare entry
+  // seeds every export (`*`); `file#a,b` seeds exactly those.
   for (const [entry, sources] of routedFrom) {
-    affected.set(entry, "*");
-    symbolReport[entry] = ["*"];
-    routeReport[entry] = sources;
+    const hash = entry.indexOf("#");
+    const file = hash === -1 ? entry : entry.slice(0, hash);
+    const names = hash === -1 ? null : entry.slice(hash + 1).split(",").filter(Boolean);
+    const previous = affected.get(file);
+    const next = !names || names.length === 0 || previous === "*" ? "*" : new Set([...(previous ?? []), ...names]);
+    affected.set(file, next);
+    symbolReport[file] = next === "*" ? ["*"] : [...next].sort();
+    routeReport[file] = [...new Set([...(routeReport[file] ?? []), ...sources])];
   }
 
   if (affected.size === 0) {
     return {
+      ...(unobservable.length ? { unobservable } : {}),
       mode: "none",
       tests: [],
       reasons: {},
@@ -330,6 +348,7 @@ export function selectAffected(options) {
   }
 
   return {
+    ...(unobservable.length ? { unobservable } : {}),
     mode: tests.length > 0 ? "narrowed" : "none",
     tests,
     reasons,

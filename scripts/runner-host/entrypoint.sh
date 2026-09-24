@@ -26,4 +26,6 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 cd /home/runner/actions-runner
+# With a per-job disk the workspace is a bind mount the host created as root.
+mkdir -p _work && chown runner:runner _work
 exec runuser -u runner -- ./run.sh --jitconfig "$jit"

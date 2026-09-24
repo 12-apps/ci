@@ -64,31 +64,58 @@ leaves room under $100 for the jobs that stay hosted (below).
 
 ## Install
 
-1. **A token that can mint runners.** Fine-grained PAT, resource owner = the
-   org:
-   - repo runners: *Repository access* = the repo, *Administration: Read and
-     write*;
-   - org runners (serves every repo): *Organization permissions → Self-hosted
-     runners: Read and write*.
-2. **On the machine** (fresh Ubuntu 24.04, as root):
+**Prerequisites:** a dedicated Ubuntu 24.04 x86-64 machine, root, outbound
+HTTPS to `github.com`, `api.github.com`, `*.actions.githubusercontent.com` and
+the npm registry. No inbound port. The installer adds Docker, jq, openssl and
+e2fsprogs.
+
+1. **A credential that can register runners.** Prefer a **GitHub App**:
+   *Org settings → Developer settings → GitHub Apps → New*, webhook off,
+   **Repository permissions → Administration: Read and write**, nothing else.
+   Install it on the one repository only and generate a private key. The
+   supervisor mints a 9-minute JWT from that key and exchanges it for an
+   installation token narrowed to `administration: write` on that repository.
+   Neither ever reaches a job. A fine-grained PAT with the same permission
+   also works (`CI_RUNNER_TOKEN`). For org-wide runners use *Organization
+   permissions → Self-hosted runners: Read and write* and
+   `CI_RUNNER_SCOPE=orgs/<org>`.
+2. **On the machine**, as root:
 
    ```bash
    git clone https://github.com/12-apps/ci /opt/src/ci
    cd /opt/src/ci/scripts/runner-host
-   CI_RUNNER_TOKEN=github_pat_... \
-   CI_RUNNER_SCOPE=repos/12-apps/future-pay \
-   CI_RUNNER_LABELS=future-pay-ci \
-   ./install.sh 8
+   CI_RUNNER_APP_ID=123456 CI_RUNNER_APP_KEY_FILE=/root/app.pem \
+   CI_RUNNER_SCOPE=repos/12-apps/future-pay CI_RUNNER_LABELS=future-pay-ci \
+   CI_RUNNER_DISK=60G ./install.sh 8
+   shred -u /root/app.pem          # the installer keeps its own 0600 copy
    ```
 
-   The install checks that the token can list runners before it does anything
-   else. It builds the image, then enables `ci-runner@1..8`. The runners then
-   show up under *Settings → Actions → Runners* as Idle.
+   The install first proves the credential can manage runners on the scope,
+   then builds the image and enables `ci-runner@1..8`. The runners show up
+   under *Settings → Actions → Runners* as Idle.
 3. **Flip the switch** in the repo: *Settings → Secrets and variables → Actions
    → Variables → New repository variable* `CI_RUNNER` = `future-pay-ci`.
 
-Re-run `install.sh` at any time to change the slot count or rotate the token.
-Leave the token out and it keeps the one already installed.
+Re-run `install.sh` at any time to change the slot count or limits, or to
+rotate the credential. Values you leave out keep what is installed.
+
+### Limits (per job)
+
+| setting | default | what it does |
+|---|---|---|
+| `CI_RUNNER_MEMORY` | 90% of RAM ÷ slots | hard cap, swap included; the job is OOM-killed alone |
+| `CI_RUNNER_CPUS` | 2 × cores ÷ slots | CPU quota; a job can use up to twice its fair share |
+| `CI_RUNNER_DISK` | unbounded | the workspace and the job's Docker data on a fresh ext4 file of this size |
+| `CI_RUNNER_JOB_TIMEOUT_MINUTES` | 360 | wall-clock cap from the moment a job starts; waiting for a job is not capped |
+
+### Private npm packages
+
+The token stays a GitHub **secret** and only lives in the job's environment.
+future-pay maps `secrets.NPM_TOKEN` to `NODE_AUTH_TOKEN` and points
+`NPM_CONFIG_USERCONFIG` at an `.npmrc` whose line is
+`//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}`. The file holds the
+variable reference, never the value; pnpm expands it in memory. Whatever a job
+writes (npm config, caches, credentials) dies with its container.
 
 ## The switch, and how to undo it
 
@@ -118,15 +145,70 @@ removed.
 ## Operating it
 
 ```bash
-systemctl status 'ci-runner@*'            # one line per slot
-journalctl -u ci-runner@3 -f              # that slot's registrations and exits
-docker ps --filter name=ci-runner-        # the jobs running right now
-systemctl start ci-runner-image           # rebuild the image now
+ci-runner-status                          # every slot: service, phase, job, PID, heartbeat, CPU/RAM/disk, last failure
+ci-runner-status --json                   # same, for a probe (exit 1 when a slot is unhealthy)
+journalctl -u 'ci-runner@*' -f            # registrations, job start/finish, failures
+journalctl -t ci-runner-3 -f              # slot 3's runner output
+systemctl restart 'ci-runner@*'           # cancels running jobs; slots re-register
+systemctl stop 'ci-runner@*'              # stop taking jobs (jobs queue on GitHub)
+systemctl start ci-runner-image           # rebuild the image now (also weekly)
 ```
+
+Logs go to journald, capped at 2 GB and 30 days
+(`/etc/systemd/journald.conf.d/ci-runner.conf`). Neither the logs nor the
+state files ever hold a token: the JIT config reaches the container by
+environment variable name, and the credential never leaves the host.
+
+A failed, hung or killed job cannot leave a slot busy. The container is removed
+on every path (done, failed, timeout, `systemctl stop`, a crash of the
+supervisor on its next start), the per-job disk is unmounted and deleted, and
+an offline runner the slot left behind is deregistered before it registers
+again. A slot that is stopped while its runner waits for a job deregisters that
+runner on the way out, so `systemctl stop` or a reboot leaves nothing offline
+under Settings → Runners. Registration failures back off exponentially. After 8 in a row the
+slot's process exits, systemd restarts it 30 s later, and `ci-runner-status`
+shows the failure until it clears.
+
+### Upgrading
+
+```bash
+cd /opt/src/ci && git pull && cd scripts/runner-host && ./install.sh   # scripts + image
+systemctl start ci-runner-image                                         # image only
+```
+
+### Rotating or revoking the credential
+
+- **Rotate an App key:** generate a new private key in the App's settings, run
+  `CI_RUNNER_APP_KEY_FILE=/root/new.pem ./install.sh`, then delete the old
+  key in the App's settings.
+- **Rotate a PAT:** `CI_RUNNER_TOKEN=<new> ./install.sh`, then revoke the old one.
+- **Revoke:** uninstall first (it deregisters the runners with the credential
+  it still has), then delete the App installation or the PAT.
+
+### Uninstall
+
+```bash
+sudo /opt/ci-runner/uninstall.sh
+```
+
+This stops every slot, deregisters this host's runners, removes the units,
+images, per-job disks and state, and shreds the stored credential. Then delete
+the `CI_RUNNER` repository variable, and CI is back on GitHub's runners.
 
 ## Security
 
-The containers are `--privileged`, because a job's own dockerd needs that. A
-job can therefore do anything the machine can. That is fine for a **private
-repository whose PR authors you trust**. It is not fine for a public repository
-that runs pull requests from forks. Use this machine for nothing else.
+- **The containers are `--privileged`.** A job's own dockerd needs that (the
+  workflows use `services:`, `container:` and `docker build`). The host's
+  Docker socket is **not** mounted. A privileged job can still do anything the
+  machine can, which is why:
+- **Only trusted code runs here.** The runners are registered to **one
+  private repository**, whose pull requests come from people with write
+  access. Keep *Settings → Actions → Fork pull request workflows* disabled
+  (the default for private repositories). Never point a public repository, or
+  one that runs fork PRs, at this machine.
+- **The machine is dedicated.** Nothing else runs on it, and it holds no
+  secret except the runner credential (root-only, 0600).
+- **Least privilege:** the App's installation token is scoped to runner
+  administration on one repository and lives one hour.
+- **Limitation:** jobs share the host kernel. This is container isolation, not
+  VM isolation.
