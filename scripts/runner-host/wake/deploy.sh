@@ -30,6 +30,7 @@
 # day (BUDGET_UTC_OFFSET, -3), it shrinks to DEGRADED_MAX_HOSTS (2) spot hosts
 # until local midnight, and fires the hook in ALERT_PARAMETER
 # (/ci-runner/budget-alert, a JSON SecureString {"url", "headers"}) once.
+# SPOT_STRATEGY (capacity-optimized): the EC2 Fleet spot allocation strategy.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -44,6 +45,7 @@ daily_budget="${DAILY_BUDGET:-10}"
 degraded_max_hosts="${DEGRADED_MAX_HOSTS:-2}"
 budget_utc_offset="${BUDGET_UTC_OFFSET:--3}"
 alert_param="${ALERT_PARAMETER:-/ci-runner/budget-alert}"
+spot_strategy="${SPOT_STRATEGY:-capacity-optimized}"
 # gp3's baseline is 125 MB/s and 3000 IOPS. A job's dependency install is
 # disk-bound once the cache is found (future-pay: 529 MB restored in 2.5 s,
 # then 19 s to extract and more to link 1887 packages), so the root volume
@@ -236,10 +238,10 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 (umask 077; jq -n --rawfile s "$secret_file" --arg l "$label" --arg r "$repo" --arg t "$template" \
   --arg p "$param" --arg types "$types" --arg regions "$live_regions" --arg slots "$slots" --arg max "$max_hosts" \
-  --arg budget "$daily_budget" --arg degraded "$degraded_max_hosts" --arg offset "$budget_utc_offset" --arg alert "$alert_param" \
+  --arg budget "$daily_budget" --arg degraded "$degraded_max_hosts" --arg offset "$budget_utc_offset" --arg alert "$alert_param" --arg strategy "$spot_strategy" \
   '{Variables: {MODE: "scale", WEBHOOK_SECRET: ($s | rtrimstr("\n")), RUNNER_LABEL: $l, REPOSITORY: $r,
     LAUNCH_TEMPLATE: $t, TOKEN_PARAMETER: $p, INSTANCE_TYPES: $types, REGIONS: $regions, SLOTS_PER_HOST: $slots, MAX_HOSTS: $max,
-    DAILY_BUDGET: $budget, DEGRADED_MAX_HOSTS: $degraded, BUDGET_UTC_OFFSET: $offset, ALERT_PARAMETER: $alert}}' > "$work/env.json")
+    DAILY_BUDGET: $budget, DEGRADED_MAX_HOSTS: $degraded, BUDGET_UTC_OFFSET: $offset, ALERT_PARAMETER: $alert, SPOT_STRATEGY: $strategy}}' > "$work/env.json")
 cp "$here/wake.mjs" "$here/scale.mjs" "$here/budget.mjs" "$here/index.mjs" "$work/"
 (cd "$work" && python3 -m zipfile -c fn.zip wake.mjs scale.mjs budget.mjs index.mjs)
 if aws lambda get-function --function-name "$fn" >/dev/null 2>&1; then

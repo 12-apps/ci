@@ -10,7 +10,7 @@ import {
   DescribeSpotPriceHistoryCommand, EC2Client, GetSpotPlacementScoresCommand, StartInstancesCommand,
 } from "@aws-sdk/client-ec2";
 import { GetParameterCommand, PutParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
-import { accrue, hostCap } from "./budget.mjs";
+import { accrue, hostCap, reclaimLine } from "./budget.mjs";
 import { makeScaler, regionOrder, spotAttempts } from "./scale.mjs";
 import { makeHandler } from "./wake.mjs";
 
@@ -153,6 +153,14 @@ const instancesIn = async (r, states) => (await client(r).send(new DescribeInsta
 // Which region each host was last seen in, for start().
 const regionOf = new Map();
 
+// Which spot pool a launch asks for. price-capacity-optimized (the cheapest of
+// the deep pools) lost 41 jobs on 2026-09-24, most to hosts reclaimed a median
+// 7 minutes after launch: a burst of 20 hosts lands in pools at the edge of
+// their capacity. capacity-optimized takes the pool with the most spare
+// capacity instead, for a somewhat higher price; `reclaimed:` log lines
+// (logReclaims) measure the difference.
+const spotStrategy = env.SPOT_STRATEGY ?? "capacity-optimized";
+
 // No spot capacity in a region, or no quota left there: the next region, then on-demand.
 const NO_ROOM = new Set([
   "InsufficientInstanceCapacity", "UnfulfillableCapacity", "MaxSpotInstanceCountExceeded", "SpotMaxPriceTooLow",
@@ -255,6 +263,7 @@ async function sweepSpend({ force = false } = {}) {
       rate: stored?.live?.[i.InstanceId]?.[1] ?? await hourlyRate(r, i),
     })));
   }))).flat();
+  await logReclaims(Object.keys(stored?.live ?? {}).filter((id) => !alive.some((h) => h.id === id)));
   const state = accrue(stored, alive, Date.now(), { utcOffsetHours: budgetCfg.utcOffsetHours });
   // `alerted` holds the budget it fired for, so changing the budget re-arms it.
   if (budgetCfg.budget > 0 && state.spent >= budgetCfg.budget && state.alerted !== budgetCfg.budget) {
@@ -270,6 +279,24 @@ async function sweepSpend({ force = false } = {}) {
   sweptAt = Date.now();
   return (lastState = state);
 }
+// Hosts that left the ledger since the last sweep: say which ones AWS took
+// back, with their pool and age (budget.mjs, reclaimLine). A terminated host
+// stays describable for about an hour, which a sweep during CI always beats.
+async function logReclaims(gone) {
+  if (!gone.length) return;
+  await Promise.all(regions.map(async (r) => {
+    try {
+      const out = await client(r).send(new DescribeInstancesCommand({ Filters: [{ Name: "instance-id", Values: gone }] }));
+      for (const i of (out.Reservations ?? []).flatMap((res) => res.Instances ?? [])) {
+        const line = reclaimLine(i, r);
+        if (line) console.log(line);
+      }
+    } catch (e) {
+      console.log(`reclaims: cannot describe ended hosts in ${r}: ${e.name}`);
+    }
+  }));
+}
+
 // A sweep that fails must not stop the fleet: it keeps the last known state.
 const currentCap = async () => hostCap(await sweepSpend().catch((e) => {
   console.log(`budget: sweep failed (${e.message}); last known state`);
@@ -335,7 +362,7 @@ const fleet = {
       ClientToken: clientToken.slice(0, 64),
       TargetCapacitySpecification: { TotalTargetCapacity: 1, DefaultTargetCapacityType: market },
       ...(market === "spot"
-        ? { SpotOptions: { AllocationStrategy: "price-capacity-optimized", InstanceInterruptionBehavior: "terminate" } }
+        ? { SpotOptions: { AllocationStrategy: spotStrategy, InstanceInterruptionBehavior: "terminate" } }
         : { OnDemandOptions: { AllocationStrategy: "lowest-price" } }),
       LaunchTemplateConfigs: [{
         LaunchTemplateSpecification: { LaunchTemplateName: env.LAUNCH_TEMPLATE, Version: "$Default" },

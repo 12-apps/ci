@@ -65,3 +65,21 @@ export function accrue(state, hosts, now, { utcOffsetHours = -3, idleCapMs = 10 
 export function hostCap(state, { budget, maxHosts, degradedMaxHosts }) {
   return budget > 0 && (state?.spent ?? 0) >= budget ? Math.min(degradedMaxHosts, maxHosts) : maxHosts;
 }
+
+/**
+ * A log line for a host that AWS took back, or null for one that ended any
+ * other way (idle-stop's own poweroff is `Client.InstanceInitiatedShutdown`).
+ * The line carries the pool and the host's age, so the reclaim rate of each
+ * pool can be read back out of the logs: on 2026-09-24 the median reclaim hit
+ * a host 7 minutes after launch, which is why the age is worth recording.
+ * @param {{ InstanceId: string, InstanceType?: string, LaunchTime: string | Date,
+ *   Placement?: { AvailabilityZone?: string }, StateReason?: { Code?: string }, StateTransitionReason?: string }} i
+ * @param {string} region
+ */
+export function reclaimLine(i, region) {
+  if (i.StateReason?.Code !== "Server.SpotInstanceTermination") return null;
+  const at = /\((\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) GMT\)/.exec(i.StateTransitionReason ?? "");
+  const ended = at ? Date.parse(`${at[1].replace(" ", "T")}Z`) : NaN;
+  const age = Number.isNaN(ended) ? "?" : Math.round((ended - new Date(i.LaunchTime).getTime()) / 60_000);
+  return `reclaimed: ${i.InstanceId} ${i.InstanceType}@${i.Placement?.AvailabilityZone} (${region}) after ${age} min`;
+}
