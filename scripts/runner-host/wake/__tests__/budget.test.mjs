@@ -87,3 +87,14 @@ test("over budget, a queue of twenty launches only up to the trickle", async () 
   await call();
   assert.equal(launched.length, 10);
 });
+
+test("a host AWS took back is logged with its pool and its age; any other end is not", async () => {
+  const { reclaimLine } = await import("../budget.mjs");
+  const base = { InstanceId: "i-1", InstanceType: "m7a.2xlarge", LaunchTime: "2026-09-24T22:09:34Z", Placement: { AvailabilityZone: "us-east-2a" } };
+  assert.equal(
+    reclaimLine({ ...base, StateReason: { Code: "Server.SpotInstanceTermination" }, StateTransitionReason: "Service initiated (2026-09-24 22:16:42 GMT)" }, "us-east-2"),
+    "reclaimed: i-1 m7a.2xlarge@us-east-2a (us-east-2) after 7 min",
+  );
+  assert.equal(reclaimLine({ ...base, StateReason: { Code: "Client.InstanceInitiatedShutdown" }, StateTransitionReason: "User initiated" }, "us-east-2"), null);
+  assert.match(reclaimLine({ ...base, StateReason: { Code: "Server.SpotInstanceTermination" } }, "us-east-2"), /after \? min$/);
+});
