@@ -276,7 +276,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
-          cache: 'pnpm'
+          cache: ${{ !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
       - name: Install dependencies
         id: install
         shell: bash
@@ -1118,7 +1118,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
-          cache: 'pnpm'
+          cache: ${{ !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
       - name: Install dependencies
         shell: bash
         run: |
@@ -1266,7 +1266,7 @@ jobs:
         if: ${{ steps.changed-specs.outputs.any == 'true' }}
         with:
           node-version: ${{ inputs.node-version }}
-          cache: 'pnpm'
+          cache: ${{ !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
       - name: Install dependencies
         if: ${{ steps.changed-specs.outputs.any == 'true' }}
         shell: bash

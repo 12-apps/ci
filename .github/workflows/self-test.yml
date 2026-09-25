@@ -252,6 +252,12 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/cost-report.test.mjs
 
+      # setup-node's pnpm cache stands down where the host has a warm store.
+      # Its wrong spelling is silent: `cond && '' || 'pnpm'` always says pnpm.
+      - name: pnpm cache and the warm store
+        shell: bash
+        run: node --test .github/workflows/__tests__/pnpm-cache-warm-store.test.mjs
+
       # What a provisioned droplet actually boots with. do-provision runs
       # scripts/ephemeral/deploy-cloud-init.sh, and every way that document can
       # be wrong is silent: the API accepts any user-data at all, the droplet

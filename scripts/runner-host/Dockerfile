@@ -89,6 +89,22 @@ RUN useradd --create-home --shell /bin/bash runner \
  && chmod 0440 /etc/sudoers.d/runner \
  && install -d -o runner -g runner /opt/hostedtoolcache
 
+# The Node lines the workflows pin, already in the tool cache, so setup-node
+# finds them instead of downloading one per job (~4 s each, every job): the
+# layout is @actions/tool-cache's own, node/<version>/x64 plus an
+# x64.complete marker. With check-latest off (the default), `node-version: 24`
+# takes the newest cached 24.x. A line missing here is still downloaded.
+ARG TOOLCACHE_NODE_MAJORS="24 22 20"
+RUN index=$(curl -fsSL https://nodejs.org/dist/index.json) \
+ && for major in ${TOOLCACHE_NODE_MAJORS}; do \
+      v=$(printf '%s' "$index" | jq -r --arg m "v${major}." '[.[] | select(.version | startswith($m))][0].version'); \
+      dir="/opt/hostedtoolcache/node/${v#v}/x64"; \
+      mkdir -p "$dir" \
+      && curl -fsSL "https://nodejs.org/dist/${v}/node-${v}-linux-x64.tar.xz" | tar -xJ -C "$dir" --strip-components=1 \
+      && "$dir/bin/node" --version && touch "${dir}.complete" || exit 1; \
+    done \
+ && chown -R runner:runner /opt/hostedtoolcache
+
 WORKDIR /home/runner/actions-runner
 RUN test -n "$RUNNER_VERSION" \
  && curl -fsSL -o runner.tgz \

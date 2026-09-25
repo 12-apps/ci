@@ -192,6 +192,17 @@ test("memory `auto` is 90% of this host's RAM split across the slots, read at jo
   assert.equal(argAfter(run.argv, "--memory-swap"), "14400m");
 });
 
+test("a warm pnpm store is shared into every job, and only when the host has one", () => {
+  const store = mkdtempSync(path.join(tmpdir(), "pnpm-store-"));
+  const argv = dockerRun(runOnce({ CI_RUNNER_PNPM_STORE: store }).calls).argv;
+  assert.ok(argv.includes(`${store}:/opt/pnpm-store`), argv.join(" "));
+  assert.ok(argv.includes("npm_config_store_dir=/opt/pnpm-store"), argv.join(" "));
+  // Configured but missing on this host (an image made without one): no mount.
+  const missing = dockerRun(runOnce({ CI_RUNNER_PNPM_STORE: path.join(store, "gone") }).calls).argv;
+  assert.ok(!missing.some((a) => a.includes("/opt/pnpm-store")), missing.join(" "));
+  assert.ok(!dockerRun(runOnce({}).calls).argv.some((a) => a.includes("/opt/pnpm-store")));
+});
+
 test("the container is removed after the job, whatever it did", () => {
   const { calls } = runOnce({}, { runPolls: 2, logs: "Running job: build\nJob build completed with result: Succeeded\n" });
   const runAt = calls.findIndex((c) => c.bin === "docker" && c.argv[0] === "run");

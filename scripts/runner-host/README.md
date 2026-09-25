@@ -120,6 +120,31 @@ future-pay maps `secrets.NPM_TOKEN` to `NODE_AUTH_TOKEN` and points
 variable reference, never the value; pnpm expands it in memory. Whatever a job
 writes (npm config, caches, credentials) dies with its container.
 
+### What a job no longer downloads
+
+Every job used to fetch the same two things before doing any work: a Node
+from GitHub (~4 s) and setup-node's pnpm cache (508 MB for future-pay, ~13 s,
+and ~50 MB/s from Stockholm). Together that was about a tenth of the fleet's
+job time. Both now come with the host:
+
+- **Node in the tool cache.** The image carries the newest 24.x, 22.x and 20.x
+  under `/opt/hostedtoolcache` (`TOOLCACHE_NODE_MAJORS`), in
+  `@actions/tool-cache`'s own layout, so `setup-node` finds `24` locally.
+- **A warm pnpm store.** `prepare-golden.sh` with `PNPM_STORE_PACKAGES` runs
+  `warm-pnpm-store.sh`, which fills `/var/lib/ci-runner/pnpm-store` from the
+  job image. `supervisor.sh` mounts it into every job at `/opt/pnpm-store` with
+  `npm_config_store_dir` pointing there; the slots share it, since pnpm's store
+  is content-addressed and safe for concurrent installs. The package list comes
+  from `pnpm-store-packages.mjs` over the consumer's lockfile, minus
+  `@12-apps/*`, whose restricted packages need a token the image must not hold,
+  so the job fetches those few itself.
+
+setup-node's cache stands down only where the caller's repository variable
+`CI_PNPM_STORE` is `warm`, which is set once the fleet's image has the store.
+Deleting the variable restores the download everywhere. A package added after
+the image was made is fetched from npm by the job, so the store only needs
+refreshing to stay fast, not to stay correct.
+
 ## The switch, and how to undo it
 
 Every job in these reusable workflows says

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Turn this host into the source of the fleet AMI (deploy.sh images it).
 #
-#   sudo ./prepare-golden.sh [slots]          (on the host, from a checkout)
+#   sudo [PNPM_STORE_PACKAGES=packages.txt] ./prepare-golden.sh [slots]   (on the host, from a checkout)
 #
 # Installs the kit in fleet mode: the token is read from SSM at every boot
 # (nothing secret on disk, so nothing secret in the image), and the host
@@ -17,6 +17,14 @@ slots="${1:-2}"
 CI_RUNNER_TOKEN="" CI_RUNNER_TOKEN_PARAMETER="${CI_RUNNER_TOKEN_PARAMETER:-/ci-runner/github-app-key}" \
 CI_RUNNER_IDLE_MINUTES="${CI_RUNNER_IDLE_MINUTES:-5}" \
   "$here/../install.sh" "$slots"
+
+# A warm pnpm store for the jobs, when a package list is given
+# (PNPM_STORE_PACKAGES, from pnpm-store-packages.mjs).
+if [[ -n "${PNPM_STORE_PACKAGES:-}" ]]; then
+  "$here/../warm-pnpm-store.sh" "$PNPM_STORE_PACKAGES" /var/lib/ci-runner/pnpm-store
+  sed -i '/^CI_RUNNER_PNPM_STORE=/d' /etc/ci-runner/env
+  echo "CI_RUNNER_PNPM_STORE=/var/lib/ci-runner/pnpm-store" >> /etc/ci-runner/env
+fi
 
 # The image carries no token and no identity of this host.
 sed -i 's/^CI_RUNNER_TOKEN=.*/CI_RUNNER_TOKEN=/' /etc/ci-runner/env
