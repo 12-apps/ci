@@ -139,6 +139,13 @@ job time. Both now come with the host:
   `@12-apps/*`, whose restricted packages need a token the image must not hold,
   so the job fetches those few itself.
 
+A host's disk is read lazily from the image's snapshot: ~116 MiB/s the first
+time a block is touched, measured on a fresh host (2026-09-25). So the store
+is kept to what a linux-x64 runner installs — the list leaves out every other
+platform's native binary, 2.9 GB of future-pay's 4.4 GB — and
+`ci-runner-prewarm.service` reads it once at boot, while the runner registers
+and the first job checks out, instead of in that job's `pnpm install`.
+
 setup-node's cache stands down only where the caller's repository variable
 `CI_PNPM_STORE` is `warm`, which is set once the fleet's image has the store.
 Deleting the variable restores the download everywhere. A package added after

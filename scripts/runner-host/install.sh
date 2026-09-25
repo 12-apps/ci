@@ -253,8 +253,27 @@ RestartSec=10
 WantedBy=multi-user.target
 UNIT
 
+# A host launched from the image reads its disk lazily from the snapshot, at
+# ~116 MiB/s the first time a block is touched (measured 2026-09-25). Reading
+# the warm pnpm store once at boot, while the runner registers and the first
+# job checks out, keeps that first read off the job's `pnpm install`.
+cat > /etc/systemd/system/ci-runner-prewarm.service <<UNIT
+[Unit]
+Description=Read the warm pnpm store once, off the first job's critical path
+ConditionPathExists=${envfile}
+
+[Service]
+Type=oneshot
+EnvironmentFile=${envfile}
+Nice=10
+ExecStart=/bin/bash -c 'store="\$\${CI_RUNNER_PNPM_STORE:-}"; [[ -d "\$\$store" ]] || exit 0; find "\$\$store" -type f -print0 | xargs -0 -r -P 32 -n 200 cat > /dev/null'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
 systemctl daemon-reload
-systemctl enable ci-runner-credential.service
+systemctl enable ci-runner-credential.service ci-runner-prewarm.service
 systemctl enable --now ci-runner-image.timer ci-runner-idle.timer
 # Running slots are DRAINED, never restarted: a restart removes the job a slot
 # is running. Each finishes its job (or releases its waiting runner at once),
