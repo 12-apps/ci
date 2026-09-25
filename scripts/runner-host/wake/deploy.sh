@@ -31,6 +31,7 @@
 # until local midnight, and fires the hook in ALERT_PARAMETER
 # (/ci-runner/budget-alert, a JSON SecureString {"url", "headers"}) once.
 # SPOT_STRATEGY (capacity-optimized): the EC2 Fleet spot allocation strategy.
+# IDLE_MINUTES (2): a host powers itself off after this long without a job.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -46,6 +47,22 @@ degraded_max_hosts="${DEGRADED_MAX_HOSTS:-2}"
 budget_utc_offset="${BUDGET_UTC_OFFSET:--3}"
 alert_param="${ALERT_PARAMETER:-/ci-runner/budget-alert}"
 spot_strategy="${SPOT_STRATEGY:-capacity-optimized}"
+idle_minutes="${IDLE_MINUTES:-2}"
+# Boot-time settings, applied to the image's /etc/ci-runner/env by cloud-init's
+# bootcmd, which runs before network-online.target and so before any runner
+# slot reads the file. No new image is needed to change them:
+#  - the idle time: every minute a host stays up past its last job is billed,
+#    and at 5 minutes that tail was about a quarter of a host's life;
+#  - the runner's name, prefixed with the host's zone (eu-north-1a-ip-…): the
+#    subnets of the fleet's regions overlap (172.31.0.0/20 is a zone in all
+#    three), so a job's region cannot be told from its runner's IP.
+user_data=$(base64 -w0 <<UD
+#cloud-config
+bootcmd:
+  - [sh, -c, "sed -i 's/^CI_RUNNER_IDLE_MINUTES=.*/CI_RUNNER_IDLE_MINUTES=${idle_minutes}/' /etc/ci-runner/env"]
+  - [sh, -c, "t=\$(curl -s -m 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60'); md() { curl -s -m 5 -H \"X-aws-ec2-metadata-token: \$t\" http://169.254.169.254/latest/meta-data/\$1; }; az=\$(md placement/availability-zone); ip=\$(md local-ipv4); [ -n \"\$az\" ] && [ -n \"\$ip\" ] || exit 0; sed -i '/^CI_RUNNER_NAME=/d' /etc/ci-runner/env; echo \"CI_RUNNER_NAME=\$az-ip-\$(echo \$ip | tr . -)\" >> /etc/ci-runner/env"]
+UD
+)
 # gp3's baseline is 125 MB/s and 3000 IOPS. A job's dependency install is
 # disk-bound once the cache is found (future-pay: 529 MB restored in 2.5 s,
 # then 19 s to extract and more to link 1887 packages), so the root volume
@@ -106,9 +123,9 @@ host_role=$(aws iam get-instance-profile --instance-profile-name "${profile_arn#
 put_template() {
   local r=$1 ami=$2 sg=$3 data v
   data=$(jq -n --arg ami "$ami" --arg type "${types%%,*}" --arg profile "$profile_arn" \
-    --arg sg "$sg" --arg label "$label" \
+    --arg sg "$sg" --arg label "$label" --arg ud "$user_data" \
     --arg dev "$root_device" --argjson gb "$root_gb" --argjson iops "$root_iops" --argjson tput "$root_throughput" '{
-    ImageId: $ami, InstanceType: $type,
+    ImageId: $ami, InstanceType: $type, UserData: $ud,
     IamInstanceProfile: {Arn: $profile},
     SecurityGroupIds: [$sg],
     MetadataOptions: {HttpTokens: "required", HttpEndpoint: "enabled"},
