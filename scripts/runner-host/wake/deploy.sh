@@ -32,6 +32,7 @@
 # (/ci-runner/budget-alert, a JSON SecureString {"url", "headers"}) once.
 # SPOT_STRATEGY (capacity-optimized): the EC2 Fleet spot allocation strategy.
 # IDLE_MINUTES (2): a host powers itself off after this long without a job.
+# PNPM_STORE (off): `on` mounts the image's warm pnpm store into every job.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -48,6 +49,8 @@ budget_utc_offset="${BUDGET_UTC_OFFSET:--3}"
 alert_param="${ALERT_PARAMETER:-/ci-runner/budget-alert}"
 spot_strategy="${SPOT_STRATEGY:-capacity-optimized}"
 idle_minutes="${IDLE_MINUTES:-2}"
+pnpm_store="${PNPM_STORE:-off}"
+[[ "$pnpm_store" == on || "$pnpm_store" == off ]] || { echo "deploy: PNPM_STORE must be on or off" >&2; exit 1; }
 # Boot-time settings, applied to the image's /etc/ci-runner/env by cloud-init's
 # bootcmd, which runs before network-online.target and so before any runner
 # slot reads the file. No new image is needed to change them:
@@ -55,12 +58,20 @@ idle_minutes="${IDLE_MINUTES:-2}"
 #    and at 5 minutes that tail was about a quarter of a host's life;
 #  - the runner's name, prefixed with the host's zone (eu-north-1a-ip-…): the
 #    subnets of the fleet's regions overlap (172.31.0.0/20 is a zone in all
-#    three), so a job's region cannot be told from its runner's IP.
+#    three), so a job's region cannot be told from its runner's IP;
+#  - the warm pnpm store, off unless PNPM_STORE=on. Mounted into a job, it
+#    sits on another mount than the workspace, so pnpm copies every file
+#    instead of hardlinking it: on 2026-09-25 future-pay's install took 30-61 s
+#    from the store against 13.6 s downloading all 1877 packages from npm into
+#    the job's own store. Node in the tool cache is unaffected.
+store_cmd=""
+[[ "$pnpm_store" == off ]] && store_cmd="  - [sh, -c, \"sed -i 's/^CI_RUNNER_PNPM_STORE=.*/CI_RUNNER_PNPM_STORE=/' /etc/ci-runner/env\"]"
 user_data=$(base64 -w0 <<UD
 #cloud-config
 bootcmd:
   - [sh, -c, "sed -i 's/^CI_RUNNER_IDLE_MINUTES=.*/CI_RUNNER_IDLE_MINUTES=${idle_minutes}/' /etc/ci-runner/env"]
   - [sh, -c, "t=\$(curl -s -m 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60'); md() { curl -s -m 5 -H \"X-aws-ec2-metadata-token: \$t\" http://169.254.169.254/latest/meta-data/\$1; }; az=\$(md placement/availability-zone); ip=\$(md local-ipv4); [ -n \"\$az\" ] && [ -n \"\$ip\" ] || exit 0; sed -i '/^CI_RUNNER_NAME=/d' /etc/ci-runner/env; echo \"CI_RUNNER_NAME=\$az-ip-\$(echo \$ip | tr . -)\" >> /etc/ci-runner/env"]
+${store_cmd}
 UD
 )
 # gp3's baseline is 125 MB/s and 3000 IOPS. A job's dependency install is

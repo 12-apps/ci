@@ -146,6 +146,15 @@ platform's native binary, 2.9 GB of future-pay's 4.4 GB — and
 `ci-runner-prewarm.service` reads it once at boot, while the runner registers
 and the first job checks out, instead of in that job's `pnpm install`.
 
+**The store is off by default (`deploy.sh` `PNPM_STORE=off`).** Measured on
+future-pay's jobs on 2026-09-25, the mounted store made installs slower, not
+faster: it is a different mount from the job's workspace, so pnpm copies every
+file instead of hardlinking it, and the install took 30–61 s. A host with no
+store and no cache downloaded all 1877 packages from npm into the job's own
+store and installed them in 13.6 s. So with `CI_PNPM_STORE=warm` a job skips
+setup-node's 508 MB cache and lets pnpm fetch from npm; the image keeps the
+store for a layout that can hardlink it, and `PNPM_STORE=on` mounts it again.
+
 setup-node's cache stands down only where the caller's repository variable
 `CI_PNPM_STORE` is `warm`, which is set once the fleet's image has the store.
 Deleting the variable restores the download everywhere. A package added after
