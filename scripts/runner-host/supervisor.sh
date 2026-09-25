@@ -306,6 +306,12 @@ run_one() {
     args+=(--volume /var/lib/docker)
   fi
   [[ "${CI_RUNNER_LOG_DRIVER:-journald}" == journald ]] && args+=(--log-opt "tag=ci-runner-${slot}")
+  # The host's warm pnpm store (warm-pnpm-store.sh), shared by the slots:
+  # pnpm's store is content-addressed and safe for concurrent installs, so a
+  # job links from local disk what setup-node's cache would otherwise download.
+  if [[ -n "${CI_RUNNER_PNPM_STORE:-}" && -d "${CI_RUNNER_PNPM_STORE}" ]]; then
+    args+=(--volume "${CI_RUNNER_PNPM_STORE}:/opt/pnpm-store" --env npm_config_store_dir=/opt/pnpm-store)
+  fi
   local memory="${CI_RUNNER_MEMORY:-}" slots="${CI_RUNNER_SLOTS:-1}"
   if [[ "$memory" == auto ]]; then
     local mem_mb="${CI_RUNNER_MEM_MB:-$(awk '/MemTotal/ {print int($2 / 1024)}' /proc/meminfo)}"

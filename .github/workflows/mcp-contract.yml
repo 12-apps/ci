@@ -272,7 +272,7 @@ jobs:
         if: ${{ steps.need.outputs.any == 'true' }}
         with:
           node-version: ${{ inputs.node-version }}
-          cache: 'pnpm'
+          cache: ${{ !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
       # Wire ~/.npmrc for private GitHub Packages BEFORE install, using the job's
       # own GITHUB_TOKEN (packages: read) — NOT an inherited user secret, so the
       # no-secrets boundary holds. Skipped entirely unless a scope is given, so

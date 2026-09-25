@@ -219,7 +219,7 @@ jobs:
           # The pnpm cache keys off a lockfile. With `install: false` nothing is
           # restored or saved, and asking for the cache on a repo whose lockfile
           # the job never reads just adds a warning, so it is tied to `install`.
-          cache: ${{ inputs.install && 'pnpm' || '' }}
+          cache: ${{ inputs.install && !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
       # Wire ~/.npmrc for private GitHub Packages BEFORE install, using the job's
       # own GITHUB_TOKEN (packages: read) — NOT an inherited user secret, so the
       # no-secrets boundary holds. Skipped entirely unless a scope is given, so

@@ -151,7 +151,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
-          cache: 'pnpm'
+          cache: ${{ !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
 
       # Wire ~/.npmrc for private GitHub Packages BEFORE install, using the
       # job's own GITHUB_TOKEN (packages: read) — NOT an inherited user secret,

@@ -808,7 +808,7 @@ jobs:
         if: ${{ steps.verdict.outputs.cache-hit != 'true' }}
         with:
           node-version: ${{ inputs.node-version }}
-          cache: 'pnpm'
+          cache: ${{ !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
 
       - name: Install dependencies
         if: ${{ steps.verdict.outputs.cache-hit != 'true' }}
@@ -1192,7 +1192,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
-          cache: 'pnpm'
+          cache: ${{ !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
 
       - name: Install dependencies
         shell: bash
@@ -1541,7 +1541,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
-          cache: 'pnpm'
+          cache: ${{ !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
 
       - name: Install dependencies
         shell: bash
