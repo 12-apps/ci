@@ -162,7 +162,7 @@ jobs:
         with:
           # The MCP ratchet diffs against the merge base, which a depth-1
           # checkout cannot compute; every other caller keeps the fast one.
-          fetch-depth: ${{ (inputs.mcp-test-exemptions != '' && github.event_name == 'pull_request') && 0 || 1 }}
+          fetch-depth: ${{ (inputs.mcp-test-exemptions != '' && github.event_name == 'pull_request') && '0' || '1' }}
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
