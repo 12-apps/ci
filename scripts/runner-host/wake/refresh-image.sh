@@ -2,14 +2,18 @@
 # Rebuild the fleet's image from a ci commit, prove a fresh host from it
 # works, and redeploy it with the settings the fleet runs today.
 #
-#   AWS_REGION=us-east-1 CI_REF=<sha> SUBNET_ID=subnet-… SECURITY_GROUP_ID=sg-… \
+#   AWS_REGION=<home region> RUNNER_LABEL=<label> FUNCTION_NAME=<scaler> \
+#     CI_REF=<sha> SUBNET_ID=subnet-… SECURITY_GROUP_ID=sg-… \
 #     INSTANCE_PROFILE_ARN=arn:aws:iam::…:instance-profile/ci-runner-host \
 #     ./refresh-image.sh
+#
+# Every one of them is required. A default would name one consumer's fleet, and
+# a second consumer that forgot a variable would rebuild and redeploy that one.
 #
 # Why it exists: hosts live minutes and terminate, so nothing on them ever
 # updates. Every host runs the GitHub runner, Node and OS packages the image
 # was built with, and GitHub stops accepting a runner that falls too far
-# behind its latest release. runner-image-refresh.yml runs this weekly.
+# behind its latest release. A consumer calls runner-image-refresh.yml weekly.
 #
 # Steps, each of which stops the run on failure, and every instance it starts
 # is terminated on exit whatever happened:
@@ -33,8 +37,9 @@
 # the runner SIGKILLs the step's process tree, and no EXIT trap runs then.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-region="${AWS_REGION:-us-east-1}"
-label="${RUNNER_LABEL:-future-pay-ci}"
+region="${AWS_REGION:?set AWS_REGION to the home region of the fleet}"
+label="${RUNNER_LABEL:?set RUNNER_LABEL to the runner label of the fleet}"
+fn="${FUNCTION_NAME:?set FUNCTION_NAME to the scaler Lambda of the fleet}"
 ref="${CI_REF:?set CI_REF to the ci commit the image should run}"
 : "${SUBNET_ID:?}" "${SECURITY_GROUP_ID:?}" "${INSTANCE_PROFILE_ARN:?}"
 template="ci-runner-fleet-${label}"
@@ -137,7 +142,7 @@ wait_image() {
 }
 
 # ── 0. the live settings, before anything is spent ──────────────────────────
-aws lambda get-function-configuration --function-name "${FUNCTION_NAME:-ci-runner-scale}" \
+aws lambda get-function-configuration --function-name "$fn" \
   --query 'Environment.Variables' --output json > "$work/lambda-env.json"
 aws ec2 describe-launch-template-versions --launch-template-name "$template" --versions '$Default' \
   --query 'LaunchTemplateVersions[0].LaunchTemplateData' --output json > "$work/template.json"
@@ -147,6 +152,12 @@ pool=$(aws ec2 describe-instances --filters "Name=tag:ci-runner-pool,Values=${la
 # run went on with no settings at all until an unbound variable stopped it.
 settings=$(node "$here/live-settings.mjs" "$work/lambda-env.json" "$work/template.json" "$pool" "$work/wake-secret")
 eval "$settings"
+# The scaler names the fleet it serves. A function and a label from two
+# different fleets would image one and redeploy the other.
+if [[ "$RUNNER_LABEL" != "$label" ]]; then
+  log "${fn} scales the ${RUNNER_LABEL} fleet, not ${label}: nothing launched"
+  exit 1
+fi
 log "live settings: regions ${REGIONS}, budget ${DAILY_BUDGET}, idle ${IDLE_MINUTES:-default}, pnpm store ${PNPM_STORE}, pool ${POOL_SIZE}"
 
 # ── 1. golden ────────────────────────────────────────────────────────────────

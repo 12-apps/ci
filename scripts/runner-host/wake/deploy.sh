@@ -3,7 +3,9 @@
 # hosts in each region, and the Lambda that sizes the fleet to the queue
 # (scale.mjs) and picks the region to launch in (index.mjs).
 #
-#   AWS_PROFILE=ci-runner-admin GOLDEN_INSTANCE_ID=i-0123... ./deploy.sh
+#   AWS_PROFILE=ci-runner-admin AWS_REGION=us-east-1 REPOSITORY=owner/repo \
+#     RUNNER_LABEL=repo-ci FUNCTION_NAME=ci-runner-scale \
+#     GOLDEN_INSTANCE_ID=i-0123... ./deploy.sh
 #
 # GOLDEN_INSTANCE_ID is a host prepared by prepare-golden.sh: the kit
 # installed with CI_RUNNER_TOKEN_PARAMETER (no secret on disk), idle-stop on.
@@ -11,15 +13,21 @@
 # instead to reuse an image. Needs IAM, Lambda and EC2 image/template rights,
 # once; idempotent, re-run it to ship a new AMI or a new function version.
 #
-# Env: AWS_REGION (us-east-1), REPOSITORY (12-apps/future-pay), RUNNER_LABEL
-# (future-pay-ci), INSTANCE_TYPES (current 8-vCPU x86 types, 32 GB m and 64 GB r:
+# Required: AWS_REGION (the home region: the scaler, the SSM token, the first
+# template), REPOSITORY (owner/repo whose jobs the fleet runs), RUNNER_LABEL
+# (the jobs' runs-on label; the templates are ci-runner-fleet-<label>) and
+# FUNCTION_NAME (the scaler Lambda, and its role's name). None has a default:
+# each names one fleet, and a default would let a second consumer that forgot
+# one redeploy the first consumer's fleet.
+#
+# Env: INSTANCE_TYPES (current 8-vCPU x86 types, 32 GB m and 64 GB r:
 # more spot pools, fewer reclaims; m5a is left out, its first-generation EPYC is
 # slower per core than the runner the lanes are tuned for, and m7i-flex, the
 # shallowest pool: nine of eighteen reclaims on 2026-09-24),
 # SLOTS_PER_HOST (2: a 4-core, 14 GB slot, like the 4-vCPU runner the lanes are
 # tuned for), MAX_HOSTS (30; 30 × 8 vCPU must fit the account's spot vCPU
 # quota, L-34B43A08), POOL_SIZE (0; stopped hosts kept warm, see README), TOKEN_PARAMETER
-# (/ci-runner/github-app-key), FUNCTION_NAME (ci-runner-scale),
+# (/ci-runner/github-app-key),
 # WAKE_SECRET_FILE (~/.ci-runner-wake-secret, created 0600, never printed),
 # ROOT_IOPS (6000) and ROOT_THROUGHPUT (500 MB/s) for the hosts' gp3 root volume,
 # REGIONS (us-east-2,eu-north-1,AWS_REGION): where hosts may run, cheapest
@@ -40,9 +48,10 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-region="${AWS_REGION:-us-east-1}"
-repo="${REPOSITORY:-12-apps/future-pay}"
-label="${RUNNER_LABEL:-future-pay-ci}"
+region="${AWS_REGION:?set AWS_REGION to the home region of the fleet}"
+repo="${REPOSITORY:?set REPOSITORY to the owner/repo whose jobs the fleet runs}"
+label="${RUNNER_LABEL:?set RUNNER_LABEL to the runs-on label of its jobs}"
+fn="${FUNCTION_NAME:?set FUNCTION_NAME to the scaler Lambda of the fleet}"
 types="${INSTANCE_TYPES:-m7a.2xlarge,m6a.2xlarge,m7i.2xlarge,m6i.2xlarge,r7a.2xlarge,r6a.2xlarge,r7i.2xlarge,r6i.2xlarge}"
 slots="${SLOTS_PER_HOST:-2}"
 max_hosts="${MAX_HOSTS:-30}"
@@ -85,7 +94,6 @@ UD
 root_iops="${ROOT_IOPS:-6000}"
 root_throughput="${ROOT_THROUGHPUT:-500}"
 param="${TOKEN_PARAMETER:-/ci-runner/github-app-key}"
-fn="${FUNCTION_NAME:-ci-runner-scale}"
 role="$fn"
 template="ci-runner-fleet-${label}"
 secret_file="${WAKE_SECRET_FILE:-$HOME/.ci-runner-wake-secret}"
