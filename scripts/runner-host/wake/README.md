@@ -35,16 +35,18 @@ Hosts live minutes and never update themselves, so every host runs the GitHub ru
 
 1. A golden host from the image the fleet launches now, updated to the workflow's commit and prepared by `prepare-golden.sh`, then imaged.
 2. A **fresh** host from the new image, checked before anything ships: the runner image, its runner binary, Node in the tool cache and the slot units. A failure stops here and deploys nothing.
-3. `deploy.sh` with the new `AMI_ID` and the fleet's **live** settings (`live-settings.mjs`): budget, regions, types, caps, idle minutes, the pnpm store switch and the webhook secret are read from the scaler and the launch template, so a refresh changes the image and nothing else. The deploy copies the image to every region and prunes the old ones.
+3. `deploy.sh` with the new `AMI_ID` and the fleet's **live** settings (`live-settings.mjs`): budget, regions, types, caps, idle minutes, the pnpm store switch and the webhook secret are read from the scaler and the launch template, plus the warm pool's size (counted from its hosts) and the root volume's IOPS and throughput (from the template), so a refresh changes the image and nothing else. The settings are read first, and a fleet that does not say its budget or regions stops the run before anything is launched. The deploy copies the image to every region and prunes the old ones.
 
-Neither host registers a runner, and both are terminated on exit whatever happened.
+- **No runner is registered.** The smoke host's user data blanks the token parameter. The golden host must keep the live one (the image carries it), so a runtime drop-in under `/run`, which the image does not capture, holds its slots and idle timer while `install.sh` runs.
+- **Every host is terminated,** by the script's exit trap. A terminate that fails is logged and fails the run. A cancelled or timed-out job is SIGKILLed before any trap runs, so the workflow's last step (`if: always()`) terminates every instance tagged `ci-runner-refresh=<run id>`.
+- **Regions are the live ones.** `REGIONS` is the list the last deploy left live, so a region that dropped out on a failed copy stays out until a deploy puts it back.
 
 ### One-time setup (an account admin)
 
 The workflow does nothing until `CI_RUNNER_AWS_ROLE` exists. To turn it on:
 
 1. **IAM → Identity providers → Add provider**: OpenID Connect, URL `https://token.actions.githubusercontent.com`, audience `sts.amazonaws.com` (skip if it exists).
-2. **IAM → Roles → Create role → Custom trust policy**, then attach the same permissions the `ci-runner-provisioner` user has today (the managed `ci-runner-fleet-deploy` policy and its inline policies, `delete-images` included):
+2. **IAM → Roles → Create role → Custom trust policy**, set **Maximum session duration to 3 hours** (the workflow asks for 3; a run is ~1 h, and a slow copy to three regions can double it), then attach the same permissions the `ci-runner-provisioner` user has today (the managed `ci-runner-fleet-deploy` policy and its inline policies, `delete-images` included):
 
    ```json
    {
@@ -56,12 +58,13 @@ The workflow does nothing until `CI_RUNNER_AWS_ROLE` exists. To turn it on:
        "Condition": {
          "StringEquals": {
            "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-           "token.actions.githubusercontent.com:sub": "repo:12-apps/ci:ref:refs/heads/main"
+           "token.actions.githubusercontent.com:sub": "repo:12-apps/ci:environment:runner-image"
          }
        }
      }]
    }
    ```
 
-   The `sub` condition lets only this repository's `main` assume it, which is where the schedule and a manual run execute.
-3. **12-apps/ci → Settings → Variables → Actions**: `CI_RUNNER_AWS_ROLE` (the role ARN), `CI_RUNNER_SUBNET_ID`, `CI_RUNNER_SECURITY_GROUP_ID`, `CI_RUNNER_INSTANCE_PROFILE` (the values deploy.sh was last run with).
+   The role can change IAM, Lambda and EC2, so the `sub` names a deployment environment rather than a branch: a `ref:refs/heads/main` subject would let ANY workflow on `main` with `id-token: write` assume it. Only a job that declares `environment: runner-image` gets this subject, and only `runner-image-refresh.yml` does.
+3. **12-apps/ci → Settings → Environments → runner-image** (it appears after the first run, or create it): **Deployment branches → Selected branches → `main`**, so a job on another branch that declares the environment is refused before it gets a token.
+4. **12-apps/ci → Settings → Variables → Actions**: `CI_RUNNER_AWS_ROLE` (the role ARN), `CI_RUNNER_SUBNET_ID`, `CI_RUNNER_SECURITY_GROUP_ID`, `CI_RUNNER_INSTANCE_PROFILE` (the values deploy.sh was last run with).

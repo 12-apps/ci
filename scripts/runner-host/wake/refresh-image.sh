@@ -23,8 +23,14 @@
 #      refresh never rotates it), which copies the image to every region,
 #      points the templates at it and prunes the old images.
 #
-# Neither host registers a runner: their user data blanks the token parameter
-# before any slot starts, as prepare-golden's own hosts did by hand.
+# Neither host registers a runner. The smoke host's user data blanks the token
+# parameter before any slot starts. The golden host needs the real parameter in
+# its env file (the image carries it), so its slots and idle timer are held by
+# a runtime drop-in under /run, which the image does not capture.
+#
+# Every instance is tagged ci-runner-refresh=$REFRESH_ID, so the workflow's
+# always() step can terminate what a cancelled or timed-out run left behind:
+# the runner SIGKILLs the step's process tree, and no EXIT trap runs then.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 region="${AWS_REGION:-us-east-1}"
@@ -32,6 +38,7 @@ label="${RUNNER_LABEL:-future-pay-ci}"
 ref="${CI_REF:?set CI_REF to the ci commit the image should run}"
 : "${SUBNET_ID:?}" "${SECURITY_GROUP_ID:?}" "${INSTANCE_PROFILE_ARN:?}"
 template="ci-runner-fleet-${label}"
+refresh_id="${REFRESH_ID:-manual-$(date -u +%Y%m%d%H%M%S)}"
 types=(m7a.2xlarge m6a.2xlarge m7i.2xlarge m6i.2xlarge)
 
 aws() { command aws --region "$region" --output text "$@"; }
@@ -39,13 +46,21 @@ log() { printf 'refresh: %s\n' "$*" >&2; }
 work=$(mktemp -d)
 started=()
 cleanup() {
+  local status=$?
   if [[ ${#started[@]} -gt 0 ]]; then
-    aws ec2 terminate-instances --instance-ids "${started[@]}" >/dev/null 2>&1 || true
-    log "terminated ${started[*]}"
+    if aws ec2 terminate-instances --instance-ids "${started[@]}" >/dev/null; then
+      log "terminated ${started[*]}"
+    else
+      # An on-demand m7a.2xlarge left running costs ~$10 a day: never quietly.
+      log "COULD NOT TERMINATE ${started[*]}: terminate them by hand (tag ci-runner-refresh=${refresh_id})"
+      status=1
+    fi
   fi
   rm -rf "$work"
+  exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 cat > "$work/user-data.yaml" <<'UD'
 #cloud-config
@@ -66,7 +81,7 @@ launch() {
         --metadata-options HttpTokens=required,HttpEndpoint=enabled \
         --block-device-mappings "DeviceName=${dev},Ebs={VolumeSize=${gb},VolumeType=gp3,Iops=6000,Throughput=500,Encrypted=true,DeleteOnTermination=true}" \
         --instance-initiated-shutdown-behavior terminate --user-data "file://$work/user-data.yaml" \
-        --tag-specifications "ResourceType=instance,Tags=[{Key=Project,Value=ci-runner},{Key=Name,Value=${name}},{Key=ci-runner-fleet,Value=golden}]" \
+        --tag-specifications "ResourceType=instance,Tags=[{Key=Project,Value=ci-runner},{Key=Name,Value=${name}},{Key=ci-runner-fleet,Value=golden},{Key=ci-runner-refresh,Value=${refresh_id}}]" \
           'ResourceType=volume,Tags=[{Key=Project,Value=ci-runner}]' \
         --query 'Instances[0].InstanceId' 2>"$work/launch.err"); then
       started+=("$id")
@@ -118,22 +133,42 @@ wait_image() {
   return 1
 }
 
+# ── 0. the live settings, before anything is spent ──────────────────────────
+aws lambda get-function-configuration --function-name "${FUNCTION_NAME:-ci-runner-scale}" \
+  --query 'Environment.Variables' --output json > "$work/lambda-env.json"
+aws ec2 describe-launch-template-versions --launch-template-name "$template" --versions '$Default' \
+  --query 'LaunchTemplateVersions[0].LaunchTemplateData' --output json > "$work/template.json"
+pool=$(aws ec2 describe-instances --filters "Name=tag:ci-runner-pool,Values=${label}" \
+  "Name=instance-state-name,Values=pending,running,stopping,stopped" --query 'length(Reservations[].Instances[])')
+# Captured first: `eval "$(cmd)"` succeeds when cmd fails, and the first real
+# run went on with no settings at all until an unbound variable stopped it.
+settings=$(node "$here/live-settings.mjs" "$work/lambda-env.json" "$work/template.json" "$pool" "$work/wake-secret")
+eval "$settings"
+log "live settings: regions ${REGIONS}, budget ${DAILY_BUDGET}, idle ${IDLE_MINUTES:-default}, pnpm store ${PNPM_STORE}, pool ${POOL_SIZE}"
+
 # ── 1. golden ────────────────────────────────────────────────────────────────
-base=$(aws ec2 describe-launch-template-versions --launch-template-name "$template" --versions '$Default' \
-  --query 'LaunchTemplateVersions[0].LaunchTemplateData.ImageId')
+base=$(jq -r .ImageId "$work/template.json")
 log "base image ${base} (what ${template} launches now), ci ${ref}"
 launch "$base" ci-runner-golden
 golden=$launched
 wait_ssm "$golden"
 cat > "$work/golden.sh" <<EOF
 set -e
+# install.sh starts the slots with the real token parameter and restarts the
+# idle timer; held here, no slot registers a runner and the host does not power
+# itself off mid-build. /run is not in the image.
+for unit in ci-runner@.service ci-runner-idle.service; do
+  mkdir -p "/run/systemd/system/\$unit.d"
+  printf '[Unit]\nConditionPathExists=/nonexistent/refresh-image\n' > "/run/systemd/system/\$unit.d/refresh-hold.conf"
+done
+systemctl daemon-reload
 systemctl stop ci-runner-idle.timer ci-runner-idle.service 2>/dev/null || true
 for s in 1 2 3; do systemctl stop "ci-runner@\$s" 2>/dev/null || true; done
 cd /opt/src/ci
 git fetch -q origin "${ref}"
 git checkout -q --detach FETCH_HEAD
 git log --oneline -1
-./scripts/runner-host/wake/prepare-golden.sh 2 > /root/golden.log 2>&1 || { tail -40 /root/golden.log; exit 1; }
+CI_RUNNER_TOKEN_PARAMETER='${TOKEN_PARAMETER:-/ci-runner/github-app-key}' ./scripts/runner-host/wake/prepare-golden.sh '${SLOTS_PER_HOST:-2}' > /root/golden.log 2>&1 || { tail -40 /root/golden.log; exit 1; }
 grep -E 'ready to image' /root/golden.log
 systemctl stop ci-runner-idle.timer ci-runner-idle.service 2>/dev/null || true
 for s in 1 2 3; do systemctl stop "ci-runner@\$s" 2>/dev/null || true; done
@@ -158,20 +193,14 @@ systemctl is-enabled ci-runner@1.service ci-runner-credential.service ci-runner-
 docker image inspect ci-runner:latest --format 'runner image {{.Id}}'
 docker run --rm --entrypoint bash ci-runner:latest -c '
   set -e
-  echo "runner $(/home/runner/actions-runner/bin/Runner.Listener --version)"
+  # Assigned first: set -e ignores a failed $(…) inside an echo.
+  v=$(/home/runner/actions-runner/bin/Runner.Listener --version)
+  echo "runner $v"
   ls /opt/hostedtoolcache/node | grep -q "^24\." && echo "node $(ls /opt/hostedtoolcache/node | paste -sd " ")"'
 echo SMOKE-OK
 EOF
 ssm "$fresh" "$work/smoke.sh" 900 || { log "the fresh host failed its checks — nothing deployed; ${ami} stays for inspection"; exit 1; }
 
 # ── 3. deploy with the live settings ────────────────────────────────────────
-aws lambda get-function-configuration --function-name "${FUNCTION_NAME:-ci-runner-scale}" \
-  --query 'Environment.Variables' --output json > "$work/lambda-env.json"
-aws ec2 describe-launch-template-versions --launch-template-name "$template" --versions '$Default' \
-  --query 'LaunchTemplateVersions[0].LaunchTemplateData.UserData' | base64 -d > "$work/user-data.txt"
-# Captured first: `eval "$(cmd)"` succeeds when cmd fails, and the run went on
-# to deploy with no settings at all until an unbound variable stopped it.
-settings=$(node "$here/live-settings.mjs" "$work/lambda-env.json" "$work/user-data.txt" "$work/wake-secret")
-eval "$settings"
 log "deploying ${ami} with the live settings: regions ${REGIONS}, budget ${DAILY_BUDGET}, idle ${IDLE_MINUTES:-default}, pnpm store ${PNPM_STORE}"
 AMI_ID="$ami" WAKE_SECRET_FILE="$work/wake-secret" AWS_REGION="$region" bash "$here/deploy.sh"

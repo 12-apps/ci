@@ -37,12 +37,17 @@ jobs:
   refresh:
     name: Rebuild and redeploy the runner image
     if: vars.CI_RUNNER_AWS_ROLE != ''
+    # The role trusts this environment's subject only (README, "One-time
+    # setup"), and the environment only deploys from main.
+    environment: runner-image
     # GitHub's runner on purpose: this job replaces the fleet's image, so it
     # cannot depend on the fleet being healthy, and it may be the fix for a
     # fleet that is not.
     runs-on: ubuntu-latest
-    # A golden build is ~15 min, imaging and copying ~20, the smoke host ~5.
-    timeout-minutes: 120
+    # Measured on 2026-09-26: settings and golden ~25 min, imaging ~15, the
+    # smoke host ~8; deploy.sh then copies to each region (up to 90 min each
+    # in the worst case). The role session below must outlast the job.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -54,12 +59,35 @@ jobs:
           aws-region: us-east-1
           role-to-assume: ${{ vars.CI_RUNNER_AWS_ROLE }}
           role-session-name: runner-image-refresh
+          # The default is one hour; credentials expiring mid-deploy would
+          # stop it half-rolled and leave the hosts running.
+          role-duration-seconds: 10800
       - name: Rebuild, check a fresh host, redeploy
         shell: bash
         env:
           AWS_REGION: us-east-1
           CI_REF: ${{ github.sha }}
+          REFRESH_ID: ${{ github.run_id }}
           SUBNET_ID: ${{ vars.CI_RUNNER_SUBNET_ID }}
           SECURITY_GROUP_ID: ${{ vars.CI_RUNNER_SECURITY_GROUP_ID }}
           INSTANCE_PROFILE_ARN: ${{ vars.CI_RUNNER_INSTANCE_PROFILE }}
-        run: bash scripts/runner-host/wake/refresh-image.sh
+        run: exec bash scripts/runner-host/wake/refresh-image.sh
+      # A cancelled or timed-out step is SIGKILLed with its process tree, so
+      # the script's exit trap may never run: terminate what this run tagged.
+      - name: Terminate this run's hosts
+        if: always()
+        shell: bash
+        env:
+          AWS_REGION: us-east-1
+          REFRESH_ID: ${{ github.run_id }}
+        run: |
+          ids=$(aws ec2 describe-instances --filters "Name=tag:ci-runner-refresh,Values=${REFRESH_ID}" \
+            "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+            --query 'Reservations[].Instances[].InstanceId' --output text)
+          if [ -n "$ids" ]; then
+            # shellcheck disable=SC2086
+            aws ec2 terminate-instances --instance-ids $ids --output text >/dev/null
+            echo "terminated ${ids}"
+          else
+            echo "nothing left running"
+          fi
