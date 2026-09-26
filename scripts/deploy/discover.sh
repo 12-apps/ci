@@ -95,7 +95,8 @@ plan="$(jq -n --arg ns "$NS" --arg target "$TARGET" --argjson descs "$descriptor
             dockerfile: (.build.dockerfile // "Dockerfile"),
             target: (.build.target // "runner"),
             cache:  (.build.cache // (.build.image // .app)),
-            role:   (.build.role // "runner") } ],
+            role:   (.build.role // "runner"),
+            inputs: (.build.inputs // []) } ],
       statics: [ .[] | select(.build.type == "static")
         | { app, dir, provider,
             command: .build.command,

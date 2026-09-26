@@ -119,6 +119,24 @@ to the default with a `::warning::` — the gate cannot be switched off by empty
 the list. The effective entry list is echoed as a `::notice::` on **every** run,
 fired or not, so a narrowed or mistyped list is visible in the log.
 
+**A path only ONE image depends on belongs to that image, not to this list.**
+Every entry here rebuilds every image. When one app's build reads another
+app's source (a docs site that generates a catalogue from the API's route
+tree, say), declare those paths as that image's own `inputs` in its
+`deploy/config.json` build block, with the same syntax: a trailing `/` is a
+root-anchored directory prefix, anything else an exact path.
+
+```json
+{ "provider": "digitalocean",
+  "build": { "type": "container", "image": "docs", "dockerfile": "apps/docs/Dockerfile",
+             "inputs": ["apps/web/app/", "apps/web/lib/mcp/"] } }
+```
+
+A change under them rebuilds that image and whatever turbo reports affected,
+and every other image is reused. Declared in the global list instead, the same
+two paths rebuilt all seven of future-pay's images on nearly every deploy,
+because nearly every change touches an API route.
+
 **Also worth doing on your side:** declare `globalDependencies` in your own
 `turbo.json` for the same files. That is the more complete fix — it corrects
 affectedness for *every* turbo consumer (`turbo run`, remote cache, your own CI

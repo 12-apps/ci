@@ -281,6 +281,27 @@ fi
 # `>-` folded scalar CONSUMING.md documents is unchanged), and a value of only
 # newlines still collapses to whitespace, splits to zero entries, and lands in
 # the blank fallback below.
+# The first changed path matching any of the given entries, or nothing. An
+# entry ending in `/` is a root-anchored directory prefix; anything else is an
+# exact root-relative path. Shared by the global gate below and by an image's
+# own `inputs`, so the two can never disagree on what a match is.
+first_changed_in() { # entry...
+  local entry changed_path
+  for entry in "$@"; do
+    [ -n "$entry" ] || continue
+    case "$entry" in
+      */)
+        while IFS= read -r changed_path; do
+          case "$changed_path" in "$entry"*) printf '%s' "$changed_path"; return 0 ;; esac
+        done <"$TMP/changed"
+        ;;
+      *)
+        grep -Fxq -- "$entry" "$TMP/changed" && { printf '%s' "$entry"; return 0; }
+        ;;
+    esac
+  done
+  return 0
+}
 read -ra gbi_list <<<"${GLOBAL_BUILD_INPUTS//$'\n'/ }"
 if [ "${#gbi_list[@]}" -eq 0 ]; then
   # Blank or whitespace-only. `${VAR:-default}` above only catches the truly
@@ -294,20 +315,7 @@ fi
 # or wrongly-narrowed list does its damage on exactly the runs where it stays
 # quiet, so the effective entry list has to be readable from the log either way.
 notice "CD image reuse: root-level build-input gate is checking ${#gbi_list[@]} entries: ${gbi_list[*]}"
-gbi_hit=''
-for gbi in "${gbi_list[@]}"; do
-  case "$gbi" in
-    */)                                      # root-anchored directory prefix
-      while IFS= read -r changed_path; do
-        case "$changed_path" in "$gbi"*) gbi_hit="$changed_path"; break ;; esac
-      done <"$TMP/changed"
-      ;;
-    *)                                       # exact root-relative path
-      grep -Fxq -- "$gbi" "$TMP/changed" && gbi_hit="$gbi"
-      ;;
-  esac
-  [ -z "$gbi_hit" ] || break
-done
+gbi_hit="$(first_changed_in "${gbi_list[@]}")"
 [ -z "$gbi_hit" ] \
   || build_all "'$gbi_hit' is a global build input (GLOBAL_BUILD_INPUTS) and changed in ${BASE_SHA:0:12}..${HEAD_SHA:0:12} — it is in every image's Docker build context but belongs to no workspace package, so turbo cannot report it affected"
 
@@ -352,6 +360,15 @@ for i in $(seq 0 $((n_images - 1))); do
   fi
   if [ -n "$dockerfile" ] && grep -Fxq "$dockerfile" "$TMP/changed"; then
     take_build "$i" "$img" "$dockerfile changed"; continue
+  fi
+  # Paths this image alone depends on that turbo cannot attribute to its
+  # package (`inputs` in the image's deploy/config.json build block): a
+  # generated file one app's build reads from another app's source, say. They
+  # rebuild THIS image; the global list above rebuilds every image.
+  mapfile -t own_inputs < <(jq -r '(.inputs // [])[]' <<<"$entry")
+  input_hit="$(first_changed_in "${own_inputs[@]}")"
+  if [ -n "$input_hit" ]; then
+    take_build "$i" "$img" "'$input_hit' changed and is one of its declared inputs"; continue
   fi
   if grep -Fxq "$dir" "$TMP/aff.paths"; then
     take_build "$i" "$img" "$dir is affected"; continue
