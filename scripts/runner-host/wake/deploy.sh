@@ -33,6 +33,10 @@
 # SPOT_STRATEGY (capacity-optimized): the EC2 Fleet spot allocation strategy.
 # IDLE_MINUTES (2): a host powers itself off after this long without a job.
 # PNPM_STORE (off): `on` mounts the image's warm pnpm store into every job.
+# PRUNE_IMAGES (1): after a deploy, delete each region's older fleet images and
+# their snapshots, keeping the image in use, the one before it and any a live
+# host runs on (prune-images.mjs). Needs ec2:DeregisterImage and
+# ec2:DeleteSnapshot; without them it warns and the deploy still succeeds.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -312,6 +316,41 @@ if [[ "${CREATE_WEBHOOK:-1}" == 1 ]]; then
     --payload "file://$work/setup.json" "$work/setup.out" >/dev/null
   hook=$(jq -r 'if .webhook then "\(.webhook) (id \(.id))" else "FAILED: \(.errorMessage // .)" end' "$work/setup.out")
   [[ "$hook" != FAILED* ]] || { echo "deploy: webhook ${hook}" >&2; exit 1; }
+fi
+
+# ── old images: keep what runs and the rollback, delete the rest ──────────
+# Every deploy leaves an image (and its copies) behind, each a 72 GB snapshot
+# billed by the month, and nothing else ever removes one: us-east-1 held seven
+# on 2026-09-25. Last, so only a deploy that got this far prunes anything.
+# prune-images.mjs decides; this only lists and deletes. Scoped by name to this
+# fleet's images, so another project's AMIs in the account are never listed.
+prune_region() {
+  local r=$1 live image snaps s
+  command aws --region "$r" --output json ec2 describe-images --owners self \
+    --filters "Name=name,Values=ci-runner-${label}-*" > "$work/images-${r}.json" || return 1
+  command aws --region "$r" --output json ec2 describe-launch-template-versions \
+    --launch-template-name "$template" > "$work/versions-${r}.json" || return 1
+  live=$(in_region "$r" ec2 describe-instances --filters Name=tag-key,Values=ci-runner-fleet \
+    "Name=instance-state-name,Values=pending,running,shutting-down,stopping,stopped" \
+    --query 'Reservations[].Instances[].ImageId') || return 1
+  while read -r image snaps; do
+    [[ -n "$image" ]] || continue
+    if ! in_region "$r" ec2 deregister-image --image-id "$image" >/dev/null; then
+      echo "deploy: WARNING: could not delete image ${image} in ${r} (needs ec2:DeregisterImage)" >&2
+      continue
+    fi
+    for s in $snaps; do
+      in_region "$r" ec2 delete-snapshot --snapshot-id "$s" >/dev/null \
+        || echo "deploy: WARNING: image ${image} deleted in ${r}, its snapshot ${s} not (needs ec2:DeleteSnapshot)" >&2
+    done
+    echo "deploy: ${r}: deleted old image ${image} (${snaps:-no snapshot})"
+  done < <(node "$here/prune-images.mjs" "$work/images-${r}.json" "$work/versions-${r}.json" "$live")
+}
+if [[ "${PRUNE_IMAGES:-1}" == 1 ]]; then
+  IFS=, read -ra pruned <<< "$live_regions"
+  for r in "${pruned[@]}"; do
+    prune_region "$r" || echo "deploy: WARNING: could not list the old images in ${r}; none deleted there" >&2
+  done
 fi
 
 cat <<DONE
