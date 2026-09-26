@@ -47,6 +47,9 @@ work=$(mktemp -d)
 started=()
 cleanup() {
   local status=$?
+  # A TERM arriving mid-cleanup (the runner sends one after its INT) must not
+  # cut the terminate short.
+  trap '' INT TERM
   if [[ ${#started[@]} -gt 0 ]]; then
     if aws ec2 terminate-instances --instance-ids "${started[@]}" >/dev/null; then
       log "terminated ${started[*]}"
@@ -139,7 +142,7 @@ aws lambda get-function-configuration --function-name "${FUNCTION_NAME:-ci-runne
 aws ec2 describe-launch-template-versions --launch-template-name "$template" --versions '$Default' \
   --query 'LaunchTemplateVersions[0].LaunchTemplateData' --output json > "$work/template.json"
 pool=$(aws ec2 describe-instances --filters "Name=tag:ci-runner-pool,Values=${label}" \
-  "Name=instance-state-name,Values=pending,running,stopping,stopped" --query 'length(Reservations[].Instances[])')
+  "Name=instance-state-name,Values=pending,running,stopping,stopped" --no-paginate --query 'length(Reservations[].Instances[])')
 # Captured first: `eval "$(cmd)"` succeeds when cmd fails, and the first real
 # run went on with no settings at all until an unbound variable stopped it.
 settings=$(node "$here/live-settings.mjs" "$work/lambda-env.json" "$work/template.json" "$pool" "$work/wake-secret")

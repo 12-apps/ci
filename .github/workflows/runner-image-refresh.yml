@@ -46,14 +46,16 @@ jobs:
     runs-on: ubuntu-latest
     # Measured on 2026-09-26: settings and golden ~25 min, imaging ~15, the
     # smoke host ~8; deploy.sh then copies to each region (up to 90 min each
-    # in the worst case). The role session below must outlast the job.
-    timeout-minutes: 180
+    # in the worst case). The role session below (3 h) must outlast the job
+    # AND leave the always() step credentials to terminate with.
+    timeout-minutes: 165
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
       - name: Authenticate with the fleet's OIDC role
+        id: aws
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: us-east-1
@@ -75,7 +77,7 @@ jobs:
       # A cancelled or timed-out step is SIGKILLed with its process tree, so
       # the script's exit trap may never run: terminate what this run tagged.
       - name: Terminate this run's hosts
-        if: always()
+        if: always() && steps.aws.outcome == 'success'
         shell: bash
         env:
           AWS_REGION: us-east-1
