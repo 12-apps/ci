@@ -276,6 +276,13 @@ jobs:
           python3 -B scripts/deploy/__tests__/aws_rollout_test.py
           bash -n scripts/deploy/aws-entrypoint.sh
 
+      # The CD planner run for real in a throwaway repo, discovered from real
+      # deploy/config.json files, with only turbo faked: which images a push
+      # rebuilds, including an image's own declared `inputs`.
+      - name: CD image selection
+        shell: bash
+        run: node --test scripts/deploy/__tests__/select-images.test.mjs
+
       # One runner-host slot, run for real against stub curl/docker: the JIT
       # registration a consumer's `CI_RUNNER` label has to match, the isolation
       # and /dev/shm a job container needs, and that the JIT config never lands
