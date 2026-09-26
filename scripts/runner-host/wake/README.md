@@ -28,3 +28,40 @@ pool host:  starts → token from SSM → 2 slots → idle 5 min → stops (only
 - **Old images are deleted.** Every deploy leaves an image and its regional copies behind, each a 72 GB snapshot billed by the month, and us-east-1 held seven by 2026-09-25. After a successful deploy, `deploy.sh` deletes each region's older `ci-runner-<label>-*` images with their snapshots. It keeps the last two distinct images the launch template launched (the one in use and the rollback, by template history rather than date), any image a live host runs on, the newest, and any copy still in flight (`prune-images.mjs`). `PRUNE_IMAGES=0` skips it. It needs `ec2:DeregisterImage` and `ec2:DeleteSnapshot`; without them it warns and the deploy still succeeds.
 - **Which spot pool.** Launches ask for `SPOT_STRATEGY` (`capacity-optimized`): the pool with the most spare capacity, not the cheapest. With `price-capacity-optimized`, 41 jobs were lost to reclaims on 2026-09-24, and the hosts were reclaimed a median 7 minutes after launch: a burst of twenty lands in pools at the edge of their capacity. Every sweep logs the hosts AWS took back as `reclaimed: <id> <type>@<zone> (<region>) after N min`, so the reclaim rate per pool can be read back from the logs.
 - **Daily budget.** The scaler bills its own hosts as it goes (budget.mjs), because AWS's billing data arrives hours late. Every evaluation, at most every 30 s, sweeps the hosts of all regions and charges each by the second: the spot price of its pool, or on-demand, plus $0.059/h for its disk and public IPv4. The day's total is kept in the SSM parameter `/ci-runner/spend-<label>`. Once it reaches `DAILY_BUDGET` ($10), the fleet shrinks to `DEGRADED_MAX_HOSTS` (2) spot hosts with no on-demand fallback: jobs still run, but queue longer, until local midnight (`BUDGET_UTC_OFFSET`, -3). Hosts already up finish their jobs and are not stopped early. The crossing POSTs `{"text": …}` once to the hook stored in `/ci-runner/budget-alert`, a JSON SecureString `{"url", "headers"}` such as an agent routine's API trigger. `aws lambda invoke --payload '{"budget":"status"}'` returns the day's spend, and `{"budget":"test-alert"}` fires the hook.
+
+## Refreshing the image
+
+Hosts live minutes and never update themselves, so every host runs the GitHub runner, Node and OS packages its image was built with, and GitHub stops accepting a runner that falls too far behind its latest release. `.github/workflows/runner-image-refresh.yml` rebuilds the image every Monday at 06:17 UTC, or on demand (Actions → Runner image refresh → Run workflow), by running `refresh-image.sh`:
+
+1. A golden host from the image the fleet launches now, updated to the workflow's commit and prepared by `prepare-golden.sh`, then imaged.
+2. A **fresh** host from the new image, checked before anything ships: the runner image, its runner binary, Node in the tool cache and the slot units. A failure stops here and deploys nothing.
+3. `deploy.sh` with the new `AMI_ID` and the fleet's **live** settings (`live-settings.mjs`): budget, regions, types, caps, idle minutes, the pnpm store switch and the webhook secret are read from the scaler and the launch template, so a refresh changes the image and nothing else. The deploy copies the image to every region and prunes the old ones.
+
+Neither host registers a runner, and both are terminated on exit whatever happened.
+
+### One-time setup (an account admin)
+
+The workflow does nothing until `CI_RUNNER_AWS_ROLE` exists. To turn it on:
+
+1. **IAM → Identity providers → Add provider**: OpenID Connect, URL `https://token.actions.githubusercontent.com`, audience `sts.amazonaws.com` (skip if it exists).
+2. **IAM → Roles → Create role → Custom trust policy**, then attach the same permissions the `ci-runner-provisioner` user has today (the managed `ci-runner-fleet-deploy` policy and its inline policies, `delete-images` included):
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [{
+       "Effect": "Allow",
+       "Principal": { "Federated": "arn:aws:iam::<account>:oidc-provider/token.actions.githubusercontent.com" },
+       "Action": "sts:AssumeRoleWithWebIdentity",
+       "Condition": {
+         "StringEquals": {
+           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+           "token.actions.githubusercontent.com:sub": "repo:12-apps/ci:ref:refs/heads/main"
+         }
+       }
+     }]
+   }
+   ```
+
+   The `sub` condition lets only this repository's `main` assume it, which is where the schedule and a manual run execute.
+3. **12-apps/ci → Settings → Variables → Actions**: `CI_RUNNER_AWS_ROLE` (the role ARN), `CI_RUNNER_SUBNET_ID`, `CI_RUNNER_SECURITY_GROUP_ID`, `CI_RUNNER_INSTANCE_PROFILE` (the values deploy.sh was last run with).
