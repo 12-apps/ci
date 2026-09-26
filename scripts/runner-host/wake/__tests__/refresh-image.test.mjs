@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,7 +15,9 @@ import { test } from "node:test";
 // on any call whose arguments contain one of the given strings, so the test sees
 // exactly what the script asked AWS to do.
 
-const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "refresh-image.sh");
+const here = path.dirname(fileURLToPath(import.meta.url));
+const script = path.join(here, "..", "refresh-image.sh");
+const workflow = path.join(here, "..", "..", "..", "..", ".github", "workflows", "runner-image-refresh.yml");
 
 const lambdaEnv = {
   WEBHOOK_SECRET: "s3cr3t", RUNNER_LABEL: "future-pay-ci", REPOSITORY: "12-apps/future-pay",
@@ -28,6 +30,10 @@ const templateData = {
 };
 
 function run(...failOn) {
+  return runWith({}, ...failOn);
+}
+
+function runWith(overrides, ...failOn) {
   const dir = mkdtempSync(path.join(tmpdir(), "refresh-image-"));
   const calls = path.join(dir, "calls.log");
   writeFileSync(path.join(dir, "lambda.json"), JSON.stringify(lambdaEnv));
@@ -65,10 +71,16 @@ esac
     SUBNET_ID: "subnet-x",
     SECURITY_GROUP_ID: "sg-x",
     INSTANCE_PROFILE_ARN: "arn:aws:iam::1:instance-profile/x",
+    RUNNER_LABEL: "future-pay-ci",
+    FUNCTION_NAME: "ci-runner-scale",
   };
+  for (const [k, v] of Object.entries(overrides)) {
+    if (v === undefined) delete env[k];
+    else env[k] = v;
+  }
   // `sleep` is real in the script; the fake answers every poll on its first try.
   const res = spawnSync("bash", [script], { env, encoding: "utf8", timeout: 60_000 });
-  const log = readFileSync(calls, "utf8").trim().split("\n");
+  const log = (existsSync(calls) ? readFileSync(calls, "utf8") : "").trim().split("\n");
   const sent = log
     .filter((l) => l.includes("send-command"))
     .map((l) => Buffer.from(/echo (\S+) \| base64 -d/.exec(l)[1], "base64").toString("utf8"));
@@ -125,4 +137,30 @@ test("the golden host holds its slots and idle timer, and images the live token 
   assert.match(golden, /for unit in ci-runner@\.service ci-runner-idle\.service/);
   assert.match(golden, /\/run\/systemd\/system\//, "a runtime drop-in, which the image does not capture");
   assert.match(golden, /CI_RUNNER_TOKEN_PARAMETER='\/ci-runner\/live-key' \.\/scripts\/runner-host\/wake\/prepare-golden\.sh '2'/);
+});
+
+for (const name of ["AWS_REGION", "RUNNER_LABEL", "FUNCTION_NAME"]) {
+  test(`without ${name} nothing is read or launched: no default names a fleet`, () => {
+    const { status, stderr, log } = runWith({ [name]: undefined });
+    assert.notEqual(status, 0);
+    assert.match(stderr, new RegExp(`${name}: set ${name}`));
+    assert.deepEqual(log, [""], "not one AWS call");
+  });
+}
+
+test("a scaler that serves another fleet stops the run before any host starts", () => {
+  const { status, stderr, log } = runWith({ RUNNER_LABEL: "other-ci" });
+  assert.notEqual(status, 0);
+  assert.match(stderr, /ci-runner-scale scales the future-pay-ci fleet, not other-ci/);
+  assert.ok(!log.some((l) => l.includes("run-instances")));
+});
+
+test("the workflow is reusable and schedules nothing: its logs belong to the consumer", () => {
+  // In this public repository every run's log is public, and a refresh logs
+  // the account, the fleet's subnets and regions and the scaler's URL.
+  const source = readFileSync(workflow, "utf8");
+  const on = /^on:\n((?: .*\n|\n)*)/m.exec(source)[1];
+  assert.match(on, /^ {2}workflow_call:/m);
+  assert.doesNotMatch(on, /^ {2}(schedule|workflow_dispatch|push|pull_request\w*):/m);
+  assert.doesNotMatch(source, /vars\./, "every value comes from the caller's inputs");
 });

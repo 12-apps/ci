@@ -1,56 +1,105 @@
 name: Runner image refresh
 
-# Rebuilds the self-hosted fleet's image every week and redeploys it
-# (scripts/runner-host/wake/refresh-image.sh): a golden host updated to this
-# commit, a FRESH host from the new image checked before anything ships, then
-# deploy.sh with the fleet's live settings, which copies the image to every
-# region and prunes the old ones.
+# Rebuilds a self-hosted fleet's image and redeploys it
+# (scripts/runner-host/wake/refresh-image.sh): a golden host updated to the
+# pinned ci commit, a FRESH host from the new image checked before anything
+# ships, then deploy.sh with the fleet's live settings, which copies the image
+# to every region and prunes the old ones.
 #
-# Why weekly: fleet hosts live minutes and never update themselves, so the
-# GitHub runner, Node and OS packages are whatever the image was built with,
-# and GitHub stops accepting a runner that falls too far behind its latest
-# release. The whole fleet would then queue without an error of its own.
+# Why a consumer runs it weekly: fleet hosts live minutes and never update
+# themselves, so the GitHub runner, Node and OS packages are whatever the image
+# was built with, and GitHub stops accepting a runner that falls too far behind
+# its latest release. The whole fleet would then queue without an error of its
+# own.
 #
-# It does nothing until the repository variables below exist, so merging it
-# changes nothing on its own (docs: scripts/runner-host/wake/README.md,
-# "Refreshing the image"):
-#   CI_RUNNER_AWS_ROLE            the OIDC role this job assumes
-#   CI_RUNNER_SUBNET_ID           a subnet in the home region for the golden and
-#   CI_RUNNER_SECURITY_GROUP_ID     smoke hosts, with their security group
-#   CI_RUNNER_INSTANCE_PROFILE    the hosts' instance profile ARN
+# REUSABLE, not scheduled here: the fleet, its AWS account and its role belong
+# to the consumer, and so do the run's logs. They name the account, the fleet's
+# subnets and regions and the scaler's public URL, which a public repository
+# would publish to anyone. The consumer calls this from its own schedule
+# (docs: scripts/runner-host/wake/README.md, "Refreshing the image").
 
 on:
-  schedule:
-    # Mondays 06:17 UTC (03:17 in Brasília): the quietest hour of the week.
-    - cron: '17 6 * * 1'
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ci_ref:
+        description: >-
+          The 12-apps/ci ref the image is built from; use the same ref as the
+          `uses:` line (e.g. v2). Resolved to a commit before anything starts.
+        type: string
+        required: true
+      aws_region:
+        description: The fleet's home region (its scaler, SSM token and launch template)
+        type: string
+        required: true
+      expected_account:
+        description: The AWS account the role must land in; anything else stops the run
+        type: string
+        required: true
+      role_arn:
+        description: OIDC role trusting the CALLER's repository and `environment`
+        type: string
+        required: true
+      runner_label:
+        description: The fleet's runner label; its launch template is ci-runner-fleet-<label>
+        type: string
+        required: true
+      function_name:
+        description: The fleet's scaler Lambda, whose settings the redeploy keeps
+        type: string
+        required: true
+      subnet_id:
+        description: A subnet in the home region for the golden and smoke hosts
+        type: string
+        required: true
+      security_group_id:
+        description: The golden and smoke hosts' security group
+        type: string
+        required: true
+      instance_profile_arn:
+        description: The hosts' instance profile ARN
+        type: string
+        required: true
+      environment:
+        description: The caller's deployment environment the role's `sub` names
+        type: string
+        default: runner-image
 
 permissions:
   contents: read
-  id-token: write
-
-concurrency:
-  group: runner-image-refresh
-  cancel-in-progress: false
 
 jobs:
   refresh:
     name: Rebuild and redeploy the runner image
-    if: vars.CI_RUNNER_AWS_ROLE != ''
-    # The role trusts this environment's subject only (README, "One-time
-    # setup"), and the environment only deploys from main.
-    environment: runner-image
+    environment: ${{ inputs.environment }}
     # GitHub's runner on purpose: this job replaces the fleet's image, so it
     # cannot depend on the fleet being healthy, and it may be the fix for a
-    # fleet that is not.
+    # fleet that is not. It also needs the aws CLI ubuntu-latest ships.
     runs-on: ubuntu-latest
     # Measured on 2026-09-26: settings and golden ~25 min, imaging ~15, the
     # smoke host ~8; deploy.sh then copies to each region (up to 90 min each
     # in the worst case). The role session below (3 h) must outlast the job
     # AND leave the always() step credentials to terminate with.
     timeout-minutes: 165
+    concurrency:
+      group: runner-image-refresh-${{ inputs.expected_account }}-${{ inputs.runner_label }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
+      # A reusable workflow's plain checkout is the CALLER's tree: the kit is
+      # checked out explicitly, at the ref the caller named.
+      - name: Check out the runner-host kit
+        uses: actions/checkout@v4
+        with:
+          repository: 12-apps/ci
+          ref: ${{ inputs.ci_ref }}
+          path: .ci-engine
+          persist-credentials: false
+      - name: Resolve the kit's commit
+        id: kit
+        shell: bash
+        run: echo "sha=$(git -C .ci-engine rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -58,8 +107,9 @@ jobs:
         id: aws
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-region: us-east-1
-          role-to-assume: ${{ vars.CI_RUNNER_AWS_ROLE }}
+          aws-region: ${{ inputs.aws_region }}
+          role-to-assume: ${{ inputs.role_arn }}
+          allowed-account-ids: ${{ inputs.expected_account }}
           role-session-name: runner-image-refresh
           # The default is one hour; credentials expiring mid-deploy would
           # stop it half-rolled and leave the hosts running.
@@ -67,20 +117,22 @@ jobs:
       - name: Rebuild, check a fresh host, redeploy
         shell: bash
         env:
-          AWS_REGION: us-east-1
-          CI_REF: ${{ github.sha }}
+          AWS_REGION: ${{ inputs.aws_region }}
+          CI_REF: ${{ steps.kit.outputs.sha }}
           REFRESH_ID: ${{ github.run_id }}
-          SUBNET_ID: ${{ vars.CI_RUNNER_SUBNET_ID }}
-          SECURITY_GROUP_ID: ${{ vars.CI_RUNNER_SECURITY_GROUP_ID }}
-          INSTANCE_PROFILE_ARN: ${{ vars.CI_RUNNER_INSTANCE_PROFILE }}
-        run: exec bash scripts/runner-host/wake/refresh-image.sh
+          RUNNER_LABEL: ${{ inputs.runner_label }}
+          FUNCTION_NAME: ${{ inputs.function_name }}
+          SUBNET_ID: ${{ inputs.subnet_id }}
+          SECURITY_GROUP_ID: ${{ inputs.security_group_id }}
+          INSTANCE_PROFILE_ARN: ${{ inputs.instance_profile_arn }}
+        run: exec bash .ci-engine/scripts/runner-host/wake/refresh-image.sh
       # A cancelled or timed-out step is SIGKILLed with its process tree, so
       # the script's exit trap may never run: terminate what this run tagged.
       - name: Terminate this run's hosts
         if: always() && steps.aws.outcome == 'success'
         shell: bash
         env:
-          AWS_REGION: us-east-1
+          AWS_REGION: ${{ inputs.aws_region }}
           REFRESH_ID: ${{ github.run_id }}
         run: |
           ids=$(aws ec2 describe-instances --filters "Name=tag:ci-runner-refresh,Values=${REFRESH_ID}" \
