@@ -99,5 +99,5 @@ jobs:
    ```
 
    The role can change IAM, Lambda and EC2, so the `sub` names a deployment environment rather than a branch: a `ref:refs/heads/main` subject would let ANY workflow on the consumer's `main` with `id-token: write` assume it. `job_workflow_ref` narrows it further, to this workflow at a released tag, so a job in the consumer that declares the environment but runs its own steps is refused too.
-3. **Consumer → Settings → Environments → runner-image** (it appears after the first run, or create it): **Deployment branches → Selected branches → `main`**, so a job on another branch that declares the environment is refused before it gets a token.
+3. **Consumer → Settings → Environments → New environment → `runner-image`**, BEFORE step 4: **Deployment branches → Selected branches → `main`**, so a job on another branch that declares the environment is refused before it gets a token. Do not let the first run create it: GitHub creates a missing environment with no branch rule at all.
 4. **Consumer → Settings → Variables → Actions**: `CI_RUNNER_AWS_ROLE` (the role ARN), `CI_RUNNER_SUBNET_ID`, `CI_RUNNER_SECURITY_GROUP_ID`, `CI_RUNNER_INSTANCE_PROFILE` (the values deploy.sh was last run with). Until `CI_RUNNER_AWS_ROLE` exists, the caller's `if:` skips the job.

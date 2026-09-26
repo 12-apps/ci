@@ -31,4 +31,5 @@ sed -i 's/^CI_RUNNER_TOKEN=.*/CI_RUNNER_TOKEN=/' /etc/ci-runner/env
 rm -f /etc/ci-runner/token.env
 cloud-init clean --logs --seed >/dev/null 2>&1 || true
 truncate -s 0 /etc/machine-id
-echo "prepare-golden: ready to image; deploy.sh GOLDEN_INSTANCE_ID=$(cloud-init query instance_id 2>/dev/null || echo '<this instance>')"
+# deploy.sh has no defaults for the fleet it deploys: the hint names them all.
+echo "prepare-golden: ready to image; GOLDEN_INSTANCE_ID=$(cloud-init query instance_id 2>/dev/null || echo '<this instance>') AWS_REGION=<home region> REPOSITORY=<owner/repo> RUNNER_LABEL=<label> FUNCTION_NAME=<scaler> deploy.sh"
