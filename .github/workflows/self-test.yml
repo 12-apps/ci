@@ -106,6 +106,12 @@ jobs:
         shell: bash
         run: node --test .github/actions/package-gates/__tests__/package-gates.test.mjs
 
+      # The MCP test-coverage exemptions ratchet, run as a pull request would
+      # in a throwaway repo with a real origin: grow, touch, adopt, error.
+      - name: MCP exemptions ratchet
+        shell: bash
+        run: node --test .github/actions/mcp-exemptions-ratchet/__tests__/*.test.mjs
+
       # The failure ledger's EXTRACTOR is the piece that fails silently. A gate
       # that reproduces a failure goes red and one that cannot read its ledger
       # says so, but a detector that stopped recognising a runner's output
