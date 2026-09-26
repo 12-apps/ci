@@ -39,6 +39,13 @@ test("the rollback is the previous image the template launched, not the previous
   assert.deepEqual(out.find((o) => o.id === "ami-0589").snapshots, ["snap-0589"]);
 });
 
+test("the default version's image stays even when a rollback made it an old version", () => {
+  // Someone pointed the template's default back at version 2 (ami-05b2).
+  const rolledBack = history.map((v) => (v.VersionNumber === 2 ? { ...v, DefaultVersion: true } : v));
+  assert.deepEqual(launchedImages(rolledBack), ["ami-0f36", "ami-025b", "ami-05b2"]);
+  assert.ok(!ids(imagesToPrune(useast1, { held: launchedImages(rolledBack) })).includes("ami-05b2"));
+});
+
 test("an image a live host was launched from stays, however old", () => {
   const out = imagesToPrune(useast1, { held: [...launchedImages(history), "ami-0589"] });
   assert.ok(!ids(out).includes("ami-0589"));

@@ -8,8 +8,9 @@
 // deregisters them with their snapshots.
 //
 // An image is kept when it is
-//   - one of the last `keep` DISTINCT images the region's launch template
-//     launched, newest version first: the one in use and the one before it,
+//   - the image of the launch template's DEFAULT version (what the fleet
+//     launches, even when a rollback pointed it at an older version), or one
+//     of the last `keep` DISTINCT images the template launched, newest first: the one in use and the one before it,
 //     which is the rollback (deploy.sh AMI_ID=<it>). By template history, not
 //     by date: a newer image that was built and never deployed is not a
 //     rollback, and a redeploy of the same image is not a new one;
@@ -27,8 +28,11 @@
 import { readFileSync } from "node:fs";
 
 /**
- * The last `keep` distinct images a launch template launched, newest first.
- * @param {{ VersionNumber: number, LaunchTemplateData?: { ImageId?: string } }[]} versions
+ * The last `keep` distinct images a launch template launched, newest first,
+ * plus the image of its DEFAULT version wherever that sits: the fleet launches
+ * `$Default`, and a rollback done by pointing the default at an older version
+ * must not have its image deleted as "old".
+ * @param {{ VersionNumber: number, DefaultVersion?: boolean, LaunchTemplateData?: { ImageId?: string } }[]} versions
  */
 export function launchedImages(versions, keep = 2) {
   const out = [];
@@ -37,6 +41,8 @@ export function launchedImages(versions, keep = 2) {
     if (id && !out.includes(id)) out.push(id);
     if (out.length >= keep) break;
   }
+  const current = versions.find((v) => v.DefaultVersion)?.LaunchTemplateData?.ImageId;
+  if (current && !out.includes(current)) out.push(current);
   return out;
 }
 
