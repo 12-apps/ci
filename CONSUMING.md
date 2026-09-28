@@ -95,40 +95,46 @@ it, to save a `pnpm install` that took 9-24 s on the same hosts.
 `read` keeps using an existing cache and never writes one; `none` builds from
 scratch. Any other value fails the build job before it builds.
 
-#### Deploying on a schedule instead of on every push (`cd-gate`, `base_sha`)
+#### At most one deploy every X minutes (`cd-gate`, `base_sha`)
 
-On a busy day a push-triggered CD builds and rolls out for every merge. To
-deploy every X minutes instead, and only when something landed, trigger the
-caller on a `schedule` and put the gate in front of the engine:
+A push-triggered CD builds and rolls out on every merge. To keep deploys at
+least X minutes apart while still shipping every merge, put the gate in front
+of the engine and give it a cancelling concurrency group:
 
 ```yaml
 on:
-  schedule:
-    - cron: '*/30 * * * *'   # X = 30 min; '0 * * * *' = hourly
+  push: { branches: [main] }
   workflow_dispatch: {}
-concurrency: { group: cd, cancel-in-progress: false }
+env:
+  DEPLOY_EVERY_MINUTES: 30          # X
 jobs:
   gate:
     runs-on: ubuntu-latest
+    timeout-minutes: 60             # must exceed X
     permissions: { actions: read }
+    concurrency: { group: cd-gate, cancel-in-progress: true }
     outputs:
-      deploy: ${{ steps.g.outputs.deploy }}
       base_sha: ${{ steps.g.outputs.base_sha }}
     steps:
       - id: g
         uses: 12-apps/ci/.github/actions/cd-gate@v2
+        with:
+          min_interval_minutes: ${{ env.DEPLOY_EVERY_MINUTES }}
   cd:
     needs: gate
-    if: needs.gate.outputs.deploy == 'true'
+    concurrency: { group: cd-deploy, cancel-in-progress: false }
     uses: 12-apps/ci/.github/workflows/cd.yml@v2
     with:
       base_sha: ${{ needs.gate.outputs.base_sha }}
 ```
 
-- **When it deploys:** the gate deploys when the branch moved since the last run that attempted a deploy, meaning its `Discover targets` ran. It does not use "in the last X minutes": GitHub starts scheduled runs late, often by 5-20 min, so a fixed window loses a merge that lands between a punctual tick and a late one.
-- **Failed and cancelled runs:** a failed attempt waits for the next merge. A cancelled run was never an attempt, so its commit ships on the next tick.
-- **Manual runs:** a manual dispatch always deploys.
-- **`base_sha`:** the last successfully deployed commit. The image-reuse planner diffs against it and copies its tags; a schedule has no `github.event.before` to use instead. Empty means a full rebuild, which is also what the gate answers when it cannot read the run history.
+- **How the gate paces deploys:** it waits until X minutes have passed since the last deploy attempt started, meaning its `Discover targets` started, whether or not it is still running. Then it deploys.
+- **Bursts of merges:** a newer merge cancels a gate that is still waiting. A burst becomes one deploy of the newest commit, and the last merge of a burst always ships. A deploy that is building is never cancelled.
+- **Manual runs:** a manual dispatch never waits.
+
+**Why not a `schedule`?** GitHub started future-pay's daily crons 3-7.5 hours late on every day of 2026-09-15..28, so a cron is no clock for "every X minutes". Push events arrive on time. Without `min_interval_minutes` the gate still supports a scheduled caller: it deploys only when the branch moved since the last attempt.
+
+**`base_sha`** is the last successfully deployed commit. The image-reuse planner diffs against it and copies its tags. Empty means a full rebuild, which is also what the gate answers when it cannot read the run history.
 
 #### Root-level build inputs (`global_build_inputs`)
 

@@ -1,14 +1,20 @@
-name: 'CD schedule gate'
+name: 'CD gate'
 description: >-
-  For a CD that runs on a schedule: deploy only when the branch moved since the
-  last deploy attempt, and name the last successfully deployed commit as the
-  image-reuse base. Any other event always deploys. Ships
+  Paces a CD. With min_interval_minutes, a push waits until that long has
+  passed since the last deploy attempt started, then deploys (give the gate job
+  a cancelling concurrency group, so a newer merge replaces a waiting gate).
+  Without it, a scheduled run deploys only when the branch moved. Either way it
+  names the last successfully deployed commit as the image-reuse base. Ships
   scripts/deploy/cd-gate.mjs, which argues the rules.
 inputs:
   token:
     description: 'Reads the workflow run history (actions: read).'
     required: false
     default: ${{ github.token }}
+  min_interval_minutes:
+    description: 'At least this many minutes between deploy attempts; empty for the schedule mode.'
+    required: false
+    default: ''
   discover_job:
     description: "The engine's first job; a run whose copy of it ran to an end was a deploy attempt."
     required: false
@@ -31,4 +37,5 @@ runs:
       env:
         GITHUB_TOKEN: ${{ inputs.token }}
         DISCOVER_JOB: ${{ inputs.discover_job }}
+        MIN_INTERVAL_MINUTES: ${{ inputs.min_interval_minutes }}
       run: node "$GITHUB_ACTION_PATH/../../../scripts/deploy/cd-gate.mjs"
