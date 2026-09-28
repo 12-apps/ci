@@ -32,7 +32,6 @@ const SELECTED = "${{ vars.CI_RUNNER || 'ubuntu-latest' }}";
  * until someone has said what the image has that the fleet lacks.
  */
 const PINNED = new Map([
-  ["expo-apk.yml:apk", "gradle needs the Android SDK ubuntu-latest ships preinstalled"],
   ["deploy-aws.yml:deploy", "scripts/deploy/aws.mjs runs the aws CLI ubuntu-latest ships preinstalled"],
   ["runner-image-refresh.yml:refresh", "it replaces the fleet's image, so it cannot wait on the fleet; and it runs the aws CLI"],
 ]);

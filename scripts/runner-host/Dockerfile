@@ -105,6 +105,36 @@ RUN index=$(curl -fsSL https://nodejs.org/dist/index.json) \
     done \
  && chown -R runner:runner /opt/hostedtoolcache
 
+# The Android toolchain a React Native / Expo release build compiles with
+# (12-apps/ci's expo-apk.yml), at the versions its Gradle asks for, so the APK
+# builds here instead of on GitHub's 2-vCPU `ubuntu-latest`, and without
+# downloading ~1 GB of NDK per build. ANDROID_HOME is where AGP and
+# android-actions/setup-android look first. Pinned: a version the app asks for
+# that is missing here is still downloaded by AGP, only slower, so bump these
+# when the app's react-native does (its gradle/libs.versions.toml names them).
+# ccache: the app's CMake uses it when it is on PATH, and expo-apk.yml points
+# every other CMake project at it; the cache itself travels with the workflow.
+ARG ANDROID_CMDLINE_TOOLS=15859902
+ARG ANDROID_PACKAGES="platform-tools platforms;android-36 build-tools;36.0.0 ndk;27.1.12297006 cmake;3.22.1"
+ENV ANDROID_HOME=/opt/android-sdk \
+    ANDROID_SDK_ROOT=/opt/android-sdk
+RUN apt-install ccache openjdk-17-jdk-headless \
+ && mkdir -p "$ANDROID_HOME/cmdline-tools" \
+ && curl -fsSL -o /tmp/cmdline-tools.zip \
+      "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS}_latest.zip" \
+ && unzip -q /tmp/cmdline-tools.zip -d "$ANDROID_HOME/cmdline-tools" \
+ && mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest" \
+ && rm /tmp/cmdline-tools.zip \
+ && (yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null) \
+ && for pkg in ${ANDROID_PACKAGES}; do set -- "$@" "$pkg"; done \
+ && "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "$@" > /dev/null \
+ && test -x "$ANDROID_HOME/ndk/27.1.12297006/ndk-build" \
+ && test -x "$ANDROID_HOME/cmake/3.22.1/bin/cmake" \
+ && apt-get purge -y openjdk-17-jdk-headless && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/* /root/.android \
+ && chown -R runner:runner "$ANDROID_HOME" \
+ && ccache --version
+
 WORKDIR /home/runner/actions-runner
 RUN test -n "$RUNNER_VERSION" \
  && curl -fsSL -o runner.tgz \
