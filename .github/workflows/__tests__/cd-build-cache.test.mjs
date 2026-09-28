@@ -57,3 +57,35 @@ test("the build refuses any other value instead of guessing one", () => {
     "the check runs before the build",
   );
 });
+
+// ── reproducible images ────────────────────────────────────────────────────
+// A matrix entry with `reproducible: true` (deploy/config.json) is exported with
+// its timestamps rewritten to SOURCE_DATE_EPOCH=0, so an unchanged layer keeps
+// its digest. Every other image pushes exactly as before.
+
+function stepValue(key) {
+  const m = new RegExp(`^\\s+${key}: \\$\\{\\{(.*)\\}\\}\\s*$`, "m").exec(yaml);
+  assert.ok(m, `cd.yml sets ${key} from an expression`);
+  return m[1];
+}
+
+function evalMatrix(expr, reproducible) {
+  const js = expr
+    .replace(/matrix\.reproducible/g, JSON.stringify(reproducible))
+    .replace(/'([^']*)'/g, (_, s) => JSON.stringify(s));
+  return Function(`"use strict"; return (${js});`)();
+}
+
+test("a reproducible image pushes through an image output with rewrite-timestamp", () => {
+  assert.equal(evalMatrix(stepValue("push"), true), false);
+  assert.equal(evalMatrix(stepValue("outputs"), true), "type=image,push=true,rewrite-timestamp=true");
+  assert.match(yaml, /\$\{\{ matrix\.reproducible == true && 'SOURCE_DATE_EPOCH=0' \|\| '' \}\}/);
+});
+
+test("any other image pushes as before: push true, no outputs, no SOURCE_DATE_EPOCH", () => {
+  for (const r of [false, undefined]) {
+    assert.equal(evalMatrix(stepValue("push"), r), true);
+    assert.equal(evalMatrix(stepValue("outputs"), r), "");
+    assert.equal(evalMatrix("matrix.reproducible == true && 'SOURCE_DATE_EPOCH=0' || ''", r), "");
+  }
+});
