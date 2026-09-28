@@ -16,7 +16,11 @@
 #                cache). memory.peak counts page cache the kernel would drop
 #                under pressure, so it overstates what the job needs;
 #              - the peak cores used over any 5 s window;
-#              - the peak disk IOPS and MB/s over any 5 s window.
+#              - the peak disk IOPS and MB/s over any 5 s window. The IOPS
+#                are io.stat's, which the kernel counts per bio BEFORE it
+#                merges them into device requests: the fleet's jobs peaked
+#                at ~27k on volumes provisioned for 6000 (2026-09-28). Compare
+#                MB/s and ioWaitPct with a volume's limits, not this.
 #            (The network needs no sampler: its totals are enough.)
 #            The maxima restart when the job starts, so the runner's own boot
 #            is not billed to the job.

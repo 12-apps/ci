@@ -68,7 +68,9 @@ read from the job container's own cgroup, so it covers the service containers
 the job starts too. Memory is the peak WORKING SET, page cache the kernel would
 drop left out. `*WaitPct` is the share of the job's time something waited for
 CPU, memory or disk. `netTxMiB` is what the job sent out, which a cloud bills
-as egress.
+as egress. `peakIops` counts bios before the kernel merges them, so it runs far
+above what the volume serves; compare `peakDiskMiBps` and `ioWaitPct` with a
+volume's limits instead.
 
 `usage-report.mjs` gathers those lines from every job's log (GitHub keeps them
 90 days) into one row per kind of job, with the memory tier it fits (largest
