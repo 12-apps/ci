@@ -17,6 +17,11 @@ unset RUNNER_JITCONFIG
 # `localhost` must be 127.0.0.1 alone, as on ubuntu-latest (localhost.sh).
 ci-runner-localhost
 
+# What the job uses, sampled for the container's life (job-usage.sh). The
+# runner's start/complete hooks (ACTIONS_RUNNER_HOOK_JOB_*, set in the image)
+# read it and print one `ci-runner-usage` line into the job's log.
+ci-runner-job-usage sample >/dev/null 2>&1 &
+
 dockerd --host=unix:///var/run/docker.sock >/var/log/dockerd.log 2>&1 &
 for _ in $(seq 1 120); do
   docker info >/dev/null 2>&1 && break
