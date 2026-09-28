@@ -258,6 +258,54 @@ jobs:
             gha | read | none) ;;
             *) echo "::error::build_cache must be gha, read or none, not '${BUILD_CACHE}'"; exit 1 ;;
           esac
+      # A `base` (deploy/config.json) is a stage built once per content of its
+      # inputs, typically the dependency tree, and reused by every later build
+      # until they change: no install, no copy, and its layers are the ones the
+      # registry and the host already hold. Keyed by the git blob ids of the
+      # inputs plus the Dockerfile and the target, so a change to any of them
+      # is a new tag. An input that matches no tracked file fails the build:
+      # a key that silently stopped covering a file would serve a stale base.
+      - name: Resolve the base image
+        id: base
+        if: matrix.base
+        shell: bash
+        env:
+          REF: ${{ matrix.ref }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          BASE_TARGET: ${{ matrix.base.target }}
+          BASE_INPUTS: ${{ toJSON(matrix.base.inputs) }}
+        run: |
+          set -euo pipefail
+          mapfile -t inputs < <(jq -r '.[]' <<<"$BASE_INPUTS")
+          for p in "${inputs[@]}"; do
+            if [ -z "$(git ls-files -- "$p")" ]; then
+              echo "::error::base input '$p' matches no tracked file; fix deploy/config.json"; exit 1
+            fi
+          done
+          key=$( { git ls-files -s -- "$DOCKERFILE" "${inputs[@]}"; echo "target=$BASE_TARGET"; } | sha256sum | cut -c1-16)
+          ref="${REF}:base-${key}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          if docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::base $ref already built: reusing it"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::base $ref not built yet: building it"
+          fi
+      - name: Build & push the base image
+        if: matrix.base && steps.base.outputs.exists == 'false'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.base.target }}
+          outputs: type=image,push=true,rewrite-timestamp=true
+          tags: ${{ steps.base.outputs.ref }}
+          build-args: |
+            ${{ inputs.build_args }}
+            SOURCE_DATE_EPOCH=0
+          secrets: |
+            npm_token=${{ secrets.NPM_TOKEN }}
       - name: Build & push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
@@ -280,6 +328,7 @@ jobs:
           build-args: |
             ${{ inputs.build_args }}
             ${{ matrix.reproducible == true && 'SOURCE_DATE_EPOCH=0' || '' }}
+            ${{ matrix.base && format('{0}={1}', matrix.base.arg, steps.base.outputs.ref) || '' }}
           secrets: |
             sentry_auth_token=${{ secrets.SENTRY_AUTH_TOKEN }}
             npm_token=${{ secrets.NPM_TOKEN }}

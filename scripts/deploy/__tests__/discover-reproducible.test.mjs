@@ -49,3 +49,12 @@ test("reproducible is carried into the matrix, and off unless it is literally tr
     ],
   );
 });
+
+test("a base block is carried into the matrix as written, and is null when absent", () => {
+  const base = { target: "runner-base", arg: "RUNNER_BASE", inputs: ["pnpm-lock.yaml"] };
+  const images = discover([
+    { type: "container", dockerfile: "apps/app0/Dockerfile", base },
+    { type: "container", dockerfile: "apps/app1/Dockerfile" },
+  ]);
+  assert.deepEqual(images.map((i) => i.base), [base, null]);
+});
