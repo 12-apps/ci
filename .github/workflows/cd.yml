@@ -264,11 +264,22 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           target: ${{ matrix.target }}
-          push: true
+          # A `reproducible` image (deploy/config.json) is exported with every
+          # timestamp in its layers rewritten to SOURCE_DATE_EPOCH. Without it
+          # a layer rebuilt from identical files still gets a new digest (the
+          # build's mtimes, the directory entries BuildKit writes) and is pushed
+          # and pulled again: future-pay's 1.6 GB dependency layer on every
+          # deploy once the layer cache was off (2026-09-28). Opt-in, because a
+          # static server that derives ETag from mtime + size would answer 304
+          # for a changed index.html of the same size.
+          push: ${{ matrix.reproducible != true }}
+          outputs: ${{ matrix.reproducible == true && 'type=image,push=true,rewrite-timestamp=true' || '' }}
           tags: |
             ${{ matrix.ref }}:${{ github.sha }}
             ${{ matrix.ref }}:main
-          build-args: ${{ inputs.build_args }}
+          build-args: |
+            ${{ inputs.build_args }}
+            ${{ matrix.reproducible == true && 'SOURCE_DATE_EPOCH=0' || '' }}
           secrets: |
             sentry_auth_token=${{ secrets.SENTRY_AUTH_TOKEN }}
             npm_token=${{ secrets.NPM_TOKEN }}

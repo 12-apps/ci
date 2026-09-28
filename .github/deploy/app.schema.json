@@ -30,7 +30,9 @@
                   "dockerfile": { "type": "string" },
                   "target": { "type": "string", "description": "Dockerfile build stage; defaults to runner." },
                   "cache": { "type": "string", "description": "buildx cache scope; defaults to the image name." },
-                  "role": { "enum": ["runner", "migrate"], "description": "How the deploy uses the image." }
+                  "role": { "enum": ["runner", "migrate"], "description": "How the deploy uses the image." },
+                  "inputs": { "type": "array", "items": { "type": "string" }, "description": "Extra root-anchored paths that rebuild this image (a trailing / is a directory prefix)." },
+                  "reproducible": { "type": "boolean", "description": "Export with every file timestamp set to 1970-01-01 (SOURCE_DATE_EPOCH=0, rewrite-timestamp), so an unchanged layer keeps its digest and is not pushed again. Only for images that serve no files by mtime: Caddy and other static servers build ETag and Last-Modified from it." }
                 }
               },
               {
