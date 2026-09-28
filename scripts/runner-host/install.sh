@@ -98,7 +98,7 @@ sysctl --quiet --system
 install -d "$prefix"
 install -m 0644 "$here/Dockerfile" "$prefix/Dockerfile"
 install -m 0755 "$here/entrypoint.sh" "$here/localhost.sh" "$here/supervisor.sh" "$here/build-image.sh" \
-  "$here/status.sh" "$here/uninstall.sh" "$here/idle-stop.sh" "$here/fetch-credential.sh" "$prefix/"
+  "$here/status.sh" "$here/uninstall.sh" "$here/idle-stop.sh" "$here/fetch-credential.sh" "$here/job-usage.sh" "$prefix/"
 ln -sf "$prefix/status.sh" /usr/local/bin/ci-runner-status
 
 # Runner and supervisor logs go to journald; cap what they can take.
