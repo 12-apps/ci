@@ -32,7 +32,7 @@
 #   PLAN_ONLY=1         print the human summary only; never write GITHUB_OUTPUT
 # Out ($GITHUB_OUTPUT):
 #   image_namespace=ghcr.io/<lower(owner/repo)>
-#   images=[{app,dir,provider,image,ref,dockerfile,target,cache,role,inputs,reproducible}]     has_images=true|false
+#   images=[{app,dir,provider,image,ref,dockerfile,target,cache,role,inputs,reproducible,base}]     has_images=true|false
 #   statics=[{app,dir,provider,command,outputPath,artifact,projectName}]   has_statics=true|false
 #   workers=[{app,dir,provider,wranglerDir,command}]                       has_workers=true|false
 #
@@ -97,7 +97,8 @@ plan="$(jq -n --arg ns "$NS" --arg target "$TARGET" --argjson descs "$descriptor
             cache:  (.build.cache // (.build.image // .app)),
             role:   (.build.role // "runner"),
             inputs: (.build.inputs // []),
-            reproducible: (.build.reproducible == true) } ],
+            reproducible: (.build.reproducible == true),
+            base: (.build.base // null) } ],
       statics: [ .[] | select(.build.type == "static")
         | { app, dir, provider,
             command: .build.command,

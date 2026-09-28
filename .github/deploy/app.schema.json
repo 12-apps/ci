@@ -32,6 +32,17 @@
                   "cache": { "type": "string", "description": "buildx cache scope; defaults to the image name." },
                   "role": { "enum": ["runner", "migrate"], "description": "How the deploy uses the image." },
                   "inputs": { "type": "array", "items": { "type": "string" }, "description": "Extra root-anchored paths that rebuild this image (a trailing / is a directory prefix)." },
+                  "base": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["target", "arg", "inputs"],
+                    "description": "A stage built once per content of `inputs` and reused by every build until they change: pushed as <image>:base-<hash of inputs + Dockerfile + target>, always with reproducible layers, and handed to the build as build-arg `arg`. The Dockerfile's final stage starts FROM that arg.",
+                    "properties": {
+                      "target": { "type": "string", "description": "Dockerfile stage the base image is built from." },
+                      "arg": { "type": "string", "description": "Build arg the final stage takes its FROM from; default it to `target` in the Dockerfile so a plain build still works." },
+                      "inputs": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "git pathspecs of every file the base stage reads. Each must match a tracked file." }
+                    }
+                  },
                   "reproducible": { "type": "boolean", "description": "Export with every file timestamp set to 1970-01-01 (SOURCE_DATE_EPOCH=0, rewrite-timestamp), so an unchanged layer keeps its digest and is not pushed again. Only for images that serve no files by mtime: Caddy and other static servers build ETag and Last-Modified from it." }
                 }
               },
