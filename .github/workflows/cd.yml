@@ -80,6 +80,23 @@ on:
         type: string
         required: false
         default: ''
+      build_cache:
+        description: >-
+          Where image builds keep their layer cache. `gha` (default): read and
+          write the GitHub Actions cache, every stage (`mode=max`). `read`: read
+          it, never write. `none`: no layer cache at all.
+
+          Writing is not free on a self-hosted runner. Every layer a build
+          produces that the cache lacks is UPLOADED, and a runner on a cloud
+          host pays for what it sends: future-pay's fleet sent 0.5-2.2 GB per
+          image on each deploy that changed the lockfile, six of them a day,
+          and spent 80-340 s per image writing it. Measured on the same fleet
+          (2026-09-28), the `pnpm install` the cache saves took 9-24 s. On
+          GitHub-hosted runners the upload costs nothing, so `gha` stays the
+          default.
+        type: string
+        required: false
+        default: gha
       build_args:
         description: >-
           Extra `--build-arg` lines (`KEY=value`, one per line) handed to every
@@ -232,6 +249,15 @@ jobs:
       # set no such secret pass an empty string, BuildKit mounts an empty file,
       # and every Dockerfile that does not ask for the secret ignores it
       # entirely. Nothing about a particular consumer's app is encoded here.
+      - name: Check the build cache mode
+        shell: bash
+        env:
+          BUILD_CACHE: ${{ inputs.build_cache }}
+        run: |
+          case "$BUILD_CACHE" in
+            gha | read | none) ;;
+            *) echo "::error::build_cache must be gha, read or none, not '${BUILD_CACHE}'"; exit 1 ;;
+          esac
       - name: Build & push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
@@ -246,8 +272,9 @@ jobs:
           secrets: |
             sentry_auth_token=${{ secrets.SENTRY_AUTH_TOKEN }}
             npm_token=${{ secrets.NPM_TOKEN }}
-          cache-from: type=gha,scope=${{ matrix.cache }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.cache }}
+          # build_cache above: `none` reads nothing, and only `gha` writes.
+          cache-from: ${{ inputs.build_cache != 'none' && format('type=gha,scope={0}', matrix.cache) || '' }}
+          cache-to: ${{ inputs.build_cache == 'gha' && format('type=gha,mode=max,scope={0}', matrix.cache) || '' }}
 
   # ---------------------------------------------------------------------------
   # Reuse lane — retag every unaffected image instead of rebuilding it.
