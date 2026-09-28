@@ -39,6 +39,10 @@
 #         KEY_ALIAS: ${{ secrets.MOTOBOY_KEY_ALIAS }}
 #         KEY_PASSWORD: ${{ secrets.MOTOBOY_KEY_PASSWORD }}
 #
+# An app on `@sentry/react-native` can add `sentry-org` / `sentry-project`
+# under `with:` and `SENTRY_AUTH_TOKEN` under `secrets:` to upload its source
+# maps; without all three the upload is switched off (see the Assemble step).
+#
 # ## Map the secrets; do not `inherit` them unless the names already match
 #
 # The example above spells every secret out, and an earlier draft of it said
@@ -160,6 +164,21 @@ on:
         type: boolean
         required: false
         default: true
+      sentry-org:
+        description: >-
+          Sentry organization slug the release build uploads its JavaScript
+          source maps to (read by the Sentry Gradle script as SENTRY_ORG). Not
+          a secret. Absent, nothing is uploaded and the build still succeeds.
+        type: string
+        required: false
+        default: ''
+      sentry-project:
+        description: >-
+          Sentry project slug for this app's source maps (SENTRY_PROJECT).
+          Absent, nothing is uploaded and the build still succeeds.
+        type: string
+        required: false
+        default: ''
     secrets:
       NPM_TOKEN:
         description: >-
@@ -176,6 +195,13 @@ on:
       KEY_ALIAS:
         required: false
       KEY_PASSWORD:
+        required: false
+      SENTRY_AUTH_TOKEN:
+        description: >-
+          Sentry auth token for the source-map upload `assembleRelease` runs
+          when the app uses `@sentry/react-native`. Optional, like the keystore:
+          absent (or with `sentry-org` / `sentry-project` absent), the upload
+          is switched off and the APK ships without symbolication.
         required: false
 
 # A CEILING, not a grant — it cannot give a job anything the caller withheld.
@@ -281,7 +307,27 @@ jobs:
           distribution: temurin
           java-version: ${{ inputs.java-version }}
 
-      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+      # ── The SDK, minus the package Google withdrew ──────────────────────
+      #
+      # v3.2.2 of this action defaulted `packages` to `tools platform-tools`.
+      # Google stopped serving the legacy SDK `tools` package, and from
+      # 2026-09-14 ~20:00Z every run of this job died right here, before a
+      # line of the consumer's code was compiled (future-pay FUT-2129):
+      #
+      #     Warning: Failed to find package 'tools'
+      #     Error: The process '…/cmdline-tools/16.0/bin/sdkmanager' failed with exit code 1
+      #
+      # v4.0.2 dropped `tools` from the default and skips it with a warning if
+      # it is asked for (upstream #537); v4 also moves the action off Node 20.
+      # `packages` is still spelled out, so the next change of default cannot
+      # reach this job without a diff here. Nothing this job runs needs
+      # `tools`: sdkmanager ships with cmdline-tools, which the action installs
+      # whatever `packages` says, and Gradle fetches the platform and
+      # build-tools the generated project asks for, under the licences this
+      # step accepts.
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: platform-tools
 
       # `android/` is NOT committed — it is generated from app.json, so the
       # package id, the icons and the version have exactly one source of truth.
@@ -372,6 +418,17 @@ jobs:
       # buildType `signingConfig signingConfigs.debug`, so an unconfigured
       # release is signed with the universal debug key. That loses the upgrade
       # path and nothing else, which is the trade the summary reports.
+      #
+      # ── Sentry source maps: uploaded when configured, never a failure ────
+      #
+      # An app on `@sentry/react-native` gets `sentry.gradle` applied by the
+      # Expo plugin at prebuild, and that script hangs a `sentry-cli` upload
+      # off every release bundle task. With no org, project or token that
+      # upload has nothing to talk to and fails the whole build. So the three
+      # values reach Gradle as the env vars the plugin's `sentry.properties`
+      # falls back to, and when any of them is missing the upload is switched
+      # off with `SENTRY_DISABLE_AUTO_UPLOAD` — the same "degrade, never fail"
+      # contract the keystore has. For an app without Sentry these are inert.
       - name: Assemble
         id: assemble
         env:
@@ -380,9 +437,18 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ inputs.sentry-org }}
+          SENTRY_PROJECT: ${{ inputs.sentry-project }}
         working-directory: ${{ inputs.app-path }}/android
         run: |
           set -euo pipefail
+          if [ -n "${SENTRY_AUTH_TOKEN:-}" ] && [ -n "${SENTRY_ORG:-}" ] && [ -n "${SENTRY_PROJECT:-}" ]; then
+            echo "sentry=Sentry source-map upload on, to ${SENTRY_ORG}/${SENTRY_PROJECT}" >> "$GITHUB_OUTPUT"
+          else
+            export SENTRY_DISABLE_AUTO_UPLOAD=true
+            echo "sentry=no Sentry source-map upload (SENTRY_AUTH_TOKEN, sentry-org or sentry-project absent)" >> "$GITHUB_OUTPUT"
+          fi
           # ALWAYS the release variant. The keystore decides who SIGNS it, never
           # which variant is built — see the note above the step.
           #
@@ -416,6 +482,7 @@ jobs:
         env:
           APK: ${{ steps.assemble.outputs.apk }}
           FLAVOUR: ${{ steps.assemble.outputs.flavour }}
+          SENTRY: ${{ steps.assemble.outputs.sentry }}
           CACHE_KEY: ${{ steps.gradle-cache.outputs.cache-matched-key }}
         working-directory: ${{ inputs.app-path }}/android
         run: |
@@ -478,6 +545,7 @@ jobs:
             echo "- **${FLAVOUR}**"
             echo "- \`${APK}\` — ${SIZE}"
             echo "- ABIs: \`$(echo "$PACKAGED" | paste -sd,)\`"
+            echo "- ${SENTRY}"
             echo "- Gradle cache: \`${CACHE_KEY:-none — cold build}\`"
             echo ""
             echo "Download it from this run's artifacts, then open it on an Android phone."
