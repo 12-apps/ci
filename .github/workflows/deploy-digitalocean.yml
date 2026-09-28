@@ -35,6 +35,16 @@ on:
         type: string
         required: false
         default: ''
+      skip_superseded:
+        description: >-
+          On a push, leave the droplet alone when the branch has moved past this
+          run (its own deploy will ship the newer commit). Set false when the
+          caller paces deploys (actions/cd-gate min_interval_minutes): the newer
+          commit's run then WAITS up to that long, and under a steady stream of
+          merges every run would find itself superseded and nothing would ship.
+        type: boolean
+        required: false
+        default: true
       droplet_name:
         type: string
         required: false
@@ -135,15 +145,16 @@ jobs:
       # here, BEFORE touching the droplet, reclaims that whole run.
       #
       # Skipping is safe in a way cancelling is not: nothing has been mutated yet.
-      # It also removes a live inconsistency — the remote script does
-      # `git reset --hard origin/main` for the compose file while pinning images to
-      # `github.sha`, so a superseded deploy ran B's compose against A's images.
+      # It also removed a live inconsistency, since fixed at the source: the
+      # remote script used to `git reset --hard origin/main` for the compose file
+      # while pinning images to `github.sha`, so a superseded deploy ran B's
+      # compose against A's images. It now syncs the compose of the image sha.
       #
       # Push only. A workflow_dispatch deploy is an explicit human act (a rollback
       # or a re-deploy of a known sha) and must never be second-guessed.
       - name: Supersede check — is this still the branch tip?
         id: supersede
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && inputs.skip_superseded
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -259,8 +270,13 @@ jobs:
           # exit code so a failed deploy still fails the job.
           trap 'rc=$?; git remote set-url origin "$REPO_HTTPS" 2>/dev/null || true; exit $rc' EXIT
           git remote set-url origin "$CLONE_URL"
-          git fetch --depth 1 origin main
-          git reset --hard origin/main
+          # The compose file and nginx config of the commit whose IMAGES this
+          # deploy pins, not whatever `main` is by now: a deploy that runs while
+          # main has moved on (a paced caller, a dispatch of an older sha) would
+          # otherwise start the newer commit's compose on the older images.
+          # IMAGE_TAG is that commit's sha (or `main`, the default).
+          git fetch --depth 1 origin "$IMAGE_TAG"
+          git reset --hard FETCH_HEAD
 
           # Doppler is the single source of truth for secrets — they are injected
           # at container start by `doppler run`; NO secret-bearing .env is written.
