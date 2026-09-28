@@ -7,8 +7,11 @@ import {
   jobGroup,
   parseUsage,
   percentile,
+  overlap,
   renderIdle,
   renderJobs,
+  renderWaits,
+  union,
   summarizeJobs,
 } from "../usage-report.mjs";
 
@@ -120,4 +123,48 @@ test("idleBreakdown: every paid slot-second lands in exactly one bucket", () => 
   assert.equal(u.unused, 2 * 7 * min);
   assert.equal(u.busy + u.startup + u.between + u.tail + u.unused, u.paid);
   assert.match(renderIdle(u), /slot never used \| 0\.2 \| 50\.0%/);
+});
+
+test("union merges overlapping and touching intervals and drops empty ones", () => {
+  assert.deepEqual(union([[5, 8], [1, 3], [2, 4], [8, 9], [7, 7]]), [
+    [1, 4],
+    [5, 9],
+  ]);
+  assert.equal(overlap(0, 10, union([[1, 4], [5, 9]])), 7);
+  assert.equal(overlap(3, 6, union([[1, 4], [5, 9]])), 2);
+  assert.equal(overlap(10, 20, union([[1, 4]])), 0);
+});
+
+test("idleBreakdown: idle slot time while a job was queued is counted as overhead, the rest as no demand", () => {
+  const boot = 1_790_574_985;
+  const min = 60_000;
+  const B = boot * 1000;
+  const job = (slot, start, minutes) => ({
+    runner: `eu-north-1a-ip-10-0-0-9-${slot}-${boot + start * 60}`,
+    hostBootS: boot,
+    startMs: B + start * min,
+    wallMs: minutes * min,
+  });
+  // One slot: boots at 0, first job 2..6, next job 9..10, stops at 12.
+  // A job was queued from 1 to 2 (it waited for this host to come up) and
+  // from 7 to 9 (it waited while this slot turned over).
+  const waiting = union([
+    [B + 1 * min, B + 2 * min],
+    [B + 7 * min, B + 9 * min],
+  ]);
+  const t = idleBreakdown([job(1, 2, 4), job(1, 9, 1)], { slots: 1, idleMinutes: 2, waiting });
+  assert.equal(t.startup, 2 * min);
+  assert.equal(t.whileWaiting.startup, 1 * min);
+  assert.equal(t.between, 3 * min);
+  assert.equal(t.whileWaiting.between, 2 * min);
+  assert.equal(t.tail, 2 * min);
+  assert.equal(t.whileWaiting.tail ?? 0, 0);
+  assert.equal(t.busy + t.startup + t.between + t.tail + t.unused, t.paid);
+  assert.match(renderIdle(t), /between jobs on a slot \| 0\.1 \| 25\.0% \| 0\.0 \|/);
+});
+
+test("renderWaits reports queue-wait percentiles in seconds", () => {
+  const out = renderWaits([10, 20, 30, 40, 1000].map((s) => ({ queuedMs: s * 1000 })));
+  assert.match(out, /\| 5 \| 30 s \| 1000 s \| 1000 s \| 1000 s \|/);
+  assert.equal(renderWaits([]), "No queue times.");
 });

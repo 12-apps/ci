@@ -111,11 +111,36 @@ export function hostAndSlot(runner) {
   return m ? { host: m[1], slot: m[2] } : null;
 }
 
+/** Merge overlapping [from, to] intervals. */
+export function union(intervals) {
+  const out = [];
+  for (const [a, b] of [...intervals].filter(([a, b]) => b > a).sort((x, y) => x[0] - y[0])) {
+    const last = out[out.length - 1];
+    if (last && a <= last[1]) last[1] = Math.max(last[1], b);
+    else out.push([a, b]);
+  }
+  return out;
+}
+
+/** How much of [from, to] lies inside the merged `intervals`. */
+export function overlap(from, to, intervals) {
+  let sum = 0;
+  for (const [a, b] of intervals) sum += Math.max(0, Math.min(to, b) - Math.max(from, a));
+  return sum;
+}
+
 /**
  * Where every paid slot-second went. `usages`: the parsed records (they carry
  * runner, hostBootS, startMs, wallMs).
+ *
+ * `waiting`: merged intervals in which at least one fleet job was queued and
+ * not yet started. Idle slot time inside them is OVERHEAD: GitHub hands a
+ * queued job to any idle runner with its label, so a slot that sat idle while
+ * a job waited was not yet able to take it (still booting, or between jobs
+ * re-registering). Idle time outside them is a lack of demand, which only a
+ * shorter idle wait or fewer hosts can turn into savings.
  */
-export function idleBreakdown(usages, { slots = 2, idleMinutes = 2 } = {}) {
+export function idleBreakdown(usages, { slots = 2, idleMinutes = 2, waiting = [] } = {}) {
   const hosts = new Map();
   for (const u of usages) {
     const hs = hostAndSlot(u.runner);
@@ -128,21 +153,26 @@ export function idleBreakdown(usages, { slots = 2, idleMinutes = 2 } = {}) {
     if (!h.slots.has(hs.slot)) h.slots.set(hs.slot, []);
     h.slots.get(hs.slot).push([u.startMs, u.startMs + u.wallMs]);
   }
-  const total = { hosts: 0, paid: 0, busy: 0, startup: 0, between: 0, tail: 0, unused: 0 };
+  const total = { hosts: 0, paid: 0, busy: 0, startup: 0, between: 0, tail: 0, unused: 0, whileWaiting: {} };
+  const idle = (bucket, from, to) => {
+    if (to <= from) return;
+    total[bucket] += to - from;
+    total.whileWaiting[bucket] = (total.whileWaiting[bucket] ?? 0) + overlap(from, to, waiting);
+  };
   for (const h of hosts.values()) {
     const jobs = [...h.slots.values()];
     const stop = Math.max(...jobs.flat().map(([, end]) => end)) + idleMinutes * 60000;
     const paidPerSlot = stop - h.boot;
     total.hosts += 1;
     total.paid += paidPerSlot * Math.max(slots, h.slots.size);
-    total.unused += paidPerSlot * Math.max(0, slots - h.slots.size);
+    for (let i = h.slots.size; i < slots; i++) idle("unused", h.boot, stop);
     for (const list of jobs) {
       list.sort((a, b) => a[0] - b[0]);
-      total.startup += Math.max(0, list[0][0] - h.boot);
-      total.tail += stop - list[list.length - 1][1];
+      idle("startup", h.boot, list[0][0]);
+      idle("tail", list[list.length - 1][1], stop);
       for (let i = 0; i < list.length; i++) {
         total.busy += list[i][1] - list[i][0];
-        if (i > 0) total.between += Math.max(0, list[i][0] - list[i - 1][1]);
+        if (i > 0) idle("between", list[i - 1][1], list[i][0]);
       }
     }
   }
@@ -156,7 +186,7 @@ const gib = (mib) => (mib === null ? "–" : (mib / 1024).toFixed(1));
 
 export function renderJobs(rows) {
   const head =
-    "| job | runs | job-min | p50 min | cores avg p50 | cores peak p95 | CPU wait p50 | mem p95 GiB | mem max GiB | fits | IO wait p95 | IOPS p95 | MiB/s p95 | sent p50 MiB | sent total GiB | OOM |\n" +
+    "| job | runs | job-min | p50 min | cores avg p50 | cores peak p95 | CPU wait p50 | mem p95 GiB | mem max GiB | fits | IO wait p95 | bio/s p95 (pre-merge) | MiB/s p95 | sent p50 MiB | sent total GiB | OOM |\n" +
     "|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|";
   const body = rows.map(
     (r) =>
@@ -169,18 +199,31 @@ export function renderIdle(t) {
   const h = (ms) => (ms / 3_600_000).toFixed(1);
   const pct = (ms) => (t.paid ? ((100 * ms) / t.paid).toFixed(1) : "0.0");
   const rows = [
-    ["running a job", t.busy],
-    ["startup (boot → first job)", t.startup],
-    ["between jobs on a slot", t.between],
-    ["tail (last job → stop)", t.tail],
-    ["slot never used", t.unused],
+    ["running a job", t.busy, null],
+    ["startup (boot → first job)", t.startup, "startup"],
+    ["between jobs on a slot", t.between, "between"],
+    ["tail (last job → stop)", t.tail, "tail"],
+    ["slot never used", t.unused, "unused"],
   ];
+  const waited = (k) => (k ? h(t.whileWaiting?.[k] ?? 0) : "");
   return [
     `${t.hosts} host boots, ${h(t.paid)} paid slot-hours.`,
     "",
-    "| where the paid slot time went | slot-hours | share |",
-    "|---|--:|--:|",
-    ...rows.map(([k, v]) => `| ${k} | ${h(v)} | ${pct(v)}% |`),
+    "| where the paid slot time went | slot-hours | share | of it, while a job waited |",
+    "|---|--:|--:|--:|",
+    ...rows.map(([k, v, key]) => `| ${k} | ${h(v)} | ${pct(v)}% | ${waited(key)} |`),
+  ].join("\n");
+}
+
+/** Queue waits: how long fleet jobs sat queued before a runner took them. */
+export function renderWaits(records) {
+  const waits = records.map((r) => r.queuedMs).filter(Number.isFinite);
+  if (!waits.length) return "No queue times.";
+  const s = (ms) => (ms === null ? "–" : `${(ms / 1000).toFixed(0)} s`);
+  return [
+    "| jobs | queued p50 | p90 | p99 | max |",
+    "|--:|--:|--:|--:|--:|",
+    `| ${waits.length} | ${s(percentile(waits, 50))} | ${s(percentile(waits, 90))} | ${s(percentile(waits, 99))} | ${s(Math.max(...waits))} |`,
   ].join("\n");
 }
 
@@ -232,9 +275,14 @@ async function collect({ repo, since, until, label }) {
     .filter((j) => j.labels?.includes(label) && j.runner_name && j.conclusion && j.conclusion !== "skipped");
   const records = await pool(jobs, 8, async (j) => {
     const usage = parseUsage((await gh(`/repos/${repo}/actions/jobs/${j.id}/logs`, { raw: true })) ?? "");
-    return usage && { group: jobGroup(j.workflow, j.name), usage };
+    const createdMs = Date.parse(j.created_at);
+    const startedMs = Date.parse(j.started_at);
+    return usage && { group: jobGroup(j.workflow, j.name), usage, createdMs, startedMs, queuedMs: startedMs - createdMs };
   });
-  return { runs: runs.length, jobs: jobs.length, records: records.filter(Boolean) };
+  // Every fleet job's queued stretch, usage line or not: a job that waited is
+  // demand whether or not its log could be read.
+  const waiting = union(jobs.map((j) => [Date.parse(j.created_at), Date.parse(j.started_at)]));
+  return { runs: runs.length, jobs: jobs.length, records: records.filter(Boolean), waiting };
 }
 
 async function main() {
@@ -248,7 +296,7 @@ async function main() {
     process.exit(64);
   }
   const until = args.until ?? new Date().toISOString().slice(0, 10);
-  const { runs, jobs, records } = await collect({ repo, since, until, label: args.label ?? "future-pay-ci" });
+  const { runs, jobs, records, waiting } = await collect({ repo, since, until, label: args.label ?? "future-pay-ci" });
   console.log(`# Fleet job usage, ${repo}, ${since}..${until}\n`);
   console.log(`${runs} runs, ${jobs} fleet jobs, ${records.length} with a usage line.\n`);
   console.log(renderJobs(summarizeJobs(records)));
@@ -257,10 +305,12 @@ async function main() {
     renderIdle(
       idleBreakdown(
         records.map((r) => r.usage),
-        { slots: Number(args.slots ?? 2), idleMinutes: Number(args["idle-minutes"] ?? 2) },
+        { slots: Number(args.slots ?? 2), idleMinutes: Number(args["idle-minutes"] ?? 2), waiting },
       ),
     ),
   );
+  console.log("\n## Queue waits\n");
+  console.log(renderWaits(records));
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
