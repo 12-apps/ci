@@ -11,7 +11,7 @@ import { createServer } from 'node:http';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { attempted, decide, main } from '../cd-gate.mjs';
+import { attempted, attemptStartedAt, decide, main, waitMs } from '../cd-gate.mjs';
 
 const run = (head_sha, conclusion, tried = true) => ({ head_sha, conclusion, attempted: tried });
 
@@ -71,13 +71,13 @@ async function fakeApi(runs, jobs, { fail = false } = {}) {
   return { url: `http://127.0.0.1:${server.address().port}`, seen, close: () => server.close() };
 }
 
-async function runMain(api, extra = {}) {
+async function runMain(api, extra = {}, clock = {}) {
   const out = join(mkdtempSync(join(tmpdir(), 'cd-gate-')), 'out');
   const result = await main({
     GITHUB_API_URL: api.url, GITHUB_REPOSITORY: 'o/r', GITHUB_TOKEN: 't', GITHUB_REF_NAME: 'main',
     GITHUB_WORKFLOW_REF: 'o/r/.github/workflows/cd.yml@refs/heads/main', GITHUB_RUN_ID: '9',
     GITHUB_EVENT_NAME: 'schedule', GITHUB_SHA: 'ccc', GITHUB_OUTPUT: out, ...extra,
-  });
+  }, clock);
   return { result, output: readFileSync(out, 'utf8') };
 }
 
@@ -117,4 +117,62 @@ test('cd.yml hands the base to the planner, falling back to the push', () => {
 test('the action runs the script it ships', () => {
   const action = readFileSync(new URL('../../../.github/actions/cd-gate/action.yml', import.meta.url), 'utf8');
   assert.match(action, /node "\$GITHUB_ACTION_PATH\/\.\.\/\.\.\/\.\.\/scripts\/deploy\/cd-gate\.mjs"/);
+});
+
+// ── The interval mode: on every merge, at most once per X minutes ──────────
+
+const MIN = 60_000;
+const T0 = Date.parse('2026-09-28T20:00:00Z');
+
+test('waitMs: none when the last attempt is X minutes old or there is none', () => {
+  assert.equal(waitMs({ event: 'push', now: T0 + 30 * MIN, lastStart: T0, intervalMinutes: 30 }), 0);
+  assert.equal(waitMs({ event: 'push', now: T0 + 45 * MIN, lastStart: T0, intervalMinutes: 30 }), 0);
+  assert.equal(waitMs({ event: 'push', now: T0, lastStart: null, intervalMinutes: 30 }), 0);
+});
+
+test('waitMs: the rest of the interval when the last attempt is younger', () => {
+  assert.equal(waitMs({ event: 'push', now: T0 + 10 * MIN, lastStart: T0, intervalMinutes: 30 }), 20 * MIN);
+});
+
+test('waitMs: a manual dispatch never waits', () => {
+  assert.equal(waitMs({ event: 'workflow_dispatch', now: T0 + MIN, lastStart: T0, intervalMinutes: 30 }), 0);
+});
+
+test('attemptStartedAt counts a discover job still running, never a skipped one', () => {
+  assert.equal(attemptStartedAt([{ name: 'cd / Discover targets', started_at: '2026-09-28T20:00:00Z', conclusion: null }], 'Discover targets'), T0);
+  assert.equal(attemptStartedAt([{ name: 'cd / Discover targets', started_at: '2026-09-28T20:00:00Z', conclusion: 'skipped' }], 'Discover targets'), null);
+  assert.equal(attemptStartedAt([{ name: 'Gate', started_at: '2026-09-28T20:00:00Z', conclusion: 'success' }], 'Discover targets'), null);
+});
+
+const intervalRuns = [
+  { id: 8, head_sha: 'bbb', conclusion: null },
+  { id: 7, head_sha: 'aaa', conclusion: 'success' },
+];
+const intervalJobs = {
+  8: [{ name: 'cd / Discover targets', started_at: '2026-09-28T20:00:00Z', conclusion: null }],
+  7: [{ name: 'cd / Discover targets', started_at: '2026-09-28T19:00:00Z', conclusion: 'success' }],
+};
+
+test('end to end: a merge 10 min after a deploy started waits 20 min, then deploys on the last success', async () => {
+  const api = await fakeApi(intervalRuns, intervalJobs);
+  const waited = [];
+  try {
+    const { result, output } = await runMain(api, { GITHUB_EVENT_NAME: 'push', MIN_INTERVAL_MINUTES: '30' },
+      { now: () => T0 + 10 * MIN, wait: async (ms) => { waited.push(ms); } });
+    assert.deepEqual(waited, [20 * MIN]);
+    assert.deepEqual([result.deploy, result.base], [true, 'aaa']);
+    assert.match(output, /^deploy=true$/m);
+    assert.ok(api.seen[0].includes('/runs?branch=main&per_page='), 'reads runs still in progress, not only completed ones');
+  } finally { api.close(); }
+});
+
+test('end to end: a merge after the interval deploys at once', async () => {
+  const api = await fakeApi(intervalRuns, intervalJobs);
+  const waited = [];
+  try {
+    const { result } = await runMain(api, { GITHUB_EVENT_NAME: 'push', MIN_INTERVAL_MINUTES: '30' },
+      { now: () => T0 + 31 * MIN, wait: async (ms) => { waited.push(ms); } });
+    assert.deepEqual(waited, []);
+    assert.equal(result.deploy, true);
+  } finally { api.close(); }
 });
