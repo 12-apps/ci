@@ -91,12 +91,17 @@ sample() {
     t=$(now_ms); dt=$(( t - t0 ))
     if (( dt >= window_ms )); then
       u=$(num "$(field cpu.stat usage_usec)"); read -r ios bytes < <(io_totals)
-      # usec over ms is thousandths of a core.
-      local mcores=$(( (u - u0) / dt )) iops=$(( (ios - ios0) * 1000 / dt )) mbps=$(( (bytes - bytes0) * 1000 / dt / 1048576 ))
-      (( mcores > mcores_max )) && mcores_max=$mcores
-      (( iops > iops_max )) && iops_max=$iops
-      (( mbps > mbps_max )) && mbps_max=$mbps
-      t0=$t; u0=$u; ios0=$ios; bytes0=$bytes
+      # The counters only grow. A read that failed comes back 0, and taking it
+      # as the new baseline would bill the whole counter to the next window as
+      # one impossible spike: such a window is skipped, baseline kept.
+      if (( u > 0 && u >= u0 && ios >= ios0 && bytes >= bytes0 )); then
+        # usec over ms is thousandths of a core.
+        local mcores=$(( (u - u0) / dt )) iops=$(( (ios - ios0) * 1000 / dt )) mbps=$(( (bytes - bytes0) * 1000 / dt / 1048576 ))
+        (( mcores > mcores_max )) && mcores_max=$mcores
+        (( iops > iops_max )) && iops_max=$iops
+        (( mbps > mbps_max )) && mbps_max=$mbps
+        t0=$t; u0=$u; ios0=$ios; bytes0=$bytes
+      fi
     fi
     printf '%d %d %d %d %d\n' "$ws_max" "$anon_max" "$mcores_max" "$iops_max" "$mbps_max" > "$dir/peaks.tmp" \
       && mv -f "$dir/peaks.tmp" "$dir/peaks"

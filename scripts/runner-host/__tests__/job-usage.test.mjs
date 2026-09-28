@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,7 +46,12 @@ function cgroup(overrides = {}) {
     CI_USAGE_NETDEV: netdev,
     RUNNER_NAME: "us-east-2a-ip-10-0-1-5-2",
   };
-  const set = (name, body) => writeFileSync(path.join(cg, name), body);
+  // Atomic, as the kernel serves a cgroup file: the sampler reads while the
+  // test writes, and a half-written file is not something a real cgroup shows.
+  const set = (name, body) => {
+    writeFileSync(path.join(cg, `.${name}.tmp`), body);
+    renameSync(path.join(cg, `.${name}.tmp`), path.join(cg, name));
+  };
   const net = (eth0, docker0) =>
     writeFileSync(
       netdev,
@@ -159,6 +164,25 @@ test("the hook names pick the mode, since the runner passes no argument", () => 
   assert.ok(existsSync(path.join(c.dir, "start")), "the started hook wrote the t0 counters");
   const r = spawnSync(completed, [], { env: c.env, encoding: "utf8" });
   assert.equal(usageLine(r.stdout).runner, "us-east-2a-ip-10-0-1-5-2");
+});
+
+test("sample: a counter that reads 0 once (a failed read) is skipped, not billed to the next window", async () => {
+  const c = cgroup({ "cpu.stat": "usage_usec 50000000000\n" }); // 50 000 CPU-seconds already used
+  const proc = spawn("bash", [SCRIPT, "sample"], {
+    env: { ...c.env, CI_USAGE_INTERVAL: "0.05", CI_USAGE_WINDOW_MS: "100" },
+  });
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+  try {
+    await sleep(400);
+    c.set("cpu.stat", "usage_usec 0\n");
+    await sleep(400);
+    c.set("cpu.stat", "usage_usec 50000100000\n"); // +0.1 CPU-second since the first read
+    await sleep(600);
+    const [, , mcores] = readFileSync(path.join(c.dir, "peaks"), "utf8").trim().split(" ").map(Number);
+    assert.ok(mcores <= 1000, `peak milli-cores ${mcores}: a 0 read became the baseline`);
+  } finally {
+    proc.kill();
+  }
 });
 
 test("sample: tracks the peak working set without page cache, and restarts at job start", async () => {
