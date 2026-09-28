@@ -100,9 +100,14 @@ export function summarizeJobs(records) {
   return rows.sort((a, b) => b.jobMinutes - a.jobMinutes);
 }
 
-/** `us-east-2a-ip-10-0-1-5-2` → host `us-east-2a-ip-10-0-1-5`, slot `2`. */
+/**
+ * `eu-north-1b-ip-172-31-36-84-1-1790575022` → host
+ * `eu-north-1b-ip-172-31-36-84`, slot `1`. supervisor.sh names every JIT
+ * runner `<host>-<slot>-<epoch seconds>`, a fresh name per job; a name with no
+ * epoch (`<host>-<slot>`) is read the same way.
+ */
 export function hostAndSlot(runner) {
-  const m = /^(.*)-(\d+)$/.exec(runner ?? "");
+  const m = /^(.*)-(\d+)-\d{9,}$/.exec(runner ?? "") ?? /^(.*)-(\d+)$/.exec(runner ?? "");
   return m ? { host: m[1], slot: m[2] } : null;
 }
 

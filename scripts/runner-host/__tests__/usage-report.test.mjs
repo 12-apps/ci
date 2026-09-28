@@ -81,15 +81,20 @@ test("renderJobs prints one row per group under a header of the same width", () 
 });
 
 test("hostAndSlot splits the slot number off the fleet's runner names", () => {
+  // As a real fleet job reports it (future-pay run 36384097986): <host>-<slot>-<epoch>.
+  assert.deepEqual(hostAndSlot("eu-north-1b-ip-172-31-36-84-1-1790575022"), {
+    host: "eu-north-1b-ip-172-31-36-84",
+    slot: "1",
+  });
   assert.deepEqual(hostAndSlot("us-east-2a-ip-10-0-1-5-2"), { host: "us-east-2a-ip-10-0-1-5", slot: "2" });
   assert.equal(hostAndSlot(""), null);
 });
 
 test("idleBreakdown: every paid slot-second lands in exactly one bucket", () => {
-  const boot = 1_000_000; // seconds
+  const boot = 1_790_574_985; // epoch seconds, as a real host reports
   const min = 60_000;
   const job = (slot, start, minutes, bootS = boot) => ({
-    runner: `eu-north-1a-ip-10-0-0-9-${slot}`,
+    runner: `eu-north-1a-ip-10-0-0-9-${slot}-${bootS + start * 60}`,
     hostBootS: bootS,
     startMs: bootS * 1000 + start * min,
     wallMs: minutes * min,
