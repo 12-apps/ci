@@ -1,0 +1,34 @@
+name: 'CD schedule gate'
+description: >-
+  For a CD that runs on a schedule: deploy only when the branch moved since the
+  last deploy attempt, and name the last successfully deployed commit as the
+  image-reuse base. Any other event always deploys. Ships
+  scripts/deploy/cd-gate.mjs, which argues the rules.
+inputs:
+  token:
+    description: 'Reads the workflow run history (actions: read).'
+    required: false
+    default: ${{ github.token }}
+  discover_job:
+    description: "The engine's first job; a run whose copy of it ran to an end was a deploy attempt."
+    required: false
+    default: Discover targets
+outputs:
+  deploy:
+    description: "'true' when this run should deploy"
+    value: ${{ steps.gate.outputs.deploy }}
+  base_sha:
+    description: 'The last successfully deployed commit, for cd.yml `base_sha` (empty: full rebuild)'
+    value: ${{ steps.gate.outputs.base_sha }}
+  reason:
+    description: 'Why, in one line'
+    value: ${{ steps.gate.outputs.reason }}
+runs:
+  using: composite
+  steps:
+    - id: gate
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        DISCOVER_JOB: ${{ inputs.discover_job }}
+      run: node "$GITHUB_ACTION_PATH/../../../scripts/deploy/cd-gate.mjs"

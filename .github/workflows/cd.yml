@@ -59,6 +59,16 @@ on:
         description: Consumer-owned non-secret CloudFormation parameter JSON path
         type: string
         default: ''
+      base_sha:
+        description: >-
+          The commit the image-reuse planner diffs against, and whose image tags
+          the reuse job copies. Empty means the push's own `github.event.before`.
+          A caller that deploys on a schedule passes the last successfully
+          deployed commit (actions/cd-gate); a schedule has no `before`, and an
+          empty base rebuilds every image.
+        type: string
+        required: false
+        default: ''
       reuse_unaffected_images:
         description: >-
           Retag unaffected images from the previous commit instead of rebuilding
@@ -180,7 +190,7 @@ jobs:
         uses: 12-apps/ci/.github/actions/select-images@v2
         with:
           images: ${{ steps.d.outputs.images }}
-          base_sha: ${{ github.event.before }}
+          base_sha: ${{ inputs.base_sha || github.event.before }}
           head_sha: ${{ github.sha }}
           reuse: ${{ inputs.reuse_unaffected_images }}
           global_build_inputs: ${{ inputs.global_build_inputs }}
