@@ -175,3 +175,54 @@ test('a `loosened` block that is not an object is not a justification', () => {
   const head = ledger({ s: surface({ raw: 760, loosened: 'yes' }) });
   assert.match(run(ledger({ s: surface() }), head)[0], /no `loosened` block records why/);
 });
+
+/* -------------------------------------------------------------- *
+ * `require-approval` — a `why` is not the same as a yes.
+ * -------------------------------------------------------------- */
+
+const OWNER_OK = 'owner, 2026-10-02 chat: "ok pra essa, mas só essa"';
+const runApproved = (base, head) => findUnjustifiedLoosenings({ base, head, ...KEYS, requireApproval: true });
+
+test('require-approval is off by default — a raise with why alone still passes', () => {
+  const head = ledger({ s: surface({ raw: 760, loosened: { raw: 760, why: WHY } }) });
+  assert.deepEqual(run(ledger({ s: surface() }), head), []);
+});
+
+test('require-approval on: why alone is no longer enough for a raised CEILING', () => {
+  const head = ledger({ s: surface({ raw: 760, loosened: { raw: 760, why: WHY } }) });
+  const violations = runApproved(ledger({ s: surface() }), head);
+  assert.equal(violations.length, 1);
+  assert.match(violations[0], /`raw` raised \(700 → 760\)/);
+  assert.match(violations[0], /no `approved` was written/);
+});
+
+test('require-approval on: why + approved, both arguing the shipped value, passes', () => {
+  const head = ledger({ s: surface({ raw: 760, loosened: { raw: 760, why: WHY, approved: OWNER_OK } }) });
+  assert.deepEqual(runApproved(ledger({ s: surface() }), head), []);
+});
+
+test('require-approval on: a lowered FLOOR never needs approved — only ceilings do', () => {
+  const head = ledger({ s: surface({ chunks: 1, loosened: { chunks: 1, why: WHY } }) });
+  assert.deepEqual(runApproved(ledger({ s: surface() }), head), []);
+});
+
+test('require-approval on: a placeholder approved is rejected the same as an empty one', () => {
+  const head = ledger({ s: surface({ raw: 760, loosened: { raw: 760, why: WHY, approved: 'TBD' } }) });
+  assert.match(runApproved(ledger({ s: surface() }), head)[0], /placeholder/);
+});
+
+test('require-approval on: reusing the base ref\'s unedited approved string fails — no freshness', () => {
+  const base = ledger({ s: surface({ raw: 760, loosened: { raw: 760, why: WHY, approved: OWNER_OK } }) });
+  const head = ledger({ s: surface({ raw: 820, loosened: { raw: 820, why: WHY, approved: OWNER_OK } }) });
+  const violations = runApproved(base, head);
+  assert.equal(violations.length, 1);
+  assert.match(violations[0], /the same string the base ref already carried/);
+});
+
+test('require-approval on: a fresh approved string for the further raise passes', () => {
+  const base = ledger({ s: surface({ raw: 760, loosened: { raw: 760, why: WHY, approved: OWNER_OK } }) });
+  const head = ledger({
+    s: surface({ raw: 820, loosened: { raw: 820, why: WHY, approved: 'owner, 2026-10-03 chat: a second, later ok' } }),
+  });
+  assert.deepEqual(runApproved(base, head), []);
+});
