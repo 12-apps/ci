@@ -69,6 +69,14 @@ on:
         type: string
         required: false
         default: ''
+      skip_superseded:
+        description: >-
+          Passed to the DigitalOcean deploy: on a push, skip the rollout when the
+          branch moved past this run. Set false when the caller paces deploys
+          with actions/cd-gate's min_interval_minutes (see deploy-digitalocean.yml).
+        type: boolean
+        required: false
+        default: true
       reuse_unaffected_images:
         description: >-
           Retag unaffected images from the previous commit instead of rebuilding
@@ -500,6 +508,7 @@ jobs:
       action: ${{ inputs.action }}
       image_tag: ${{ github.sha }}
       image_namespace: ${{ needs.discover.outputs.image_namespace }}
+      skip_superseded: ${{ inputs.skip_superseded }}
     secrets: inherit
     concurrency:
       group: deploy-digitalocean
