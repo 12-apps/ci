@@ -270,11 +270,15 @@ jobs:
 
   apk:
     name: Build the APK
-    # Pinned to GitHub's image, NOT `vars.CI_RUNNER`: the gradle build leans on
-    # the Android SDK that ubuntu-latest ships preinstalled (ANDROID_HOME), and
-    # a self-hosted runner has none. Every other job here follows the caller's
-    # runner choice — see runner-selection.test.mjs.
-    runs-on: ubuntu-latest
+    # The caller's runner, like every other job here (runner-selection.test.mjs).
+    # It used to be pinned to `ubuntu-latest` for the Android SDK that image
+    # ships; the 12-apps runner image now carries the SDK, the NDK and the CMake
+    # a React Native release compiles with (scripts/runner-host/Dockerfile), and
+    # this job is mostly C++ and Kotlin compilation, which scales with cores:
+    # GitHub's standard runner for a private repository has 2 vCPUs. A runner
+    # without the SDK still works: setup-android installs the command-line
+    # tools and Gradle downloads the rest, only slower.
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # A gradle build is ~13 minutes. Spending it on a tree that does not lint,
     # typecheck or pass its own tests buys nothing a reviewer wants.
     needs: checks
@@ -377,6 +381,56 @@ jobs:
           restore-keys: |
             ${{ inputs.app }}-gradle-${{ runner.os }}-
 
+      # ── ccache for the native half ──────────────────────────────────────
+      #
+      # About a third of the build is CMake compiling C++ (expo-modules-core
+      # and the app's autolinked modules, once per ABI), and Gradle's build
+      # cache does not cover native tasks, so every build recompiled all of it.
+      # ccache keeps the object files between builds. The app's own CMake
+      # (React Native's ReactNative-application.cmake) already calls ccache when
+      # it is on PATH; the two LAUNCHER variables reach every other CMake
+      # project, which CMake 3.17+ reads from the environment. The double wrap
+      # (`ccache ccache clang++`) that gives the app's targets is one ccache
+      # call: ccache drops its own name from the front.
+      #
+      # RESTORED ON EVERY RUN, SAVED FROM ANY RUN BUT A PULL REQUEST, under a
+      # per-commit key: a pull request reads what `main` (a push, a dispatch or
+      # the consumer's daily full suite) last kept, through the prefix, and
+      # writes nothing, for the same eviction reason as the Gradle caches above.
+      # CCACHE_MAXSIZE bounds the entry.
+      - name: Point CMake at ccache
+        run: |
+          set -euo pipefail
+          if ! command -v ccache >/dev/null 2>&1; then
+            sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ccache
+          fi
+          {
+            echo "CCACHE_DIR=$HOME/.cache/ccache"
+            echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+            echo "CCACHE_NOHASHDIR=true"
+            echo "CCACHE_COMPILERCHECK=content"
+            echo "CCACHE_MAXSIZE=1G"
+            echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+            echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+          } >> "$GITHUB_ENV"
+          ccache --version
+
+      - name: Restore the ccache
+        id: ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ccache
+          # No ABI list in the key: a cache key may not contain a comma, and
+          # ccache already keeps each ABI's objects apart (the target triple is
+          # in the compiler flags it hashes).
+          key: ${{ inputs.app }}-ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            ${{ inputs.app }}-ccache-${{ runner.os }}-
+
+      # Counted from zero here, so the summary below reports THIS build's hits.
+      - name: Reset the ccache counters
+        run: ccache --zero-stats
+
       # The keystore, when the repo has one. `base64 -d` writes it beside the
       # Gradle project; the credentials reach Gradle as properties rather than
       # as a committed `gradle.properties`, so nothing secret lands on disk in a
@@ -456,7 +510,14 @@ jobs:
           # do anything: without it Gradle neither reads nor writes task
           # outputs, and the cache step above would carry a directory that stays
           # empty for ever.
-          ARGS=(assembleRelease --no-daemon --build-cache "-PreactNativeArchitectures=$ABIS")
+          #
+          # `-x lintVitalRelease`: Android lint's "vital" pass, which
+          # assembleRelease runs over the app and every library module. It cost
+          # ~30s of a ~5.5min assemble (future-pay run 36454554154) to repeat,
+          # in a weaker form, what the `checks` job this one needs has already
+          # decided with the app's own lint, typecheck and tests. Excluding it
+          # by name fails the build loudly if AGP ever renames the task.
+          ARGS=(assembleRelease --no-daemon --build-cache -x lintVitalRelease "-PreactNativeArchitectures=$ABIS")
           if [ "${SIGNED:-}" = "true" ]; then
             ARGS+=(
               -Pandroid.injected.signing.store.file="$KEYSTORE_PATH"
@@ -550,6 +611,33 @@ jobs:
             echo ""
             echo "Download it from this run's artifacts, then open it on an Android phone."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # What ccache did for THIS build, read from its own counters: on a warm
+      # cache most compilations are hits, and a run of misses means the key or
+      # the compiler changed. Reported, never enforced: a cold cache is a slow
+      # build, not a broken one.
+      - name: Report the ccache
+        if: ${{ always() && steps.ccache.outcome == 'success' }}
+        env:
+          MATCHED: ${{ steps.ccache.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          ccache --show-stats | tee "$RUNNER_TEMP/ccache-stats.txt"
+          {
+            echo "### ccache"
+            echo ""
+            echo "- restored from: \`${MATCHED:-nothing, cold cache}\`"
+            echo '```'
+            grep -E 'Hits|Misses|Cache size' "$RUNNER_TEMP/ccache-stats.txt" || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the ccache
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache
+          key: ${{ steps.ccache.outputs.cache-primary-key }}
 
       # Only from a push, and only when the exact key was not already there —
       # see the restore step for why a per-PR save would evict the consumer's

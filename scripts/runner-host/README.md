@@ -204,8 +204,11 @@ removed.
 
 ## What stays on GitHub's runners
 
-- `expo-apk.yml`'s `apk` job: gradle needs the Android SDK that `ubuntu-latest`
-  has preinstalled.
+(`expo-apk.yml`'s `apk` job moved to the fleet: the image carries the Android
+SDK, NDK, CMake and ccache that a React Native release compiles with, pinned in
+the Dockerfile's `ANDROID_PACKAGES`. Bump them when the app's react-native
+does; a version missing here is still downloaded by Gradle, only slower.)
+
 - Jobs that need Windows or macOS (a `matrix.os`), which this machine cannot
   provide.
 - GitHub **Code Quality** / **CodeQL default setup** runs are dynamic workflows

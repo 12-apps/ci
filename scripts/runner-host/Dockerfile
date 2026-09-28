@@ -105,6 +105,42 @@ RUN index=$(curl -fsSL https://nodejs.org/dist/index.json) \
     done \
  && chown -R runner:runner /opt/hostedtoolcache
 
+# The Android toolchain a React Native / Expo release build compiles with
+# (12-apps/ci's expo-apk.yml), at the versions its Gradle asks for, so the APK
+# builds here instead of on GitHub's 2-vCPU `ubuntu-latest`, and without
+# downloading ~1 GB of NDK per build. ANDROID_HOME is where AGP and
+# android-actions/setup-android look first. Pinned: a version the app asks for
+# that is missing here is still downloaded by AGP, only slower, so bump these
+# when the app's react-native does (its gradle/libs.versions.toml names them).
+# ccache: the app's CMake uses it when it is on PATH, and expo-apk.yml points
+# every other CMake project at it; the cache itself travels with the workflow.
+ARG ANDROID_CMDLINE_TOOLS=15859902
+ARG ANDROID_PACKAGES="platform-tools platforms;android-36 build-tools;36.0.0 ndk;27.1.12297006 cmake;3.22.1"
+ENV ANDROID_HOME=/opt/android-sdk \
+    ANDROID_SDK_ROOT=/opt/android-sdk
+# sdkmanager needs a JVM, and only here: a JDK is unpacked into /tmp and
+# deleted in the same layer (a job brings its own through setup-java). NOT an
+# apt openjdk purged afterwards: `apt-get autoremove` then also removed the
+# GTK libraries Playwright's install-deps had pulled in as dependencies, and
+# the smoke test failed on a missing libgtk-3.so.0.
+ARG SDKMANAGER_JDK=https://api.adoptium.net/v3/binary/latest/17/ga/linux/x64/jdk/hotspot/normal/eclipse
+RUN apt-install ccache \
+ && mkdir -p /tmp/jdk "$ANDROID_HOME/cmdline-tools" \
+ && curl -fsSL "$SDKMANAGER_JDK" | tar -xz -C /tmp/jdk --strip-components=1 \
+ && export JAVA_HOME=/tmp/jdk \
+ && curl -fsSL -o /tmp/cmdline-tools.zip \
+      "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS}_latest.zip" \
+ && unzip -q /tmp/cmdline-tools.zip -d "$ANDROID_HOME/cmdline-tools" \
+ && mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest" \
+ && (yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null) \
+ && for pkg in ${ANDROID_PACKAGES}; do set -- "$@" "$pkg"; done \
+ && "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "$@" > /dev/null \
+ && test -x "$ANDROID_HOME/ndk/27.1.12297006/ndk-build" \
+ && test -x "$ANDROID_HOME/cmake/3.22.1/bin/cmake" \
+ && rm -rf /tmp/jdk /tmp/cmdline-tools.zip /var/lib/apt/lists/* /root/.android \
+ && chown -R runner:runner "$ANDROID_HOME" \
+ && ccache --version
+
 WORKDIR /home/runner/actions-runner
 RUN test -n "$RUNNER_VERSION" \
  && curl -fsSL -o runner.tgz \
