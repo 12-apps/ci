@@ -95,6 +95,41 @@ it, to save a `pnpm install` that took 9-24 s on the same hosts.
 `read` keeps using an existing cache and never writes one; `none` builds from
 scratch. Any other value fails the build job before it builds.
 
+#### Deploying on a schedule instead of on every push (`cd-gate`, `base_sha`)
+
+On a busy day a push-triggered CD builds and rolls out for every merge. To
+deploy every X minutes instead, and only when something landed, trigger the
+caller on a `schedule` and put the gate in front of the engine:
+
+```yaml
+on:
+  schedule:
+    - cron: '*/30 * * * *'   # X = 30 min; '0 * * * *' = hourly
+  workflow_dispatch: {}
+concurrency: { group: cd, cancel-in-progress: false }
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    permissions: { actions: read }
+    outputs:
+      deploy: ${{ steps.g.outputs.deploy }}
+      base_sha: ${{ steps.g.outputs.base_sha }}
+    steps:
+      - id: g
+        uses: 12-apps/ci/.github/actions/cd-gate@v2
+  cd:
+    needs: gate
+    if: needs.gate.outputs.deploy == 'true'
+    uses: 12-apps/ci/.github/workflows/cd.yml@v2
+    with:
+      base_sha: ${{ needs.gate.outputs.base_sha }}
+```
+
+- **When it deploys:** the gate deploys when the branch moved since the last run that attempted a deploy, meaning its `Discover targets` ran. It does not use "in the last X minutes": GitHub starts scheduled runs late, often by 5-20 min, so a fixed window loses a merge that lands between a punctual tick and a late one.
+- **Failed and cancelled runs:** a failed attempt waits for the next merge. A cancelled run was never an attempt, so its commit ships on the next tick.
+- **Manual runs:** a manual dispatch always deploys.
+- **`base_sha`:** the last successfully deployed commit. The image-reuse planner diffs against it and copies its tags; a schedule has no `github.event.before` to use instead. Empty means a full rebuild, which is also what the gate answers when it cannot read the run history.
+
 #### Root-level build inputs (`global_build_inputs`)
 
 One case needs naming because turbo cannot see it. turbo attributes a change to
