@@ -78,6 +78,23 @@ selection bug):
       reuse_unaffected_images: false
 ```
 
+#### The layer cache on a self-hosted runner (`build_cache`)
+
+Image builds read and write the GitHub Actions layer cache (`mode=max`, every
+stage) by default. On GitHub's runners that is free. On a self-hosted runner
+in a cloud, every layer the cache lacks is **uploaded**, and the host pays for
+what it sends. future-pay's fleet (2026-09-28) sent 0.5-2.2 GB per image on
+every deploy that changed the lockfile and spent 80-340 s per image writing
+it, to save a `pnpm install` that took 9-24 s on the same hosts.
+
+```yaml
+    with:
+      build_cache: none   # gha (default) | read | none
+```
+
+`read` keeps using an existing cache and never writes one; `none` builds from
+scratch. Any other value fails the build job before it builds.
+
 #### Root-level build inputs (`global_build_inputs`)
 
 One case needs naming because turbo cannot see it. turbo attributes a change to
