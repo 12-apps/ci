@@ -116,4 +116,11 @@ RUN test -n "$RUNNER_VERSION" \
 
 COPY entrypoint.sh /usr/local/bin/ci-runner-entrypoint
 COPY localhost.sh /usr/local/bin/ci-runner-localhost
+# The runner runs a hook only from a `.sh` path, and one file serves both: the
+# name it is called by picks the mode (job-usage.sh).
+COPY job-usage.sh /usr/local/bin/ci-runner-job-usage
+RUN ln -s ci-runner-job-usage /usr/local/bin/ci-runner-job-started.sh \
+ && ln -s ci-runner-job-usage /usr/local/bin/ci-runner-job-completed.sh
+ENV ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/ci-runner-job-started.sh \
+    ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/usr/local/bin/ci-runner-job-completed.sh
 ENTRYPOINT ["tini", "--", "/usr/local/bin/ci-runner-entrypoint"]

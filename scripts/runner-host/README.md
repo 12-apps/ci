@@ -55,6 +55,31 @@ A job's total time on your machine is not the same as its billed hosted time.
 Setup (install, cache restore) runs at the machine's speed, and a modern
 desktop-class CPU is faster per core than a hosted 2-vCPU runner.
 
+### What each job actually uses
+
+Those numbers are a guess per slot. Every job now reports what it used: the
+image's runner hooks (`job-usage.sh`) print one line at the end of the job's log,
+
+```
+ci-runner-usage {"wallMs":412000,"avgCores":1.4,"peakCores":3.9,"cpuWaitPct":12.3,"peakWorkingSetMiB":5120,"ioWaitPct":1.1,"peakIops":2100,"netTxMiB":340,…}
+```
+
+read from the job container's own cgroup, so it covers the service containers
+the job starts too. Memory is the peak WORKING SET, page cache the kernel would
+drop left out. `*WaitPct` is the share of the job's time something waited for
+CPU, memory or disk. `netTxMiB` is what the job sent out, which a cloud bills
+as egress.
+
+`usage-report.mjs` gathers those lines from every job's log (GitHub keeps them
+90 days) into one row per kind of job, with the memory tier it fits (largest
+working set + 25%), and splits every host's paid time into running a job,
+startup, between jobs, the tail before it stops, and slots that ran nothing:
+
+```bash
+GITHUB_TOKEN=… node scripts/runner-host/usage-report.mjs --repo owner/name --since 2026-09-29 \
+  [--until …] [--label future-pay-ci] [--slots 2] [--idle-minutes 2]
+```
+
 **Where:** anything that runs Ubuntu 24.04 with a public IPv4 and no
 inbound ports. A dedicated server (Hetzner AX line or its server auction, OVH)
 is far cheaper per core than a cloud VM. On DigitalOcean the equivalent droplet

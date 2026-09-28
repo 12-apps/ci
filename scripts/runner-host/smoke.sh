@@ -25,6 +25,15 @@ grep -q "^unset HOSTNAME$" /usr/local/bin/ci-runner-entrypoint \
   || { echo "smoke: the entrypoint lets the Docker HOSTNAME reach the job" >&2; exit 1; }
 dockerd >/var/log/dockerd.log 2>&1 &
 for _ in $(seq 1 120); do docker info >/dev/null 2>&1 && break; sleep 0.5; done
+# What the job uses (job-usage.sh): the sampler the entrypoint starts, and the
+# runner hooks the image names. The checks below are the "job" it measures.
+grep -q "^ci-runner-job-usage sample" /usr/local/bin/ci-runner-entrypoint \
+  || { echo "smoke: the entrypoint does not start the usage sampler" >&2; exit 1; }
+for h in "$ACTIONS_RUNNER_HOOK_JOB_STARTED" "$ACTIONS_RUNNER_HOOK_JOB_COMPLETED"; do
+  [[ "$h" == *.sh && -x "$h" ]] || { echo "smoke: runner hook \"$h\" is not an executable .sh" >&2; exit 1; }
+done
+ci-runner-job-usage sample >/dev/null 2>&1 &
+runuser -u runner -- "$ACTIONS_RUNNER_HOOK_JOB_STARTED"
 runuser -u runner -- env ${NODE_EXTRA_CA_CERTS:+NODE_EXTRA_CA_CERTS="$NODE_EXTRA_CA_CERTS"} bash -euo pipefail -c "
   sudo -n true
   # node before any setup-node: workflows call it in their first steps.
@@ -81,5 +90,12 @@ runuser -u runner -- env ${NODE_EXTRA_CA_CERTS:+NODE_EXTRA_CA_CERTS="$NODE_EXTRA
     })().catch((e) => { console.error(\\\"smoke: chromium failed:\\\", e.message); process.exit(1); });
   \"
 "
+# The usage line a real job log gets, read from the cgroup of this container.
+sleep 6
+line=$(runuser -u runner -- "$ACTIONS_RUNNER_HOOK_JOB_COMPLETED" | grep "^ci-runner-usage {")
+echo "smoke: $line"
+jq -e ".wallMs > 0 and .cpuSec >= 1 and .peakWorkingSetMiB > 0 and .peakCores > 0 and .cpus >= 1" \
+  <<<"${line#ci-runner-usage }" >/dev/null \
+  || { echo "smoke: the usage line does not describe the job it followed" >&2; exit 1; }
 '
 echo "smoke: ok"
