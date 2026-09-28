@@ -38,6 +38,16 @@ inputs:
     description: 'Consumer checkout root the ledger path is relative to.'
     required: false
     default: '.'
+  require-approval:
+    description: >-
+      When 'true', every loosened CEILING key (not a floor like `chunks`) also
+      needs an `approved` string beside `why`, in the same `loosened` block —
+      a human owner's OK, not just a written reason, freshness-checked against
+      the base ref the same way `why` is. Opt-in and unset by default, because
+      this action is pinned by a floating tag every consumer shares; turning
+      this on is each caller's own decision.
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -50,6 +60,7 @@ runs:
         FLOOR_KEYS: ${{ inputs.floor-keys }}
         LEDGER: ${{ inputs.ledger }}
         BASE_REF: ${{ inputs.base-ref }}
+        REQUIRE_APPROVAL: ${{ inputs.require-approval }}
       run: |
         set -euo pipefail
         node "$GITHUB_ACTION_PATH/bundle-ceiling-guard.mjs" "$LEDGER" "$BASE_REF"

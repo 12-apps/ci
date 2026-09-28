@@ -75,6 +75,25 @@
  * previous number to loosen. Everything else fails closed: a head ledger that is
  * missing, unreadable or malformed is an error, because a guard that cannot read
  * the thing it guards must never report success.
+ *
+ * ## `require-approval`: a `why` is not the same as a yes
+ *
+ * `why` proves an author argued for the number. It does not prove anyone with
+ * the authority to say so agreed — a PR's own author can write forty honest
+ * characters about their own regression. A caller who has a human owner in the
+ * loop for ceiling raises, and not merely a written reason, sets
+ * `require-approval: 'true'` and every loosened CEILING key then also needs an
+ * `approved` string beside `why`, in the same block, held to the same
+ * length/placeholder rule. `approved` is a string, not a boolean, on purpose:
+ * this guard has no way to authenticate that the quote is real or that the
+ * person quoted actually has the authority — that stays a human process. What
+ * it verifies is that the field names something a reader can go check (a chat
+ * quote, a timestamp, a link), and that the string is FRESH: for a surface
+ * whose ceiling moved again, `approved` must differ from what the base ref
+ * already recorded for that surface, or one old "ok" would silently cover
+ * every later raise. Opt-in and off by default, because `@v2` is a floating
+ * tag every consumer of this action shares — turning this on is each caller's
+ * own decision, not a change this action makes for them.
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -132,16 +151,18 @@ export function parseLedger(text, label) {
  * "someone thought about it", and a deliberately low bar: the point is to stop a
  * one-word label from passing as a reason, not to grade the writing.
  */
-function whyProblem(why) {
-  if (typeof why !== 'string') return 'no `why` was written';
-  const trimmed = why.trim();
-  if (trimmed === '') return 'the `why` is empty';
-  if (PLACEHOLDER_RE.test(trimmed)) return `the \`why\` is a placeholder ("${trimmed.slice(0, 30)}")`;
+function textProblem(field, text) {
+  if (typeof text !== 'string') return `no \`${field}\` was written`;
+  const trimmed = text.trim();
+  if (trimmed === '') return `the \`${field}\` is empty`;
+  if (PLACEHOLDER_RE.test(trimmed)) return `the \`${field}\` is a placeholder ("${trimmed.slice(0, 30)}")`;
   if (trimmed.length < MIN_WHY_CHARS) {
-    return `the \`why\` is ${trimmed.length} characters — a label, not an argument (${MIN_WHY_CHARS} minimum)`;
+    return `the \`${field}\` is ${trimmed.length} characters — a label, not an argument (${MIN_WHY_CHARS} minimum)`;
   }
   return null;
 }
+
+const whyProblem = (why) => textProblem('why', why);
 
 /**
  * Does `entry.loosened` justify moving `key` to `value`?
@@ -164,6 +185,26 @@ function justificationProblem(entry, key, value) {
   return whyProblem(loosened.why);
 }
 
+/**
+ * Does `entry.loosened.approved` hold up, for a caller that opted into
+ * `require-approval`? Only called once `justificationProblem` has already
+ * passed, so `entry.loosened` is known to be a valid object naming `key` at
+ * `value` — this checks the SEPARATE field, and its own freshness against
+ * what the base ref already carried for this surface.
+ */
+function approvedProblem(entry, key, baseEntry) {
+  const problem = textProblem('approved', entry.loosened.approved);
+  if (problem !== null) return problem;
+  const previousApproved = baseEntry?.loosened?.approved;
+  if (previousApproved !== undefined && entry.loosened.approved === previousApproved) {
+    return (
+      `\`approved\` is the same string the base ref already carried for \`${key}\` — ` +
+      'a justification written for one raise does not carry to the next'
+    );
+  }
+  return null;
+}
+
 const num = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
 
 /**
@@ -172,7 +213,7 @@ const num = (value) => (typeof value === 'number' && Number.isFinite(value) ? va
  * Pure: no git, no filesystem, no process exit — so the rules above are testable
  * without building a repository to hold them.
  */
-export function findUnjustifiedLoosenings({ base, head, ceilingKeys, floorKeys }) {
+export function findUnjustifiedLoosenings({ base, head, ceilingKeys, floorKeys, requireApproval = false }) {
   const violations = [];
   const baseSurfaces = base.surfaces ?? {};
   const headSurfaces = head.surfaces ?? {};
@@ -220,14 +261,29 @@ export function findUnjustifiedLoosenings({ base, head, ceilingKeys, floorKeys }
       const loosened = kind === 'ceiling' ? after > before : after < before;
       if (!loosened) continue;
 
-      const problem = justificationProblem(headEntry, key, after);
-      if (problem === null) continue;
-
       const direction = kind === 'ceiling' ? 'raised' : 'lowered';
-      const move = kind === 'ceiling' ? `${before} → ${after}` : `${before} → ${after}`;
-      violations.push(
-        `surface \`${name}\`: \`${key}\` ${direction} (${move}), which loosens the gate — ${problem}.`,
-      );
+      const move = `${before} → ${after}`;
+
+      const problem = justificationProblem(headEntry, key, after);
+      if (problem !== null) {
+        violations.push(
+          `surface \`${name}\`: \`${key}\` ${direction} (${move}), which loosens the gate — ${problem}.`,
+        );
+        continue;
+      }
+
+      // `why` argues for the number; `approved` says a human with the
+      // authority to loosen a CEILING said yes. Only ceilings, and only for a
+      // caller that opted in — a floor like `chunks` is not what the owner's
+      // approval rule was ever about.
+      if (requireApproval && kind === 'ceiling') {
+        const approvalProblem = approvedProblem(headEntry, key, baseEntry);
+        if (approvalProblem !== null) {
+          violations.push(
+            `surface \`${name}\`: \`${key}\` ${direction} (${move}) — ${approvalProblem}.`,
+          );
+        }
+      }
     }
   }
 
@@ -253,6 +309,7 @@ export function main(argv = process.argv.slice(2), env = process.env, cwd = proc
     console.error('::error::neither ceiling-keys nor floor-keys names anything — this guard would check nothing');
     return 2;
   }
+  const requireApproval = env.REQUIRE_APPROVAL === 'true';
 
   let headText;
   try {
@@ -283,7 +340,7 @@ export function main(argv = process.argv.slice(2), env = process.env, cwd = proc
     return 1;
   }
 
-  const violations = findUnjustifiedLoosenings({ base, head, ceilingKeys, floorKeys });
+  const violations = findUnjustifiedLoosenings({ base, head, ceilingKeys, floorKeys, requireApproval });
   if (violations.length === 0) {
     console.log(
       `${ledgerPath}: no unjustified loosening against ${baseRef} ` +
