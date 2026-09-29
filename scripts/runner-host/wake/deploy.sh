@@ -29,7 +29,10 @@
 # quota, L-34B43A08), POOL_SIZE (0; stopped hosts kept warm, see README), TOKEN_PARAMETER
 # (/ci-runner/github-app-key),
 # WAKE_SECRET_FILE (~/.ci-runner-wake-secret, created 0600, never printed),
-# ROOT_IOPS (6000) and ROOT_THROUGHPUT (500 MB/s) for the hosts' gp3 root volume,
+# ROOT_IOPS (3000) and ROOT_THROUGHPUT (250 MB/s) for the hosts' gp3 root volume.
+# 6000/500 cost $30 a volume-month over gp3's free 3000/125; measured 2026-09-28
+# against 2026-09-29 (usage-report), 3000/250 made jobs 14% slower at the p50,
+# capped at ~250 MB/s, for about $4 a day less: the owner kept 3000/250,
 # REGIONS (us-east-2,eu-north-1,AWS_REGION): where hosts may run, cheapest
 # first. The AMI is copied (by name) into each and gets a launch template of
 # the same name there; a region that cannot be set up is left out with a
@@ -91,8 +94,8 @@ UD
 # disk-bound once the cache is found (future-pay: 529 MB restored in 2.5 s,
 # then 19 s to extract and more to link 1887 packages), so the root volume
 # gets more; it is billed only while a host exists.
-root_iops="${ROOT_IOPS:-6000}"
-root_throughput="${ROOT_THROUGHPUT:-500}"
+root_iops="${ROOT_IOPS:-3000}"
+root_throughput="${ROOT_THROUGHPUT:-250}"
 param="${TOKEN_PARAMETER:-/ci-runner/github-app-key}"
 role="$fn"
 template="ci-runner-fleet-${label}"
