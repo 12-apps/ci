@@ -249,10 +249,22 @@ if ! aws iam get-role --role-name "$role" >/dev/null 2>&1; then
     --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}' >/dev/null
   new_role=1
 fi
+# The queue the webhooks keep (queue.mjs): one item per waiting job, expired
+# by TTL if a delivery never takes it off. On-demand billing: cents a month.
+queue_table="ci-runner-queue-${label}"
+if ! aws dynamodb describe-table --table-name "$queue_table" >/dev/null 2>&1; then
+  aws dynamodb create-table --table-name "$queue_table" --billing-mode PAY_PER_REQUEST \
+    --attribute-definitions AttributeName=id,AttributeType=S --key-schema AttributeName=id,KeyType=HASH \
+    --tags Key=Project,Value=ci-runner >/dev/null
+  aws dynamodb wait table-exists --table-name "$queue_table"
+  aws dynamodb update-time-to-live --table-name "$queue_table" \
+    --time-to-live-specification Enabled=true,AttributeName=expires >/dev/null
+fi
 policy=$(jq -n --arg lts "$template_arns" --arg hostrole "$host_role" --arg label "$label" \
   --arg param "arn:aws:ssm:${region}:${account}:parameter${param}" \
   --arg spend "arn:aws:ssm:${region}:${account}:parameter/ci-runner/spend-${label}" \
   --arg alert "arn:aws:ssm:${region}:${account}:parameter${alert_param}" \
+  --arg queue "arn:aws:dynamodb:${region}:${account}:table/${queue_table}" \
   --arg logs "arn:aws:logs:${region}:${account}:log-group:/aws/lambda/${fn}" '{
   Version: "2012-10-17",
   Statement: [
@@ -266,6 +278,7 @@ policy=$(jq -n --arg lts "$template_arns" --arg hostrole "$host_role" --arg labe
     {Effect: "Allow", Action: "ec2:DescribeInstances", Resource: "*"},
     {Effect: "Allow", Action: "ssm:GetParameter", Resource: [$param, $alert]},
     {Effect: "Allow", Action: ["ssm:GetParameter", "ssm:PutParameter"], Resource: $spend},
+    {Effect: "Allow", Action: ["dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:Scan", "dynamodb:UpdateItem"], Resource: $queue},
     {Effect: "Allow", Action: "kms:Decrypt", Resource: "*", Condition: {StringEquals: {"kms:ViaService": "ssm.\($param | split(":")[3]).amazonaws.com"}}},
     {Effect: "Allow", Action: "logs:CreateLogGroup", Resource: $logs},
     {Effect: "Allow", Action: ["logs:CreateLogStream", "logs:PutLogEvents"], Resource: ($logs + ":*")}
@@ -285,8 +298,8 @@ trap 'rm -rf "$work"' EXIT
   '{Variables: {MODE: "scale", WEBHOOK_SECRET: ($s | rtrimstr("\n")), RUNNER_LABEL: $l, REPOSITORY: $r,
     LAUNCH_TEMPLATE: $t, TOKEN_PARAMETER: $p, INSTANCE_TYPES: $types, REGIONS: $regions, SLOTS_PER_HOST: $slots, MAX_HOSTS: $max,
     DAILY_BUDGET: $budget, DEGRADED_MAX_HOSTS: $degraded, BUDGET_UTC_OFFSET: $offset, ALERT_PARAMETER: $alert, SPOT_STRATEGY: $strategy}}' > "$work/env.json")
-cp "$here/wake.mjs" "$here/scale.mjs" "$here/budget.mjs" "$here/github.mjs" "$here/index.mjs" "$work/"
-(cd "$work" && python3 -m zipfile -c fn.zip wake.mjs scale.mjs budget.mjs github.mjs index.mjs)
+cp "$here/wake.mjs" "$here/scale.mjs" "$here/budget.mjs" "$here/github.mjs" "$here/queue.mjs" "$here/index.mjs" "$work/"
+(cd "$work" && python3 -m zipfile -c fn.zip wake.mjs scale.mjs budget.mjs github.mjs queue.mjs index.mjs)
 if aws lambda get-function --function-name "$fn" >/dev/null 2>&1; then
   aws lambda update-function-code --function-name "$fn" --zip-file "fileb://$work/fn.zip" >/dev/null
   aws lambda wait function-updated-v2 --function-name "$fn"

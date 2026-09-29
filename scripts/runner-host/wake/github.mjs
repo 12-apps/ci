@@ -73,8 +73,8 @@ export function makeGithub({ repo, label: fleetLabel, token, fetchFn = fetch }) 
 
   return {
     // Jobs waiting for a runner with this label, across every run that has one.
-    async queuedJobs(label) {
-      let count = 0;
+    async queuedJobIds(label) {
+      const queued = [];
       const live = new Set();
       for (const status of ["queued", "in_progress"]) {
         const ids = await call(`/repos/${repo}/actions/runs?status=${status}&per_page=100`, {
@@ -83,14 +83,17 @@ export function makeGithub({ repo, label: fleetLabel, token, fetchFn = fetch }) 
         for (const id of ids) {
           const memo = `jobs ${id} ${label}`;
           live.add(memo);
-          count += await call(`/repos/${repo}/actions/runs/${id}/jobs?filter=latest&per_page=100`, {
-            memo, derive: (b) => b.jobs.filter((j) => j.status === "queued" && j.labels.includes(label)).length,
-          });
+          queued.push(...await call(`/repos/${repo}/actions/runs/${id}/jobs?filter=latest&per_page=100`, {
+            memo, derive: (b) => b.jobs.filter((j) => j.status === "queued" && j.labels.includes(label)).map((j) => j.id),
+          }));
         }
       }
       // A run that has left both lists is not read again.
       for (const memo of kept.keys()) if (memo.startsWith("jobs ") && !live.has(memo)) kept.delete(memo);
-      return count;
+      return queued;
+    },
+    async queuedJobs(label) {
+      return (await this.queuedJobIds(label)).length;
     },
     // Failed jobs of this attempt that lost their runner. When the host goes
     // (spot reclaim, a crash), GitHub closes the job as a failure but leaves
