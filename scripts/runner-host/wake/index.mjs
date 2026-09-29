@@ -11,6 +11,7 @@ import {
 } from "@aws-sdk/client-ec2";
 import { GetParameterCommand, PutParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { accrue, hostCap, reclaimLine } from "./budget.mjs";
+import { makeGithub } from "./github.mjs";
 import { makeScaler, regionOrder, spotAttempts } from "./scale.mjs";
 import { makeHandler } from "./wake.mjs";
 
@@ -27,49 +28,9 @@ async function githubToken() {
   return token;
 }
 
-async function gh(path, method = "GET") {
-  const res = await fetch(`https://api.github.com${path}`, {
-    method,
-    headers: { Authorization: `Bearer ${await githubToken()}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
-  });
-  if (!res.ok) throw new Error(`GitHub ${res.status} on ${method} ${path}`);
-  return res.status === 204 || res.status === 201 ? {} : res.json();
-}
-
-const github = {
-  // Jobs waiting for a runner with this label, across every run that has one.
-  async queuedJobs(label) {
-    let count = 0;
-    for (const status of ["queued", "in_progress"]) {
-      const { workflow_runs: runs } = await gh(`/repos/${env.REPOSITORY}/actions/runs?status=${status}&per_page=100`);
-      for (const run of runs) {
-        const { jobs } = await gh(`/repos/${env.REPOSITORY}/actions/runs/${run.id}/jobs?filter=latest&per_page=100`);
-        count += jobs.filter((j) => j.status === "queued" && j.labels.includes(label)).length;
-      }
-    }
-    return count;
-  },
-  // Failed jobs of this attempt that lost their runner. When the host goes
-  // (spot reclaim, a crash), GitHub closes the job as a failure but leaves
-  // the step it was in unfinished; a job that fails on its own finishes every
-  // step it ran. The Actions API alone tells them apart, so this holds after
-  // EC2 has forgotten the host: a terminated instance has no private address
-  // left to look it up by, which is how the first version of this missed
-  // future-pay #1985's two lost jobs.
-  async lostJobs(runId, attempt) {
-    const { jobs } = await gh(`/repos/${env.REPOSITORY}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100`);
-    return jobs.filter((j) => j.conclusion === "failure" && j.labels.includes(env.RUNNER_LABEL)
-      && (j.steps ?? []).some((s) => s.status !== "completed")).length;
-  },
-  // Needs Actions: Read and write on the token.
-  async rerunFailed(runId) {
-    await gh(`/repos/${env.REPOSITORY}/actions/runs/${runId}/rerun-failed-jobs`, "POST");
-  },
-  async idleRunners(label) {
-    const { runners } = await gh(`/repos/${env.REPOSITORY}/actions/runners?per_page=100`);
-    return runners.filter((r) => r.status === "online" && !r.busy && r.labels.some((l) => l.name === label)).length;
-  },
-};
+// The queue's reads carry ETags, so a 304 does not spend the token's hourly
+// allowance (github.mjs).
+const github = makeGithub({ repo: env.REPOSITORY, label: env.RUNNER_LABEL, token: githubToken });
 
 // A burst of deliveries is a burst of launch calls, and a new account's
 // request bucket is small. A throttled call is retried with the same
@@ -484,5 +445,16 @@ async function internal(event) {
   return { error: "unknown internal call" };
 }
 
+// One line per delivery that read GitHub: what it spent of the hourly
+// allowance, what came back free (304), and what is left.
+async function served(event) {
+  try {
+    return await serve(event);
+  } finally {
+    const { billed, free, remaining } = github.take();
+    if (billed + free > 0) console.log(`github: ${billed} billed, ${free} free, ${remaining ?? "?"} left`);
+  }
+}
+
 export const handler = async (event) =>
-  (event?.setup || event?.budget) && !event.requestContext ? internal(event) : serve(event);
+  (event?.setup || event?.budget) && !event.requestContext ? internal(event) : served(event);
