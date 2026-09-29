@@ -43,6 +43,12 @@
 # under `with:` and `SENTRY_AUTH_TOKEN` under `secrets:` to upload its source
 # maps; without all three the upload is switched off (see the Assemble step).
 #
+# The DSN the app reports crashes to is a separate, build-time value: pass it
+# as the `SENTRY_DSN` secret and name the variable the app's `app.config` reads
+# with `sentry-dsn-env` (e.g. `sentry-dsn-env: SENTRY_DSN_MOTOBOY`). Absent, the
+# build runs exactly as before and the app ships with no DSN (see the
+# `Hand the build its Sentry DSN` step).
+#
 # ## Map the secrets; do not `inherit` them unless the names already match
 #
 # The example above spells every secret out, and an earlier draft of it said
@@ -179,6 +185,16 @@ on:
         type: string
         required: false
         default: ''
+      sentry-dsn-env:
+        description: >-
+          Name of the environment variable the app's Expo config reads its
+          Sentry DSN from at build time (e.g. SENTRY_DSN_MOTOBOY). The value
+          comes from the `SENTRY_DSN` secret and is exported under this name to
+          `prebuild` and `assembleRelease` only. Ignored when that secret is
+          absent.
+        type: string
+        required: false
+        default: 'SENTRY_DSN'
     secrets:
       NPM_TOKEN:
         description: >-
@@ -202,6 +218,13 @@ on:
           when the app uses `@sentry/react-native`. Optional, like the keystore:
           absent (or with `sentry-org` / `sentry-project` absent), the upload
           is switched off and the APK ships without symbolication.
+        required: false
+      SENTRY_DSN:
+        description: >-
+          The Sentry DSN the app reports to, baked in at build time under the
+          variable `sentry-dsn-env` names. Optional: absent, the build is
+          unchanged and the app ships with no DSN, so its crash reporting stays
+          off. Never printed; the job summary says only present or absent.
         required: false
 
 # A CEILING, not a grant — it cannot give a job anything the caller withheld.
@@ -333,10 +356,54 @@ jobs:
         with:
           packages: platform-tools
 
+      # ── A Sentry DSN for the app, when the caller has one ───────────────
+      #
+      # An Expo app reads its DSN from `process.env` in `app.config` and keeps
+      # it in `extra`. That config is evaluated twice in this job: by
+      # `prebuild`, and again inside `assembleRelease`, where expo-constants'
+      # `createExpoConfig` task (never up to date, never cached) writes the
+      # `app.config` asset the APK carries and the app reads at runtime. So
+      # the value has to be in the environment of BOTH steps, and only those:
+      # it is exported inside each step's own script rather than through
+      # `$GITHUB_ENV`, so no other step or third-party action ever holds it.
+      #
+      # The variable NAME is the caller's (`sentry-dsn-env`), because an app
+      # decides what its config reads and this workflow knows no app.
+      #
+      # Degrade, never fail, like the keystore: no secret means nothing is
+      # exported and the build is the one it always was. A name that is not a
+      # valid variable is a warning and no DSN, not a red build. The value is
+      # masked and never echoed; the summary says only present or absent.
+      - name: Hand the build its Sentry DSN
+        id: dsn
+        env:
+          EXPO_APK_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          EXPO_APK_SENTRY_DSN_ENV: ${{ inputs.sentry-dsn-env }}
+        run: |
+          set -euo pipefail
+          if [ -z "${EXPO_APK_SENTRY_DSN:-}" ]; then
+            echo "summary=Sentry DSN: absent, so the app is built without one and its crash reporting stays off" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::add-mask::${EXPO_APK_SENTRY_DSN}"
+          if [[ ! "${EXPO_APK_SENTRY_DSN_ENV:-}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            echo "::warning title=Sentry DSN not applied::sentry-dsn-env is not a valid environment variable name, so the build runs without a DSN."
+            echo "summary=Sentry DSN: provided but NOT applied (sentry-dsn-env is not a valid variable name)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "env=${EXPO_APK_SENTRY_DSN_ENV}" >> "$GITHUB_OUTPUT"
+          echo "summary=Sentry DSN: present, exported to the build as \`${EXPO_APK_SENTRY_DSN_ENV}\`" >> "$GITHUB_OUTPUT"
+
       # `android/` is NOT committed — it is generated from app.json, so the
       # package id, the icons and the version have exactly one source of truth.
       - name: Generate the native project
-        run: pnpm --filter "$APP" prebuild
+        env:
+          EXPO_APK_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          EXPO_APK_SENTRY_DSN_ENV: ${{ steps.dsn.outputs.env }}
+        run: |
+          set -euo pipefail
+          if [ -n "${EXPO_APK_SENTRY_DSN_ENV:-}" ]; then export "${EXPO_APK_SENTRY_DSN_ENV}=${EXPO_APK_SENTRY_DSN}"; fi
+          pnpm --filter "$APP" prebuild
 
       # ── The Gradle caches ───────────────────────────────────────────────
       #
@@ -494,9 +561,14 @@ jobs:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: ${{ inputs.sentry-org }}
           SENTRY_PROJECT: ${{ inputs.sentry-project }}
+          EXPO_APK_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          EXPO_APK_SENTRY_DSN_ENV: ${{ steps.dsn.outputs.env }}
         working-directory: ${{ inputs.app-path }}/android
         run: |
           set -euo pipefail
+          # The DSN, for the app.config expo-constants re-evaluates in here;
+          # see the `Hand the build its Sentry DSN` step.
+          if [ -n "${EXPO_APK_SENTRY_DSN_ENV:-}" ]; then export "${EXPO_APK_SENTRY_DSN_ENV}=${EXPO_APK_SENTRY_DSN}"; fi
           if [ -n "${SENTRY_AUTH_TOKEN:-}" ] && [ -n "${SENTRY_ORG:-}" ] && [ -n "${SENTRY_PROJECT:-}" ]; then
             echo "sentry=Sentry source-map upload on, to ${SENTRY_ORG}/${SENTRY_PROJECT}" >> "$GITHUB_OUTPUT"
           else
@@ -544,6 +616,7 @@ jobs:
           APK: ${{ steps.assemble.outputs.apk }}
           FLAVOUR: ${{ steps.assemble.outputs.flavour }}
           SENTRY: ${{ steps.assemble.outputs.sentry }}
+          SENTRY_DSN_STATE: ${{ steps.dsn.outputs.summary }}
           CACHE_KEY: ${{ steps.gradle-cache.outputs.cache-matched-key }}
         working-directory: ${{ inputs.app-path }}/android
         run: |
@@ -607,6 +680,7 @@ jobs:
             echo "- \`${APK}\` — ${SIZE}"
             echo "- ABIs: \`$(echo "$PACKAGED" | paste -sd,)\`"
             echo "- ${SENTRY}"
+            echo "- ${SENTRY_DSN_STATE}"
             echo "- Gradle cache: \`${CACHE_KEY:-none — cold build}\`"
             echo ""
             echo "Download it from this run's artifacts, then open it on an Android phone."
