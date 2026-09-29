@@ -229,8 +229,28 @@ export function renderWaits(records) {
 
 // ── GitHub ──────────────────────────────────────────────────────────────────
 
+/**
+ * `fetch`, retried on a 5xx answer or a dropped connection. A day's report
+ * reads a job list per run — hundreds of calls — and GitHub answers one of
+ * them 502 now and then; without a retry that one answer threw away the whole
+ * report (2026-09-29, five attempts in a row for one day). A 4xx is an answer,
+ * not an outage, and returns at once. The last 5xx is returned, not thrown, so
+ * the caller's own error names the status.
+ */
+export async function fetchRetrying(url, init, { tries = 5, baseMs = 1000, fetchFn = fetch, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const res = await fetchFn(url, init);
+      if (res.status < 500 || attempt >= tries) return res;
+    } catch (error) {
+      if (attempt >= tries) throw error;
+    }
+    await sleep(baseMs * 2 ** (attempt - 1));
+  }
+}
+
 async function gh(path, { raw = false } = {}) {
-  const res = await fetch(`https://api.github.com${path}`, {
+  const res = await fetchRetrying(`https://api.github.com${path}`, {
     headers: { Authorization: `Bearer ${process.env.GITHUB_TOKEN}`, Accept: "application/vnd.github+json" },
     redirect: "follow",
   });
