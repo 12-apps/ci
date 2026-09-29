@@ -441,8 +441,19 @@ jobs:
             ~/.gradle/caches/modules-2
             ~/.gradle/caches/build-cache-1
             ~/.gradle/wrapper/dists
+          # Keyed on the APP's package.json, not the monorepo's pnpm-lock.yaml.
+          # The lockfile moves with every package in the repo (54 of 312
+          # future-pay commits in the week to 2026-09-29), and each move made
+          # a new key, so a push re-saved the whole ~984MB entry (run
+          # 36571915672) with next to nothing new in it: the Motoboy APK
+          # builds sent 9GB a day, mostly this, and each save evicted other
+          # lanes' caches from the 10GB budget (this job's own ccache among
+          # them: "Cache not found" on every run). The app's native modules
+          # are named in its package.json; a lockfile-only bump restores the
+          # nearest entry and Gradle fetches what is missing, as it does now.
           key: >-
-            ${{ inputs.app }}-gradle-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml',
+            ${{ inputs.app }}-gradle-${{ runner.os }}-${{ hashFiles(
+            format('{0}/package.json', inputs.app-path),
             format('{0}/android/gradle/wrapper/gradle-wrapper.properties', inputs.app-path),
             format('{0}/android/**/*.gradle', inputs.app-path)) }}
           restore-keys: |
