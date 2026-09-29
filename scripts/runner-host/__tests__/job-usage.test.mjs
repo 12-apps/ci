@@ -114,7 +114,9 @@ test("report: CPU, waits and disk are the deltas since the job started", () => {
   assert.equal(u.oomKills, 1);
   assert.equal(u.netRxMiB, 700);
   assert.equal(u.netTxMiB, 250);
-  assert.equal(u.hostBootS, Math.floor(u.startMs / 1000) + Math.round(u.wallMs / 1000) - 120);
+  // The script takes boot as the job's END second minus the uptime it read (120.55 → 120).
+  // floor(start) + round(wall) is off by one whenever the two fractions straddle a second.
+  assert.equal(u.hostBootS, Math.floor((u.startMs + u.wallMs) / 1000) - 120);
 });
 
 test("report: an unlimited cgroup and a missing cpuset read as null, not as a number", () => {
