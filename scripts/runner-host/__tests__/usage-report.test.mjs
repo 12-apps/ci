@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
+  fetchRetrying,
   fitTier,
   hostAndSlot,
   idleBreakdown,
@@ -167,4 +168,32 @@ test("renderWaits reports queue-wait percentiles in seconds", () => {
   const out = renderWaits([10, 20, 30, 40, 1000].map((s) => ({ queuedMs: s * 1000 })));
   assert.match(out, /\| 5 \| 30 s \| 1000 s \| 1000 s \| 1000 s \|/);
   assert.equal(renderWaits([]), "No queue times.");
+});
+
+// The report is the ruler every fleet change is measured with. One 502 among
+// hundreds of calls used to throw the whole day's report away.
+test("fetchRetrying retries a 5xx and a dropped connection, then answers", async () => {
+  const answers = [{ status: 502 }, new TypeError("fetch failed"), { status: 503 }, { status: 200 }];
+  const waits = [];
+  const res = await fetchRetrying("u", {}, {
+    fetchFn: async () => { const a = answers.shift(); if (a instanceof Error) throw a; return a; },
+    sleep: async (ms) => { waits.push(ms); },
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(waits, [1000, 2000, 4000], "backs off exponentially between attempts");
+});
+
+test("fetchRetrying returns a 4xx at once, and the last 5xx once the tries run out", async () => {
+  let calls = 0;
+  const notFound = await fetchRetrying("u", {}, { fetchFn: async () => { calls++; return { status: 404 }; }, sleep: async () => {} });
+  assert.equal(notFound.status, 404);
+  assert.equal(calls, 1, "a 4xx is an answer, not an outage");
+  calls = 0;
+  const down = await fetchRetrying("u", {}, { tries: 3, fetchFn: async () => { calls++; return { status: 502 }; }, sleep: async () => {} });
+  assert.equal(down.status, 502, "the caller's own error names the status");
+  assert.equal(calls, 3);
+  await assert.rejects(
+    fetchRetrying("u", {}, { tries: 2, fetchFn: async () => { throw new TypeError("fetch failed"); }, sleep: async () => {} }),
+    /fetch failed/,
+  );
 });
