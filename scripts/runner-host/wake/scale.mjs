@@ -88,9 +88,31 @@ export function regionOrder(regions, scores) {
 // allowance is left: what remains goes to the deliveries that bring jobs.
 export function makeScaler({
   secret, label, repo, github, ec2, slotsPerHost = 3, maxHosts = 30, bootSeconds = 180, now = () => Date.now(),
-  refreshSeconds = 15, reserve = 0.2, allowance = () => undefined,
+  refreshSeconds = 15, reserve = 0.2, allowance = () => undefined, queue,
 }) {
   let evaluatedAt = -Infinity;
+  // The queue kept from the webhooks (queue.mjs). A failed call returns
+  // undefined and the evaluation reads the API instead, as before the table.
+  async function kept(what, call) {
+    if (!queue) return undefined;
+    try {
+      return await call();
+    } catch (e) {
+      console.log(`queue: ${what} failed (${e.name}: ${e.message}); reading the API`);
+      return undefined;
+    }
+  }
+  // Jobs waiting: from the table, except for the one evaluation per interval
+  // that reads the API and makes the table agree with it.
+  async function waiting() {
+    if (await kept("claim", () => queue.claimReconcile())) {
+      const ids = await github.queuedJobIds(label);
+      const fixed = await kept("reconcile", () => queue.replace(ids));
+      if (fixed && (fixed.added || fixed.removed)) console.log(`queue: reconciled with the API, ${fixed.added} added, ${fixed.removed} removed`);
+      return ids.length;
+    }
+    return (await kept("count", () => queue.count())) ?? github.queuedJobs(label);
+  }
   function refreshSkipped() {
     if (now() - evaluatedAt < refreshSeconds * 1000) return `queue read ${Math.round((now() - evaluatedAt) / 1000)}s ago`;
     const left = allowance();
@@ -123,7 +145,7 @@ export function makeScaler({
   async function evaluate(delivered) {
     // A function when the cap moves (the daily budget, budget.mjs).
     const cap = typeof maxHosts === "function" ? await maxHosts() : maxHosts;
-    const [listed, idle, hosts] = await Promise.all([github.queuedJobs(label), github.idleRunners(label), ec2.hosts()]);
+    const [listed, idle, hosts] = await Promise.all([waiting(), github.idleRunners(label), ec2.hosts()]);
     evaluatedAt = now();
     const queued = Math.max(listed, delivered);
     const live = hosts.filter((h) => h.state === "pending" || h.state === "running");
@@ -167,9 +189,14 @@ export function makeScaler({
     if (kind === "workflow_run") {
       return payload.action === "completed" && payload.workflow_run ? recover(payload.workflow_run) : reply(202, `ignored action ${payload.action}`);
     }
-    if (!["queued", "completed"].includes(payload.action)) return reply(202, `ignored action ${payload.action}`);
+    if (!["queued", "in_progress", "completed"].includes(payload.action)) return reply(202, `ignored action ${payload.action}`);
     if (!(payload.workflow_job?.labels ?? []).includes(label)) return reply(202, "job is not for this fleet");
+    const job = payload.workflow_job.id;
+    if (payload.action === "queued") await kept("add", () => queue.add(job));
+    else await kept("remove", () => queue.remove(job));
+    if (payload.action === "in_progress") return reply(202, "job started");
     if (payload.action === "completed") {
+      if ((await kept("count", () => queue.count())) === 0) return reply(202, "refresh skipped: queue empty");
       const why = refreshSkipped();
       if (why) return reply(202, `refresh skipped: ${why}`);
     }

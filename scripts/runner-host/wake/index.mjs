@@ -9,9 +9,11 @@ import {
   CreateFleetCommand, DescribeInstanceTypeOfferingsCommand, DescribeInstancesCommand, DescribeSubnetsCommand,
   DescribeSpotPriceHistoryCommand, EC2Client, GetSpotPlacementScoresCommand, StartInstancesCommand,
 } from "@aws-sdk/client-ec2";
+import { DeleteItemCommand, DynamoDBClient, PutItemCommand, ScanCommand, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
 import { GetParameterCommand, PutParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { accrue, hostCap, reclaimLine } from "./budget.mjs";
 import { makeGithub } from "./github.mjs";
+import { makeQueue } from "./queue.mjs";
 import { makeScaler, regionOrder, spotAttempts } from "./scale.mjs";
 import { makeHandler } from "./wake.mjs";
 
@@ -31,6 +33,14 @@ async function githubToken() {
 // The queue's reads carry ETags, so a 304 does not spend the token's hourly
 // allowance (github.mjs).
 const github = makeGithub({ repo: env.REPOSITORY, label: env.RUNNER_LABEL, token: githubToken });
+
+// The queue, kept from the webhooks in DynamoDB (queue.mjs, created by
+// deploy.sh). Without the table every call fails over to the API reads above.
+const queue = makeQueue({
+  client: new DynamoDBClient({}),
+  commands: { PutItemCommand, DeleteItemCommand, ScanCommand, UpdateItemCommand },
+  table: env.QUEUE_TABLE ?? `ci-runner-queue-${env.RUNNER_LABEL}`,
+});
 
 // A burst of deliveries is a burst of launch calls, and a new account's
 // request bucket is small. A throttled call is retried with the same
@@ -432,6 +442,7 @@ const serve = (env.MODE ?? "scale") === "wake"
       secret: env.WEBHOOK_SECRET, label: env.RUNNER_LABEL, repo: env.REPOSITORY, github, ec2: fleet,
       slotsPerHost: Number(env.SLOTS_PER_HOST ?? 2), maxHosts: currentCap,
       allowance: () => github.allowance(),
+      queue,
     });
 
 // IAM-only calls (`aws lambda invoke`; never reachable through the public URL,
