@@ -147,8 +147,8 @@ const ON_DEMAND = {
   "m7a.2xlarge": 0.4637, "m6a.2xlarge": 0.3456, "m7i.2xlarge": 0.4032, "m6i.2xlarge": 0.384,
   "r7a.2xlarge": 0.6086, "r6a.2xlarge": 0.4536, "r7i.2xlarge": 0.5292, "r6i.2xlarge": 0.504,
 };
-// A host's gp3 root (120 GB, 6000 IOPS, 500 MB/s: $39.6 a month) and its public IPv4.
-const PER_HOST_EXTRAS = 0.054 + 0.005;
+// A host's gp3 root (120 GB, 3000 IOPS, 250 MB/s: $14.6 a month) and its public IPv4.
+const PER_HOST_EXTRAS = 0.02 + 0.005;
 const spotPrices = new Map(); // region -> { at, byPool: Map<"type@az", usd> }
 async function spotPrice(region, type, az) {
   let cached = spotPrices.get(region);
@@ -431,6 +431,7 @@ const serve = (env.MODE ?? "scale") === "wake"
   : makeScaler({
       secret: env.WEBHOOK_SECRET, label: env.RUNNER_LABEL, repo: env.REPOSITORY, github, ec2: fleet,
       slotsPerHost: Number(env.SLOTS_PER_HOST ?? 2), maxHosts: currentCap,
+      allowance: () => github.allowance(),
     });
 
 // IAM-only calls (`aws lambda invoke`; never reachable through the public URL,

@@ -43,6 +43,7 @@ export function makeGithub({ repo, label: fleetLabel, token, fetchFn = fetch }) 
   /** @type {Map<string, { etag: string, value: unknown }>} what the last answer for a read meant */
   const kept = new Map();
   let usage = { billed: 0, free: 0, remaining: undefined };
+  let limit;
 
   // `memo` names a read whose meaning is worth keeping: the ETag goes out with
   // the next read of the same path, and a 304 answers with the kept value.
@@ -57,6 +58,7 @@ export function makeGithub({ repo, label: fleetLabel, token, fetchFn = fetch }) 
     });
     const remaining = res.headers.get("x-ratelimit-remaining");
     if (remaining !== null) usage.remaining = Number(remaining);
+    if (res.headers.get("x-ratelimit-limit") !== null) limit = Number(res.headers.get("x-ratelimit-limit"));
     if (res.status === 304 && known) {
       usage.free++;
       return known.value;
@@ -111,6 +113,10 @@ export function makeGithub({ repo, label: fleetLabel, token, fetchFn = fetch }) 
         memo: `runners ${label}`,
         derive: (b) => b.runners.filter((r) => r.status === "online" && !r.busy && r.labels.some((l) => l.name === label)).length,
       });
+    },
+    // The allowance GitHub last reported, for a caller that rations it.
+    allowance() {
+      return usage.remaining === undefined || limit === undefined ? undefined : { remaining: usage.remaining, limit };
     },
     // What the calls since the last take cost: `billed` came back with a body
     // (those count against the hourly allowance), `free` were 304s, and

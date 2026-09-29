@@ -79,7 +79,25 @@ export function regionOrder(regions, scores) {
   return regions.map((r, i) => ({ r, i })).sort((a, b) => tier(b.r) - tier(a.r) || a.i - b.i).map((x) => x.r);
 }
 
-export function makeScaler({ secret, label, repo, github, ec2, slotsPerHost = 3, maxHosts = 30, bootSeconds = 180, now = () => Date.now() }) {
+// A `completed` delivery adds no demand: it re-reads the queue in case a burst
+// outran the hosts. With every delivery re-reading it, the token's 5,000
+// requests an hour ran out 12-30 minutes into each busy hour (2026-09-28/29),
+// and a scaler that cannot read the queue launches nothing, `queued` or not.
+// So a `completed` delivery skips the re-read when this container read the
+// queue less than `refreshSeconds` ago, or when less than `reserve` of the
+// allowance is left: what remains goes to the deliveries that bring jobs.
+export function makeScaler({
+  secret, label, repo, github, ec2, slotsPerHost = 3, maxHosts = 30, bootSeconds = 180, now = () => Date.now(),
+  refreshSeconds = 15, reserve = 0.2, allowance = () => undefined,
+}) {
+  let evaluatedAt = -Infinity;
+  function refreshSkipped() {
+    if (now() - evaluatedAt < refreshSeconds * 1000) return `queue read ${Math.round((now() - evaluatedAt) / 1000)}s ago`;
+    const left = allowance();
+    if (left && left.limit > 0 && left.remaining < left.limit * reserve) return `${left.remaining} of ${left.limit} GitHub requests left`;
+    return undefined;
+  }
+
   async function recover(run) {
     if (run.conclusion !== "failure") return reply(202, `run ${run.conclusion}`);
     if ((run.run_attempt ?? 1) >= MAX_ATTEMPTS) return reply(202, `attempt ${run.run_attempt}; not re-running`);
@@ -106,6 +124,7 @@ export function makeScaler({ secret, label, repo, github, ec2, slotsPerHost = 3,
     // A function when the cap moves (the daily budget, budget.mjs).
     const cap = typeof maxHosts === "function" ? await maxHosts() : maxHosts;
     const [listed, idle, hosts] = await Promise.all([github.queuedJobs(label), github.idleRunners(label), ec2.hosts()]);
+    evaluatedAt = now();
     const queued = Math.max(listed, delivered);
     const live = hosts.filter((h) => h.state === "pending" || h.state === "running");
     // A host that has not registered its runners yet is capacity on the way.
@@ -150,6 +169,10 @@ export function makeScaler({ secret, label, repo, github, ec2, slotsPerHost = 3,
     }
     if (!["queued", "completed"].includes(payload.action)) return reply(202, `ignored action ${payload.action}`);
     if (!(payload.workflow_job?.labels ?? []).includes(label)) return reply(202, "job is not for this fleet");
+    if (payload.action === "completed") {
+      const why = refreshSkipped();
+      if (why) return reply(202, `refresh skipped: ${why}`);
+    }
     return reply(200, "evaluated", await evaluate(payload.action === "queued" ? 1 : 0));
   };
 }
