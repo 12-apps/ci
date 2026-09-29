@@ -131,6 +131,24 @@ jobs:
 - **How the gate paces deploys:** it waits until X minutes have passed since the last deploy attempt started, meaning its `Discover targets` started, whether or not it is still running. Then it deploys.
 - **Bursts of merges:** a newer merge cancels a gate that is still waiting. A burst becomes one deploy of the newest commit, and the last merge of a burst always ships. A deploy that is building is never cancelled.
 - **Manual runs:** a manual dispatch never waits.
+- **Hours apart (`when_recent: skip`):** for an interval of hours, pass `when_recent: skip`. A push inside the interval then answers `deploy=false` at once instead of holding a runner for the rest of the window (on a self-hosted fleet, that can keep a whole host up overnight, and a job timeout can cut the wait short). The first merge after the interval deploys everything before it. Merges after the day's last deploy ship with the next merge past the window, or with a manual dispatch.
+
+  ```yaml
+  env:
+    DEPLOY_EVERY_MINUTES: 360       # about four deploys a day
+  jobs:
+    gate:
+      # …as above, minus the long timeout: a skipping gate never waits
+      steps:
+        - id: g
+          uses: 12-apps/ci/.github/actions/cd-gate@v2
+          with:
+            min_interval_minutes: ${{ env.DEPLOY_EVERY_MINUTES }}
+            when_recent: skip
+    cd:
+      needs: gate
+      if: needs.gate.outputs.deploy == 'true'
+  ```
 
 **Why not a `schedule`?** GitHub started future-pay's daily crons 3-7.5 hours late on every day of 2026-09-15..28, so a cron is no clock for "every X minutes". Push events arrive on time. Without `min_interval_minutes` the gate still supports a scheduled caller: it deploys only when the branch moved since the last attempt.
 

@@ -295,6 +295,13 @@ jobs:
         shell: bash
         run: node --test scripts/deploy/__tests__/select-images.test.mjs
 
+      # The CD gate against a fake GitHub API: when a push deploys, waits or
+      # skips, and which commit it hands the planner as the reuse base. It
+      # shipped without a line here, so its suite had never run in CI.
+      - name: CD gate
+        shell: bash
+        run: node --test scripts/deploy/__tests__/cd-gate.test.mjs
+
       # One runner-host slot, run for real against stub curl/docker: the JIT
       # registration a consumer's `CI_RUNNER` label has to match, the isolation
       # and /dev/shm a job container needs, and that the JIT config never lands
