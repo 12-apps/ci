@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * The scheduled-CD gate (scripts/deploy/cd-gate.mjs): the decision rules, and
+ * The CD gate (scripts/deploy/cd-gate.mjs): the decision rules, and
  * the script end to end against a fake GitHub API, the way the action runs it.
  *
  * Usage: node --test scripts/deploy/__tests__/cd-gate.test.mjs
@@ -11,7 +11,7 @@ import { createServer } from 'node:http';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { attempted, attemptStartedAt, decide, main, waitMs } from '../cd-gate.mjs';
+import { attempted, attemptStartedAt, decide, main, waitMs, whenRecent } from '../cd-gate.mjs';
 
 const run = (head_sha, conclusion, tried = true) => ({ head_sha, conclusion, attempted: tried });
 
@@ -175,4 +175,71 @@ test('end to end: a merge after the interval deploys at once', async () => {
     assert.deepEqual(waited, []);
     assert.equal(result.deploy, true);
   } finally { api.close(); }
+});
+
+// ── when_recent: skip — hours between deploys without a runner waiting ──────
+
+test('whenRecent: wait by default, skip on request, anything else is refused', () => {
+  assert.equal(whenRecent(undefined), 'wait');
+  assert.equal(whenRecent(''), 'wait');
+  assert.equal(whenRecent('skip'), 'skip');
+  assert.throws(() => whenRecent('later'), /when_recent must be wait or skip/);
+});
+
+test('end to end, skip: a merge inside the interval skips at once and never waits', async () => {
+  const api = await fakeApi(intervalRuns, intervalJobs);
+  const waited = [];
+  try {
+    const { result, output } = await runMain(
+      api, { GITHUB_EVENT_NAME: 'push', MIN_INTERVAL_MINUTES: '360', WHEN_RECENT: 'skip' },
+      { now: () => T0 + 90 * MIN, wait: async (ms) => { waited.push(ms); } });
+    assert.deepEqual(waited, [], 'a skipping gate holds no runner');
+    assert.deepEqual([result.deploy, result.base], [false, 'aaa']);
+    assert.match(output, /^deploy=false$/m);
+    assert.match(result.reason, /started 90 min ago, under the 360-min interval/);
+  } finally { api.close(); }
+});
+
+test('end to end, skip: the first merge after the interval deploys', async () => {
+  const api = await fakeApi(intervalRuns, intervalJobs);
+  try {
+    const { result } = await runMain(
+      api, { GITHUB_EVENT_NAME: 'push', MIN_INTERVAL_MINUTES: '360', WHEN_RECENT: 'skip' },
+      { now: () => T0 + 361 * MIN, wait: async () => assert.fail('must not wait') });
+    assert.deepEqual([result.deploy, result.base], [true, 'aaa']);
+  } finally { api.close(); }
+});
+
+test('end to end, skip: a manual dispatch inside the interval still deploys', async () => {
+  const api = await fakeApi(intervalRuns, intervalJobs);
+  try {
+    const { result } = await runMain(
+      api, { GITHUB_EVENT_NAME: 'workflow_dispatch', MIN_INTERVAL_MINUTES: '360', WHEN_RECENT: 'skip' },
+      { now: () => T0 + MIN, wait: async () => assert.fail('must not wait') });
+    assert.equal(result.deploy, true);
+  } finally { api.close(); }
+});
+
+test('end to end, skip: an unreadable history still deploys (fail-open, as without skip)', async () => {
+  const api = await fakeApi([], {}, { fail: true });
+  try {
+    const { result } = await runMain(api, { GITHUB_EVENT_NAME: 'push', MIN_INTERVAL_MINUTES: '360', WHEN_RECENT: 'skip' });
+    assert.deepEqual([result.deploy, result.base], [true, '']);
+  } finally { api.close(); }
+});
+
+test('end to end: a mistyped when_recent fails the step instead of deploying', async () => {
+  const api = await fakeApi(intervalRuns, intervalJobs);
+  try {
+    await assert.rejects(
+      runMain(api, { GITHUB_EVENT_NAME: 'push', MIN_INTERVAL_MINUTES: '360', WHEN_RECENT: 'later' }),
+      /when_recent must be wait or skip/);
+    assert.equal(api.seen.length, 0, 'refused before reading any history');
+  } finally { api.close(); }
+});
+
+test('the action passes when_recent through, defaulting to wait', () => {
+  const action = readFileSync(new URL('../../../.github/actions/cd-gate/action.yml', import.meta.url), 'utf8');
+  assert.match(action, /^ {2}when_recent:\n(?: {4}.*\n)*? {4}default: wait$/m);
+  assert.match(action, /^ {8}WHEN_RECENT: \$\{\{ inputs\.when_recent \}\}$/m);
 });

@@ -17,6 +17,14 @@
  * mode exists: GitHub's `schedule` fired future-pay's daily crons 3-7.5 hours
  * late every day of 2026-09-15..28, so a cron is no clock for "every 30 min".
  *
+ * With WHEN_RECENT=skip the gate does not wait: a push that lands inside the
+ * X minutes answers `deploy=false` at once, and the first merge after the
+ * window deploys everything that landed before it. For a long X (hours), a
+ * waiting gate would hold a runner for most of the window, and at night keep
+ * a whole self-hosted host up; a runner's job timeout can also cut the wait
+ * short. The cost is the tail: merges after the last deploy of the day ship
+ * with the next merge past the window, or with a manual dispatch.
+ *
  * ── On a schedule (MIN_INTERVAL_MINUTES unset) ──
  *
  * A scheduled run deploys only when the branch moved since the last attempt.
@@ -31,7 +39,8 @@
  *
  * Env: GITHUB_API_URL, GITHUB_REPOSITORY, GITHUB_TOKEN, GITHUB_WORKFLOW_REF,
  * GITHUB_REF_NAME, GITHUB_RUN_ID, GITHUB_EVENT_NAME, GITHUB_SHA, GITHUB_OUTPUT,
- * DISCOVER_JOB (default "Discover targets") and MIN_INTERVAL_MINUTES.
+ * DISCOVER_JOB (default "Discover targets"), MIN_INTERVAL_MINUTES and
+ * WHEN_RECENT (`wait`, the default, or `skip`).
  */
 import { appendFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -70,6 +79,16 @@ export function decide({ event, head, runs }) {
 export function waitMs({ event, now, lastStart, intervalMinutes }) {
   if (event === 'workflow_dispatch' || lastStart == null) return 0;
   return Math.max(0, lastStart + intervalMinutes * 60_000 - now);
+}
+
+/**
+ * What a run inside the interval does: `wait` (the default) or `skip`. Anything
+ * else is a caller mistake, and the gate says so rather than guessing.
+ */
+export function whenRecent(value) {
+  const v = String(value ?? '').trim() || 'wait';
+  if (v !== 'wait' && v !== 'skip') throw new Error(`when_recent must be wait or skip, not '${value}'`);
+  return v;
 }
 
 /** The last successful attempt's commit: the image-reuse base. */
@@ -111,6 +130,9 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export async function main(env = process.env, { now = Date.now, wait = sleep } = {}) {
   const workflow = (env.GITHUB_WORKFLOW_REF ?? '').split('@')[0].split('/').pop();
   const interval = Number(env.MIN_INTERVAL_MINUTES || 0);
+  // Outside the try: a mistyped mode is the caller's error and fails the step,
+  // rather than reading as an unreadable history that deploys.
+  const mode = whenRecent(env.WHEN_RECENT);
   const read = (inProgress) => history({
     client: { url: env.GITHUB_API_URL || 'https://api.github.com', token: env.GITHUB_TOKEN },
     repo: env.GITHUB_REPOSITORY,
@@ -127,14 +149,22 @@ export async function main(env = process.env, { now = Date.now, wait = sleep } =
       const runs = await read(true);
       const lastStart = runs.find((r) => r.startedAt != null)?.startedAt ?? null;
       const ms = waitMs({ event: env.GITHUB_EVENT_NAME, now: now(), lastStart, intervalMinutes: interval });
-      if (ms > 0) {
+      if (ms > 0 && mode === 'skip') {
+        const ago = Math.floor((now() - lastStart) / 60_000);
+        result = {
+          deploy: false,
+          base: baseOf(runs),
+          reason: `the last deploy started ${ago} min ago, under the ${interval}-min interval; skipping (the next merge after it deploys)`,
+        };
+      } else if (ms > 0) {
         console.log(`::notice::cd-gate: the last deploy started ${new Date(lastStart).toISOString()}; waiting ${Math.ceil(ms / 1000)}s so deploys stay ${interval} min apart (a newer merge cancels this wait)`);
         await wait(ms);
+        // Read again after the wait: the deploy that was building has most
+        // likely finished, and if it succeeded it is the better base.
+        result = { deploy: true, base: baseOf(await read(false)), reason: `waited ${Math.ceil(ms / 1000)}s for the ${interval}-min interval` };
+      } else {
+        result = { deploy: true, base: baseOf(runs), reason: `the last deploy started over ${interval} min ago` };
       }
-      // Read again after the wait: the deploy that was building has most likely
-      // finished, and if it succeeded it is the better base.
-      const after = ms > 0 ? await read(false) : runs;
-      result = { deploy: true, base: baseOf(after), reason: ms > 0 ? `waited ${Math.ceil(ms / 1000)}s for the ${interval}-min interval` : `the last deploy started over ${interval} min ago` };
     } else {
       result = decide({ event: env.GITHUB_EVENT_NAME, head: env.GITHUB_SHA, runs: await read(false) });
     }
