@@ -282,8 +282,8 @@ trap 'rm -rf "$work"' EXIT
   '{Variables: {MODE: "scale", WEBHOOK_SECRET: ($s | rtrimstr("\n")), RUNNER_LABEL: $l, REPOSITORY: $r,
     LAUNCH_TEMPLATE: $t, TOKEN_PARAMETER: $p, INSTANCE_TYPES: $types, REGIONS: $regions, SLOTS_PER_HOST: $slots, MAX_HOSTS: $max,
     DAILY_BUDGET: $budget, DEGRADED_MAX_HOSTS: $degraded, BUDGET_UTC_OFFSET: $offset, ALERT_PARAMETER: $alert, SPOT_STRATEGY: $strategy}}' > "$work/env.json")
-cp "$here/wake.mjs" "$here/scale.mjs" "$here/budget.mjs" "$here/index.mjs" "$work/"
-(cd "$work" && python3 -m zipfile -c fn.zip wake.mjs scale.mjs budget.mjs index.mjs)
+cp "$here/wake.mjs" "$here/scale.mjs" "$here/budget.mjs" "$here/github.mjs" "$here/index.mjs" "$work/"
+(cd "$work" && python3 -m zipfile -c fn.zip wake.mjs scale.mjs budget.mjs github.mjs index.mjs)
 if aws lambda get-function --function-name "$fn" >/dev/null 2>&1; then
   aws lambda update-function-code --function-name "$fn" --zip-file "fileb://$work/fn.zip" >/dev/null
   aws lambda wait function-updated-v2 --function-name "$fn"
