@@ -250,6 +250,16 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/lane-verdict-wiring.test.mjs
 
+      # Every `inputs.<name>` a reusable workflow reads must be an input it
+      # declares. Neither direction is reported by GitHub: inside the engine an
+      # undeclared input reads as empty (a feature that cannot be turned on), and
+      # a caller passing it gets `startup_failure` — no job, no log, nothing red.
+      # monorepo-tests.yml read `inputs.integration-fingerprint-command` without
+      # declaring it until FUT-2360.
+      - name: Declared inputs
+        shell: bash
+        run: node --test .github/workflows/__tests__/declared-inputs.test.mjs
+
       # The cost report's own script, lifted out of cost-report.yml and run
       # against a fake GitHub. Its failure is a number that looks right: with the
       # jobs on the self-hosted fleet it read "$0.00" for runs that cost real AWS

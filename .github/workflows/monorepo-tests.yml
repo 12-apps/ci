@@ -110,6 +110,25 @@ on:
         type: string
         required: false
         default: ''
+      integration-fingerprint-command:
+        description: >-
+          OPT-IN. `unit-fingerprint-command` for the integration lane: a command
+          printing a stable hash (to stdout, alone) of everything that lane's
+          verdict depends on. Same contract, same three properties, its own
+          `integration-lane-*` key, recorded by `Integration Verdict` after the
+          matrix. Empty (default) disables it.
+
+          This input was READ by the Integration Plan job before it was declared
+          here, and the difference is not cosmetic: an expression over an
+          undeclared input evaluates to empty, so the lane's whole fingerprint
+          path was dead code, while a caller that passed the input had its run
+          rejected at STARTUP — no job, no log, `startup_failure` and nothing
+          red to read (12-apps/future-pay run 36641143797). Every reference to
+          `inputs.<name>` in a reusable workflow must now be a declared input;
+          `__tests__/declared-inputs.test.mjs` asserts it.
+        type: string
+        required: false
+        default: ''
       vitest-cache-paths:
         description: >-
           Newline-separated paths of the packages' vitest results caches
@@ -1393,7 +1412,7 @@ jobs:
           # Folded into the KEY rather than the hash. These decide what the lane
           # RUNS and they live in a workflow file, which a sane "can this change
           # a test outcome?" rule ignores — so without them, editing
-          # integration-test-command would inherit the previous command's verdict.
+          # integration-command would inherit the previous command's verdict.
           #
           # The SHARD COUNT is deliberately absent. A lane-level verdict says
           # "every test this lane selects for this tree passed", and that is true
@@ -1402,7 +1421,7 @@ jobs:
           # would make the skip miss on precisely the pushes it exists for.
           LANE_NODE: ${{ inputs.node-version }}
           LANE_PRE: ${{ inputs.pre-test-command }}
-          LANE_CMD: ${{ inputs.integration-test-command }}
+          LANE_CMD: ${{ inputs.integration-command }}
         run: |
           set -o pipefail
           # NOT `set -e`: every failure here must fall through to an empty
