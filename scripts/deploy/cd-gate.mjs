@@ -102,16 +102,35 @@ async function api({ url, token }, path) {
   return res.json();
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** A listing's runs, newest first by creation, whatever order the page came in. */
+const newestFirst = (runs) => [...runs].sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''));
+
 /**
  * The history the gate reads, newest first, the current run excluded: enough
  * runs to find one successful attempt. With `inProgress`, runs still going are
  * read too, so a deploy that is building counts as the last attempt.
+ *
+ * GitHub sometimes answers the listing WITHOUT a status filter from a stale
+ * copy: on 2026-09-29 one read in seven came back ending 14 hours early, and
+ * one gate got a page whose newest successful deploy was from 2026-09-07. It
+ * took that commit as the base, and the deploy rebuilt every image. Such a
+ * listing can hold runs in progress, so it must hold THIS run; one that does
+ * not is stale and is read again, and after `attempts` reads it is an error.
  */
-export async function history({ client, repo, workflow, branch, runId, discoverJob, inProgress = false, limit = 30 }) {
+export async function history({ client, repo, workflow, branch, runId, discoverJob, inProgress = false, limit = 30, attempts = 4, pause = sleep }) {
   const status = inProgress ? '' : '&status=completed';
-  const listed = await api(client, `/repos/${repo}/actions/workflows/${workflow}/runs?branch=${encodeURIComponent(branch)}${status}&per_page=${limit}`);
+  const path = `/repos/${repo}/actions/workflows/${workflow}/runs?branch=${encodeURIComponent(branch)}${status}&per_page=${limit}`;
+  let listed = [];
+  for (let attempt = 1; ; attempt += 1) {
+    listed = newestFirst((await api(client, path)).workflow_runs ?? []);
+    if (!inProgress || !runId || listed.some((run) => String(run.id) === String(runId))) break;
+    if (attempt >= attempts) throw new Error(`the run listing is stale: ${attempts} reads never held run ${runId}`);
+    await pause(2000 * attempt);
+  }
   const runs = [];
-  for (const run of listed.workflow_runs ?? []) {
+  for (const run of listed) {
     if (String(run.id) === String(runId)) continue;
     const { jobs = [] } = await api(client, `/repos/${repo}/actions/runs/${run.id}/jobs?filter=latest&per_page=100`);
     runs.push({
@@ -125,9 +144,7 @@ export async function history({ client, repo, workflow, branch, runId, discoverJ
   return runs;
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-export async function main(env = process.env, { now = Date.now, wait = sleep } = {}) {
+export async function main(env = process.env, { now = Date.now, wait = sleep, pause = sleep } = {}) {
   const workflow = (env.GITHUB_WORKFLOW_REF ?? '').split('@')[0].split('/').pop();
   const interval = Number(env.MIN_INTERVAL_MINUTES || 0);
   // Outside the try: a mistyped mode is the caller's error and fails the step,
@@ -141,12 +158,19 @@ export async function main(env = process.env, { now = Date.now, wait = sleep } =
     runId: env.GITHUB_RUN_ID,
     discoverJob: env.DISCOVER_JOB || 'Discover targets',
     inProgress,
+    pause,
   });
   let result;
   try {
     if (!workflow) throw new Error('GITHUB_WORKFLOW_REF names no workflow file');
     if (interval > 0) {
-      const runs = await read(true);
+      // A listing that stays stale falls back to the completed runs alone: a
+      // deploy still building is missed, so this one may not wait for it, but
+      // the cd job's own concurrency group still queues it behind that deploy.
+      const runs = await read(true).catch((error) => {
+        console.log(`::warning::cd-gate: ${error.message}; reading completed runs only`);
+        return read(false);
+      });
       const lastStart = runs.find((r) => r.startedAt != null)?.startedAt ?? null;
       const ms = waitMs({ event: env.GITHUB_EVENT_NAME, now: now(), lastStart, intervalMinutes: interval });
       if (ms > 0 && mode === 'skip') {

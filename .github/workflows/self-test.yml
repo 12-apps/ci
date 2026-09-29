@@ -302,6 +302,12 @@ jobs:
         shell: bash
         run: node --test scripts/deploy/__tests__/cd-gate.test.mjs
 
+      # discover.sh carrying a descriptor's `reproducible` flag into the image
+      # matrix, where only a literal `true` turns the timestamp rewrite on.
+      - name: CD reproducible images
+        shell: bash
+        run: node --test scripts/deploy/__tests__/discover-reproducible.test.mjs
+
       # One runner-host slot, run for real against stub curl/docker: the JIT
       # registration a consumer's `CI_RUNNER` label has to match, the isolation
       # and /dev/shm a job container needs, and that the JIT config never lands

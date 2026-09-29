@@ -57,14 +57,20 @@ test('attempted() reads the engine job as a called workflow names it', () => {
   assert.equal(attempted([{ name: 'Gate', conclusion: 'success' }], 'Discover targets'), false);
 });
 
-/** A fake API: the workflow's completed runs, and each run's jobs. */
+/**
+ * A fake API: the workflow's runs, and each run's jobs. `runs` may be a
+ * function of the listing URL and how many listings came before, to serve a
+ * stale page first or a different one per status filter.
+ */
 async function fakeApi(runs, jobs, { fail = false } = {}) {
   const seen = [];
+  let listings = 0;
   const server = createServer((req, res) => {
     seen.push(req.url);
     if (fail) { res.writeHead(500).end(); return; }
     const m = /\/actions\/runs\/(\d+)\/jobs/.exec(req.url);
-    const body = m ? { jobs: jobs[m[1]] ?? [] } : { workflow_runs: runs };
+    const listed = () => (typeof runs === 'function' ? runs(req.url, listings++) : runs);
+    const body = m ? { jobs: jobs[m[1]] ?? [] } : { workflow_runs: listed() };
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(body));
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -145,6 +151,7 @@ test('attemptStartedAt counts a discover job still running, never a skipped one'
 });
 
 const intervalRuns = [
+  { id: 9, head_sha: 'ccc', conclusion: null },
   { id: 8, head_sha: 'bbb', conclusion: null },
   { id: 7, head_sha: 'aaa', conclusion: 'success' },
 ];
@@ -242,4 +249,46 @@ test('the action passes when_recent through, defaulting to wait', () => {
   const action = readFileSync(new URL('../../../.github/actions/cd-gate/action.yml', import.meta.url), 'utf8');
   assert.match(action, /^ {2}when_recent:\n(?: {4}.*\n)*? {4}default: wait$/m);
   assert.match(action, /^ {8}WHEN_RECENT: \$\{\{ inputs\.when_recent \}\}$/m);
+});
+// ── A stale listing (2026-09-29): a page without the current run ────────────
+
+const noPause = { pause: async () => {} };
+const stale = [{ id: 3, head_sha: 'old', conclusion: 'success', created_at: '2026-09-07T08:41:00Z' }];
+const staleJobs = { ...intervalJobs, 3: [{ name: 'cd / Discover targets', started_at: '2026-09-07T08:42:00Z', conclusion: 'success' }] };
+
+test('end to end: a listing without the current run is stale and is read again', async () => {
+  const api = await fakeApi((url, n) => (n === 0 ? stale : intervalRuns), staleJobs);
+  const paused = [];
+  try {
+    const { result } = await runMain(api, { GITHUB_EVENT_NAME: 'push', MIN_INTERVAL_MINUTES: '30' },
+      { now: () => T0 + 31 * MIN, wait: async () => {}, pause: async (ms) => { paused.push(ms); } });
+    assert.equal(result.base, 'aaa', 'the base comes from the fresh listing, never the stale one');
+    assert.deepEqual(paused, [2000]);
+  } finally { api.close(); }
+});
+
+test('end to end: a listing that stays stale falls back to the completed runs, not the stale page', async () => {
+  const api = await fakeApi((url) => (url.includes('status=completed') ? intervalRuns.slice(2) : stale), staleJobs);
+  try {
+    const { result } = await runMain(api, { GITHUB_EVENT_NAME: 'push', MIN_INTERVAL_MINUTES: '30' },
+      { now: () => T0 + 31 * MIN, wait: async () => {}, ...noPause });
+    assert.equal(result.deploy, true);
+    assert.equal(result.base, 'aaa');
+    assert.equal(api.seen.filter((u) => /\/runs\?branch=main&per_page=/.test(u)).length, 4, 'four reads before giving up');
+  } finally { api.close(); }
+});
+
+test('history: runs are read newest first by creation, whatever order the page came in', async () => {
+  const shuffled = [
+    { id: 7, head_sha: 'aaa', conclusion: 'success', created_at: '2026-09-28T19:00:00Z' },
+    { id: 9, head_sha: 'ccc', conclusion: null, created_at: '2026-09-28T20:10:00Z' },
+    { id: 8, head_sha: 'bbb', conclusion: 'success', created_at: '2026-09-28T20:00:00Z' },
+  ];
+  const jobs = { 7: intervalJobs[7], 8: [{ name: 'cd / Discover targets', started_at: '2026-09-28T20:00:00Z', conclusion: 'success' }] };
+  const api = await fakeApi(shuffled, jobs);
+  try {
+    const { result } = await runMain(api, { GITHUB_EVENT_NAME: 'push', MIN_INTERVAL_MINUTES: '30' },
+      { now: () => T0 + 31 * MIN, wait: async () => {}, ...noPause });
+    assert.equal(result.base, 'bbb');
+  } finally { api.close(); }
 });
