@@ -277,6 +277,9 @@ jobs:
       - name: Expo APK Sentry DSN
         shell: bash
         run: node --test .github/workflows/__tests__/expo-apk-sentry-dsn.test.mjs
+      - name: Expo APK Gradle cache key
+        shell: bash
+        run: node --test .github/workflows/__tests__/expo-apk-gradle-cache-key.test.mjs
 
       # What a provisioned droplet actually boots with. do-provision runs
       # scripts/ephemeral/deploy-cloud-init.sh, and every way that document can
