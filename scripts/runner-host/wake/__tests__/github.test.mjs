@@ -19,7 +19,7 @@ function fakeGithub(state, { fail } = {}) {
     const path = url.replace("https://api.github.com", "");
     const sent = init.headers["If-None-Match"];
     calls.push({ path, method: init.method, etag: sent });
-    const headers = { "x-ratelimit-remaining": String(4000 - calls.length), "x-ratelimit-reset": "1790712578" };
+    const headers = { "x-ratelimit-limit": "5000", "x-ratelimit-remaining": String(4000 - calls.length), "x-ratelimit-reset": "1790712578" };
     if (fail) return new Response(JSON.stringify(fail.body), { status: fail.status, headers: { ...headers, ...fail.headers } });
     if (!(path in state)) return new Response(JSON.stringify({ message: "Not Found" }), { status: 404, headers });
     const etag = `"${JSON.stringify(state[path]).length}-${JSON.stringify(state[path]).split("").reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7)}"`;
@@ -145,4 +145,14 @@ test("a secondary limit's retry-after is reported too", async () => {
   });
   const github = makeGithub({ repo: REPO, label: LABEL, token: () => "t", fetchFn });
   await assert.rejects(github.queuedJobs(LABEL), /secondary rate limit\.; 3999 left, resets 20:09:38Z; retry after 60s$/);
+});
+
+test("the allowance is unknown until GitHub reports it, then carries the limit", async () => {
+  const { fetchFn } = fakeGithub(queue());
+  const github = makeGithub({ repo: REPO, label: LABEL, token: () => "t", fetchFn });
+  assert.equal(github.allowance(), undefined);
+  await github.idleRunners(LABEL);
+  assert.deepEqual(github.allowance(), { remaining: 3999, limit: 5000 });
+  github.take();
+  assert.deepEqual(github.allowance(), { remaining: 3999, limit: 5000 }, "take() keeps what GitHub last said");
 });

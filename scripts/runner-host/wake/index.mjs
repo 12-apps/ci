@@ -431,6 +431,7 @@ const serve = (env.MODE ?? "scale") === "wake"
   : makeScaler({
       secret: env.WEBHOOK_SECRET, label: env.RUNNER_LABEL, repo: env.REPOSITORY, github, ec2: fleet,
       slotsPerHost: Number(env.SLOTS_PER_HOST ?? 2), maxHosts: currentCap,
+      allowance: () => github.allowance(),
     });
 
 // IAM-only calls (`aws lambda invoke`; never reachable through the public URL,
