@@ -123,6 +123,8 @@ for (const lane of LANES) {
 // GITHUB_OUTPUT, the action had no `filtered:` under `outputs:`, and the plan
 // job saw `SKIP_GREEN_FILTERED:` empty — an enforce that dropped a test still
 // sized its matrix from the unfiltered count.
+const WORKFLOWS = fileURLToPath(new URL("../", import.meta.url));
+const read = (file) => readFileSync(path.join(WORKFLOWS, file), "utf8");
 for (const [action, stepId] of [["skip-green", "skipgreen"], ["lane-verdict", "lane-verdict"]]) {
   test(`every steps.${stepId}.outputs.* the workflows read is declared by the ${action} action`, () => {
     const actionYml = readFileSync(path.join(WORKFLOWS, `../actions/${action}/action.yml`), "utf8");
