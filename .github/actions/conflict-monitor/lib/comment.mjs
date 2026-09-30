@@ -27,16 +27,33 @@ export function digest(records) {
 
 export const stateOf = (body) => STATE.exec(body ?? "")?.[1] ?? null;
 
+/**
+ * The monitor's own comment: carries the marker AND was written by a bot.
+ * Anyone can post a comment that starts with the marker on a public repo;
+ * matching on the text alone would let a stranger's comment be edited by the
+ * bot, or pre-seed a digest that suppresses the notice.
+ */
+export const isOwnComment = (c) =>
+  typeof c?.body === "string" && c.body.startsWith(MARKER) && c.user?.type === "Bot";
+
 const SHAPE_HINT = {
   "edit/edit": "both sides changed the same lines",
   "insert/insert": "both sides added lines at the same spot",
   "add/add": "both sides created this file",
 };
 
-const esc = (s) => String(s).replace(/\|/g, "\\|");
+/**
+ * A path, shown as code WITHOUT markdown: the path comes from the PR's own
+ * tree, so it is attacker-chosen on a fork — a backtick in it would close a
+ * code span and let the rest render as a live link or an @mention under the
+ * bot's name. `<code>` with HTML escaping cannot be closed from inside.
+ */
+export const codeOf = (s) =>
+  `<code>${String(s).replace(/[&<>"'|`@\\]/g, (c) => `&#${c.charCodeAt(0)};`)}</code>`;
+const esc = (s) => String(s).replace(/[&<>|]/g, (c) => `&#${c.charCodeAt(0)};`);
 
 function culpritCell(list) {
-  const prs = [...new Set(list.map((c) => (c.pr ? `#${c.pr}` : `\`${c.sha.slice(0, 7)}\``)))];
+  const prs = [...new Set(list.map((c) => (c.pr ? `#${c.pr}` : codeOf(c.sha.slice(0, 7)))))];
   if (!prs.length) return "—";
   return prs.length > 6 ? `${prs.slice(0, 6).join(", ")} +${prs.length - 6}` : prs.join(", ");
 }
@@ -44,7 +61,7 @@ function culpritCell(list) {
 export function renderConflict(records, { base, baseSha }) {
   const rows = [...records]
     .sort((a, b) => a.bucket.localeCompare(b.bucket) || a.file.localeCompare(b.file))
-    .map((r) => `| \`${esc(r.file)}\` | ${esc(r.shape)} | ${esc(r.bucket)} | ${culpritCell(r.culprits)} |`);
+    .map((r) => `| ${codeOf(r.file)} | ${esc(r.shape)} | ${esc(r.bucket)} | ${culpritCell(r.culprits)} |`);
   const hints = [...new Set(records.map((r) => r.shape))]
     .filter((s) => SHAPE_HINT[s])
     .map((s) => `**${s}**: ${SHAPE_HINT[s]}.`);

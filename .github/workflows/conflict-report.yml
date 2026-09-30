@@ -1,0 +1,101 @@
+name: Conflict report (reusable)
+
+# Count every time a PR branch merged its base in and it did not merge
+# cleanly — replayed from every PR's history, per group, all time and for a
+# trailing window. The mechanism is .github/actions/conflict-monitor
+# (`mode: report`); the live per-PR comment is conflict-probe.yml, a separate
+# file so this one can stay read-only (see that file's header).
+#
+# A consuming repo adds:
+#
+#   on:
+#     schedule:
+#       - cron: '17 11 * * 1'
+#     workflow_dispatch: {}
+#   permissions:
+#     contents: read
+#   jobs:
+#     report:
+#       permissions:
+#         contents: read
+#         pull-requests: read
+#       uses: 12-apps/ci/.github/workflows/conflict-report.yml@v2
+#
+# `since`, `until` and `base-tip` pin a replay: the same three values give the
+# same numbers on any later run, which is what makes a report comparable
+# with the one before it.
+
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: "Path to the caller's group config."
+        type: string
+        required: false
+        default: '.github/conflict-monitor.json'
+      base:
+        description: 'Base branch. Empty: the repository default branch.'
+        type: string
+        required: false
+        default: ''
+      window-days:
+        description: 'The trailing window of the "since" column, when `since` is empty.'
+        type: string
+        required: false
+        default: '7'
+      since:
+        description: 'ISO date the "since" column starts at. Overrides `window-days`.'
+        type: string
+        required: false
+        default: ''
+      until:
+        description: 'Ignore syncs committed after this ISO timestamp.'
+        type: string
+        required: false
+        default: ''
+      base-tip:
+        description: 'Commit to treat as the base tip (default: the base branch head).'
+        type: string
+        required: false
+        default: ''
+      node-version:
+        description: 'Node version the scripts run on.'
+        type: string
+        required: false
+        default: '24'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  report:
+    name: Conflict report
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.base || github.event.repository.default_branch }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - uses: 12-apps/ci/.github/actions/conflict-monitor@v2
+        with:
+          mode: report
+          config: ${{ inputs.config }}
+          base: ${{ inputs.base }}
+          window-days: ${{ inputs.window-days }}
+          since: ${{ inputs.since }}
+          until: ${{ inputs.until }}
+          base-tip: ${{ inputs.base-tip }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conflict-report
+          path: conflict-report/
+          if-no-files-found: ignore

@@ -3,6 +3,7 @@ import { after, before, test } from "node:test";
 
 import { parseConfig } from "../lib/config.mjs";
 import { GROUPS, PR_REF, aggregate, baseLine, groupOf, renderReport, replay } from "../report.mjs";
+import { git } from "../lib/git.mjs";
 import { lines, makeRepo } from "./fixture.mjs";
 
 // The history replay, over one fixture repository that holds each case the
@@ -66,6 +67,28 @@ before(() => {
   r.checkout("main");
   r.git("reset", "-q", "--hard", beforeRewrite);
   r.commit("thirty, rewritten (#30)", { "c.txt": lines("c") });
+  // PR 40 / PR 41: stacked, and the PARENT merged main in after the child
+  // branched off — the parent then holds base commits the child lacks.
+  r.checkout("feat40", true);
+  const pr40a = r.commit("feat40", { "e.txt": lines("e") });
+  r.checkout("feat41", true);
+  r.commit("feat41", { "e.txt": lines("e", "child") });
+  r.checkout("main");
+  r.commit("land six (#6)", { "f.txt": lines("f") });
+  r.checkout("feat40");
+  const pr40head = r.mergeResolving("main", {});
+  r.git("update-ref", PR_REF(40), pr40head);
+  r.checkout("main");
+  r.write({ "e.txt": lines("e") });
+  r.git("add", "-A");
+  r.git("commit", "-q", "-m", "feat forty (#40)");
+  const squash40 = r.git("rev-parse", "HEAD");
+  r.checkout("feat41");
+  r.mergeResolving("main", { "e.txt": lines("e", "child") });
+  r.git("update-ref", PR_REF(41), "HEAD");
+  r.checkout("main");
+  assert.ok(pr40a);
+
   baseTip = r.git("rev-parse", "HEAD");
 
   prs = [
@@ -74,6 +97,8 @@ before(() => {
     { number: 21, title: "feat three (T-3)", head: "feat3", base: "main", mergedAt: null, mergeCommit: null },
     { number: 30, title: "thirty", head: "feat30", base: "main", mergedAt: "2026-01-01T00:00:00Z", mergeCommit: old30 },
     { number: 31, title: "thirty-one", head: "feat31", base: "main", mergedAt: null, mergeCommit: null },
+    { number: 40, title: "forty", head: "feat40", base: "main", mergedAt: "2026-01-01T00:00:00Z", mergeCommit: squash40 },
+    { number: 41, title: "forty-one", head: "feat41", base: "main", mergedAt: null, mergeCommit: null },
   ];
   assert.ok(c0);
 });
@@ -90,7 +115,7 @@ test("the base line keeps a rewritten-away commit that a merged PR's merge commi
 
 test("every sync is found, including the one whose base parent was rewritten away", () => {
   const { syncs, otherMerges } = replay({ prs, base: "main", baseTip, config, cwd: r.dir });
-  assert.deepEqual(syncs.map((s) => s.pr).sort(), [10, 21, 31]);
+  assert.deepEqual(syncs.map((s) => s.pr).sort((a, b) => a - b), [10, 21, 31, 40, 41]);
   assert.equal(otherMerges, 0);
   assert.equal(syncs.find((s) => s.pr === 31).conflicted, false);
 });
@@ -121,24 +146,39 @@ test("`until` pins the replay: nothing committed after it is counted", () => {
   const none = replay({ prs, base: "main", baseTip, config, until: "2000-01-01T00:00:00Z", cwd: r.dir });
   assert.equal(none.syncs.length, 0);
   const all = replay({ prs, base: "main", baseTip, config, until: "2999-01-01T00:00:00Z", cwd: r.dir });
-  assert.equal(all.syncs.length, 3);
+  assert.equal(all.syncs.length, 5);
+  // At the boundary: a merge committed AT `until` counts, one second before does not.
+  const at = git(["show", "-s", "--format=%cI", all.syncs.find((x) => x.pr === 10).commit], { cwd: r.dir }).out.trim();
+  const edge = replay({ prs: [prs[0]], base: "main", baseTip, config, until: at, cwd: r.dir });
+  assert.equal(edge.syncs.length, 1);
+  const before = new Date(Date.parse(at) - 1000).toISOString();
+  assert.equal(replay({ prs: [prs[0]], base: "main", baseTip, config, until: before, cwd: r.dir }).syncs.length, 0);
+  assert.throws(() => replay({ prs, base: "main", baseTip, config, until: "not a date", cwd: r.dir }), /until is not a date/);
+});
+
+test("stacked holds when the parent merged main in after the child branched", () => {
+  const { syncs } = replay({ prs, base: "main", baseTip, config, cwd: r.dir });
+  const pr41 = syncs.find((s) => s.pr === 41);
+  assert.equal(pr41.conflicted, true);
+  assert.deepEqual(pr41.stackedOn, [40]);
+  assert.deepEqual(pr41.files.map((f) => f.group), [GROUPS.stacked]);
 });
 
 test("the aggregate counts pairs, distinct merges, declared-only syncs and the window", () => {
   const result = replay({ prs, base: "main", baseTip, config, cwd: r.dir });
   const report = aggregate(result, { since: "2000-01-01T00:00:00Z", config });
-  assert.equal(report.syncs.total, 3);
-  assert.equal(report.syncs.conflicted, 2);
-  assert.equal(report.syncs.distinctConflictedMerges, 2);
+  assert.equal(report.syncs.total, 5);
+  assert.equal(report.syncs.conflicted, 3);
+  assert.equal(report.syncs.distinctConflictedMerges, 3);
   assert.equal(report.syncs.mechanicalOnly, 0);
-  assert.equal(report.syncs.stacked, 1);
-  assert.equal(report.files.total, 3);
-  assert.equal(report.files.inWindow, 3);
+  assert.equal(report.syncs.stacked, 2);
+  assert.equal(report.files.total, 4);
+  assert.equal(report.files.inWindow, 4);
   const g = Object.fromEntries(report.groups.map((x) => [x.name, x.all]));
-  assert.deepEqual(g, { dependencies: 1, [GROUPS.edit]: 1, [GROUPS.stacked]: 1 });
+  assert.deepEqual(g, { dependencies: 1, [GROUPS.edit]: 1, [GROUPS.stacked]: 2 });
   const future = aggregate(result, { since: "2999-01-01T00:00:00Z", config });
   assert.equal(future.files.inWindow, 0);
   const md = renderReport(report, { repo: "o/r", base: "main" });
-  assert.match(md, /\*\*2 of 3 syncs conflicted\*\*/);
+  assert.match(md, /\*\*3 of 5 syncs conflicted\*\*/);
   assert.match(md, /\| dependencies \| 1 \| 1 \|/);
 });

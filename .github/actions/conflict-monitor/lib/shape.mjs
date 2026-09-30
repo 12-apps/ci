@@ -25,7 +25,11 @@ const ESCAPE = /[.*+?^${}()|[\]\\]/g;
 
 /** Every `CONFLICT (<kind>)` git printed about `path`. */
 export function conflictKinds(messages, path) {
-  const re = new RegExp(`CONFLICT \\(([^)]+)\\): [^\\n]*${path.replace(ESCAPE, "\\$&")}`, "g");
+  // The path must stand as a whole word of the message: preceded by a space
+  // and followed by a space, a sentence's punctuation or the end of the line.
+  // Unbounded, `new.txt` would also read the kind of `docs/new.txt`.
+  const p = path.replace(ESCAPE, "\\$&");
+  const re = new RegExp(`CONFLICT \\(([^)]+)\\): (?:[^\\n]* )?${p}(?=[ ,;:)]|\\.?\\r?$)`, "gm");
   return new Set([...messages.matchAll(re)].map((m) => m[1]));
 }
 
@@ -36,12 +40,12 @@ export function conflictKinds(messages, path) {
  * all four markers, in order, at column zero.
  */
 export function diff3Hunks(blob) {
-  const re = /^<{7}[^\n]*\n([\s\S]*?)^\|{7}[^\n]*\n([\s\S]*?)^={7}\n([\s\S]*?)^>{7}/gm;
-  return [...blob.matchAll(re)].map(([, ours, base, theirs]) => ({
-    ours: ours.split("\n").filter((l, i, a) => i < a.length - 1 || l !== ""),
-    base: base.split("\n").filter((l, i, a) => i < a.length - 1 || l !== ""),
-    theirs: theirs.split("\n").filter((l, i, a) => i < a.length - 1 || l !== ""),
-  }));
+  // Exactly seven marker characters (`(?![<|=>])`): a recursive merge nests
+  // nine-character markers inside, and those are content of this hunk. `\r?`
+  // lets a CRLF file's markers match.
+  const re = /^<{7}(?!<)[^\n]*\n([\s\S]*?)^\|{7}(?!\|)[^\n]*\n([\s\S]*?)^={7}(?!=)\r?\n([\s\S]*?)^>{7}(?!>)/gm;
+  const split = (text) => text.split(/\r?\n/).filter((l, i, a) => i < a.length - 1 || l !== "");
+  return [...blob.matchAll(re)].map(([, ours, base, theirs]) => ({ ours: split(ours), base: split(base), theirs: split(theirs) }));
 }
 
 /** `needle` appears in `haystack` in order, gaps allowed. */

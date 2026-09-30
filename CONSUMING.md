@@ -2062,6 +2062,12 @@ worktree, no checkout of the PR.
 
 ## A. Caller workflow (consumer `.github/workflows/conflict-monitor.yml`)
 
+Two reusable workflows, one per mode: `conflict-probe.yml` needs
+`pull-requests: write` (it comments), `conflict-report.yml` only reads. They
+are separate files because GitHub checks every job a called workflow declares
+against the caller's grant at startup, whatever the job's `if:` — one file
+holding both would make every report caller grant write.
+
 ```yaml
 name: Conflict monitor
 on:
@@ -2078,18 +2084,18 @@ permissions:
 
 jobs:
   probe:
-    # A fork PR's token is read-only on `pull_request`; its comment resolves
-    # at the next push to the base instead.
+    # A fork's or Dependabot's token is read-only on `pull_request`; their
+    # comment resolves at the next push to the base instead.
     if: >-
       github.event_name == 'push' ||
       (github.event_name == 'pull_request' &&
-       github.event.pull_request.head.repo.full_name == github.repository)
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.actor != 'dependabot[bot]')
     permissions:
       contents: read
       pull-requests: write
-    uses: 12-apps/ci/.github/workflows/conflict-monitor.yml@v2
+    uses: 12-apps/ci/.github/workflows/conflict-probe.yml@v2
     with:
-      mode: probe
       pr: ${{ github.event.pull_request.number || '' }}
 
   report:
@@ -2097,14 +2103,20 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    uses: 12-apps/ci/.github/workflows/conflict-monitor.yml@v2
-    with:
-      mode: report
+    uses: 12-apps/ci/.github/workflows/conflict-report.yml@v2
 ```
 
 The `pull_request: synchronize` trigger is what turns a comment to "resolved"
 within minutes: a push to the base is what MAKES a PR conflict, but the push
 that fixes it — the author's merge, or a heal job's — lands on the PR branch.
+
+The probe checks out the BASE, never the PR head, and executes nothing from a
+PR's tree: it only reads the head ref through `git merge-tree`. It keeps its
+comment by a hidden marker AND a bot author, so a comment somebody else pastes
+the marker into is neither edited nor trusted.
+
+`conflict-report.yml` takes `since`, `until` and `base-tip`: the same three
+values reproduce the same numbers on any later run.
 
 ## B. The group config (`.github/conflict-monitor.json`, optional)
 

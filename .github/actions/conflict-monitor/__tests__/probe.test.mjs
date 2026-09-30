@@ -57,7 +57,7 @@ function stubApi(pulls) {
       if (method === "GET" && m) return pulls.find((p) => p.number === Number(m[1]));
       m = /\/issues\/(\d+)\/comments$/.exec(path);
       if (method === "POST" && m) {
-        const c = { id: nextId++, body: body.body };
+        const c = { id: nextId++, body: body.body, user: { type: "Bot" } };
         comments.get(Number(m[1])).push(c);
         writes.push(["create", Number(m[1])]);
         return c;
@@ -91,8 +91,8 @@ test("a conflicted PR gets one comment naming its files and groups; a clean one 
   assert.deepEqual(api.writes, [["create", 1]]);
   const body = api.comments.get(1)[0].body;
   assert.ok(body.startsWith(MARKER));
-  assert.match(body, /\| `a\.txt` \| edit\/edit \| code \| #9 \|/);
-  assert.match(body, /\| `lock\.yaml` \| insert\/insert \| dependencies \| #9 \|/);
+  assert.match(body, /\| <code>a\.txt<\/code> \| edit\/edit \| code \| #9 \|/);
+  assert.match(body, /\| <code>lock\.yaml<\/code> \| insert\/insert \| dependencies \| #9 \|/);
   assert.equal(api.comments.get(2).length, 0);
   assert.equal(tally.conflicted, 1);
   assert.equal(tally.probed, 2);
@@ -159,4 +159,44 @@ test("the job summary lists the conflicted PRs and their groups", async () => {
   const md = probeSummary(result, { base: "main" });
   assert.match(md, /\*\*1 conflicted\*\*/);
   assert.match(md, /\| #1 \| 2 \| code, dependencies \|/);
+});
+
+test("a stranger's comment carrying the marker is neither edited nor trusted", async () => {
+  const { local, baseSha } = world();
+  const api = stubApi(pulls);
+  api.comments.get(1).push({ id: 7, body: `${MARKER}\n<!-- conflict-monitor:state resolved -->`, user: { type: "User" } });
+  await runProbe({ api, repo: "o/r", base: "main", baseSha, config, cwd: local.dir });
+  assert.deepEqual(api.writes, [["create", 1]]);
+  assert.equal(api.comments.get(1).find((c) => c.id === 7).body.includes("state resolved"), true);
+});
+
+test("a create re-reads first: a comment written meanwhile is edited, not duplicated", async () => {
+  const { local, baseSha } = world();
+  const api = stubApi(pulls);
+  const paginate = api.paginate.bind(api);
+  let reads = 0;
+  api.paginate = async (path) => {
+    const out = await paginate(path);
+    if (/\/issues\/1\/comments/.test(path) && ++reads === 1) {
+      // Between this probe's first read and its create, another probe wrote.
+      api.comments.get(1).push({ id: 55, body: `${MARKER}\nother`, user: { type: "Bot" } });
+    }
+    return out;
+  };
+  await runProbe({ api, repo: "o/r", base: "main", baseSha, config, cwd: local.dir });
+  assert.deepEqual(api.writes, [["update", 1]]);
+  assert.equal(api.comments.get(1).length, 1);
+});
+
+test("a PR git cannot merge is skipped; the others still get their comment", async () => {
+  const { remote, local, baseSha } = world();
+  // An orphan branch: no history in common with main.
+  remote.git("checkout", "-q", "--orphan", "orphan");
+  const orphan = remote.commit("unrelated", { "z.txt": "z\n" });
+  remote.git("update-ref", "refs/pull/4/head", orphan);
+  remote.checkout("main");
+  const api = stubApi([...pulls, { number: 4, state: "open", base: { ref: "main" } }]);
+  const { tally } = await runProbe({ api, repo: "o/r", base: "main", baseSha, config, cwd: local.dir });
+  assert.ok(tally.skipped.includes(4));
+  assert.deepEqual(api.writes, [["create", 1]]);
 });

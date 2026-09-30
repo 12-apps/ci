@@ -25,8 +25,9 @@
 import { appendFileSync } from "node:fs";
 
 import { analyzeMerge } from "./lib/analyze.mjs";
-import { MARKER, decide } from "./lib/comment.mjs";
+import { decide, isOwnComment } from "./lib/comment.mjs";
 import { loadConfig } from "./lib/config.mjs";
+import { isMain } from "./lib/entry.mjs";
 import { git, revParse } from "./lib/git.mjs";
 import { githubClient } from "./lib/github.mjs";
 
@@ -73,14 +74,23 @@ export async function runProbe({ api, repo, base, baseSha, config, only = null, 
       log(`#${pr.number}: fetched ref did not resolve — skipped`);
       continue;
     }
+    let records;
+    try {
+      records = analyzeMerge({ mainSide: baseSha, branchSide: head, config, baseTip: baseSha, cwd });
+    } catch (err) {
+      // One PR git cannot merge (unrelated histories, a missing object) must
+      // not cost every other PR its comment.
+      tally.skipped.push(pr.number);
+      log(`#${pr.number}: could not re-run the merge — ${err.message}`);
+      continue;
+    }
     tally.probed += 1;
-    const records = analyzeMerge({ mainSide: baseSha, branchSide: head, config, baseTip: baseSha, cwd });
     if (records) {
       tally.conflicted += 1;
       rows.push({ pr, records });
     }
     const comments = await api.paginate(`/repos/${repo}/issues/${pr.number}/comments`);
-    const existing = comments.find((c) => typeof c.body === "string" && c.body.startsWith(MARKER)) ?? null;
+    const existing = comments.find(isOwnComment) ?? null;
     const plan = decide(records, existing, { base, baseSha });
     if (plan.action === "none") {
       if (records || existing) tally.unchanged += 1;
@@ -96,9 +106,7 @@ export async function runProbe({ api, repo, base, baseSha, config, only = null, 
         // Re-read right before creating: a full probe and a single-PR probe
         // run in different concurrency groups, and both may have started
         // before either wrote. The second one to get here edits instead.
-        const again = (await api.paginate(`/repos/${repo}/issues/${pr.number}/comments`)).find(
-          (c) => typeof c.body === "string" && c.body.startsWith(MARKER),
-        );
+        const again = (await api.paginate(`/repos/${repo}/issues/${pr.number}/comments`)).find(isOwnComment);
         if (again) await api.request("PATCH", `/repos/${repo}/issues/comments/${again.id}`, { body: plan.body });
         else await api.request("POST", `/repos/${repo}/issues/${pr.number}/comments`, { body: plan.body });
         tally.created += 1;
@@ -142,13 +150,19 @@ async function main() {
   if (!repo || !base || !baseSha) throw new Error("needs GITHUB_REPOSITORY, a base branch and a checkout");
   const result = await runProbe({ api: githubClient(), repo, base, baseSha, config, only, dryRun: process.env.DRY_RUN === "true" });
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, probeSummary(result, { base }));
+  if (result.tally.probed === 0 && result.tally.skipped.length > 0) {
+    // Every head failed to fetch or merge: auth, network, a broken checkout.
+    // "Probed 0" is not "nothing conflicts".
+    console.log(`::error::probed none of ${result.tally.skipped.length} open PR(s) — every one was skipped`);
+    process.exitCode = 1;
+  }
   if (result.tally.failedWrites.length) {
     console.log(`::error::could not write the conflict comment on ${result.tally.failedWrites.map((n) => `#${n}`).join(", ")}`);
     process.exitCode = 1;
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMain(import.meta.url)) {
   main().catch((err) => {
     console.log(`::error::${err.message}`);
     process.exitCode = 1;

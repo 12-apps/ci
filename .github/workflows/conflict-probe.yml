@@ -1,0 +1,113 @@
+name: Conflict probe (reusable)
+
+# Say on a PR the moment its base makes it conflict. The mechanism is
+# .github/actions/conflict-monitor (`mode: probe`; its action.yml and lib/
+# argue the rules); this file is the checkout and the grant around it. The
+# history report is its sibling, conflict-report.yml.
+#
+# WHY TWO FILES: GitHub checks every job a called workflow DECLARES against the
+# caller's grant when the run starts, whatever the job's `if:` says — a
+# nested job asking for a scope the caller did not grant rejects the whole
+# run, no jobs, no logs (cd.yml's OIDC note, README "permissions"). One file
+# holding a `pull-requests: write` probe and a read-only report would make
+# every report caller grant write. So each mode has its own file and asks for
+# exactly what it uses.
+#
+# A consuming repo adds (see CONSUMING.md, "Consuming the Conflict monitor"):
+#
+#   on:
+#     push:
+#       branches: [main]
+#     pull_request:
+#       types: [synchronize]
+#   permissions:
+#     contents: read
+#   jobs:
+#     probe:
+#       if: >-
+#         github.event_name == 'push' ||
+#         (github.event.pull_request.head.repo.full_name == github.repository &&
+#          github.actor != 'dependabot[bot]')
+#       permissions:
+#         contents: read
+#         pull-requests: write
+#       uses: 12-apps/ci/.github/workflows/conflict-probe.yml@v2
+#       with:
+#         pr: ${{ github.event.pull_request.number || '' }}
+#
+# WHY `pull_request: synchronize` AS WELL AS `push`: a push to the base is what
+# makes a PR conflict, but the push that FIXES it lands on the PR branch — the
+# author's merge, or a heal job's. Probing just that PR on its own push turns
+# the comment to "resolved" within minutes. A fork's or Dependabot's
+# `pull_request` token is read-only, so the caller keeps that trigger to
+# same-repository, non-Dependabot PRs (theirs resolve at the next base push).
+
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: "Path to the caller's group config."
+        type: string
+        required: false
+        default: '.github/conflict-monitor.json'
+      base:
+        description: 'Base branch. Empty: the repository default branch.'
+        type: string
+        required: false
+        default: ''
+      pr:
+        description: 'Probe this one PR instead of every open one.'
+        type: string
+        required: false
+        default: ''
+      dry-run:
+        description: 'Log what would be written; write nothing.'
+        type: boolean
+        required: false
+        default: false
+      node-version:
+        description: 'Node version the scripts run on.'
+        type: string
+        required: false
+        default: '24'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  probe:
+    name: Probe open PRs
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+    # Serialized per target, never cancelled mid-write: two quick pushes to
+    # the base must not both miss an existing comment and write a second one.
+    # GitHub keeps one running and one PENDING run per group and a newer run
+    # replaces the pending one — harmless here, because the newer full probe
+    # covers every PR and the newer single-PR probe covers the same PR. A full
+    # probe and a single-PR probe can still overlap (different groups); the
+    # probe re-reads the comments right before creating, for exactly that.
+    concurrency:
+      group: conflict-probe-${{ github.repository }}-${{ inputs.pr || 'all' }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # merge-base and the culprit history need the base's whole line; the
+          # BASE is checked out, never the PR head — the probe executes nothing
+          # from a PR's tree.
+          fetch-depth: 0
+          ref: ${{ inputs.base || github.event.repository.default_branch }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - uses: 12-apps/ci/.github/actions/conflict-monitor@v2
+        with:
+          mode: probe
+          config: ${{ inputs.config }}
+          base: ${{ inputs.base }}
+          pr: ${{ inputs.pr }}
+          dry-run: ${{ inputs.dry-run }}

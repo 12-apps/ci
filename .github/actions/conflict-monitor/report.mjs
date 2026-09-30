@@ -35,7 +35,9 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path";
 
 import { analyzeMerge } from "./lib/analyze.mjs";
+import { codeOf } from "./lib/comment.mjs";
 import { DEFAULT_BUCKET, loadConfig, ticketsIn } from "./lib/config.mjs";
+import { isMain } from "./lib/entry.mjs";
 import { countRange, git, lines, revParse } from "./lib/git.mjs";
 import { githubClient } from "./lib/github.mjs";
 
@@ -98,14 +100,20 @@ function heldCommitsOf(culpritPr, { mainSide, branchSide, cwd, cache }) {
   if (!head) return false;
   const key = `${culpritPr}:${mainSide}:${branchSide}`;
   if (!cache.has(key)) {
+    // |H \ M ∩ B|: the culprit's commits that are not on the base side but
+    // ARE on the branch side. Computed as |H \ M| − |H \ (M ∪ B)|, never as
+    // |H \ M| − |H \ B|: a parent that merged the base after the child
+    // branched holds base commits the child lacks, and those would cancel
+    // out the commits the child really holds.
     const notOnBase = countRange(head, [mainSide], cwd);
-    const notOnBranch = countRange(head, [branchSide], cwd);
-    cache.set(key, notOnBase - notOnBranch > 0);
+    const onNeither = countRange(head, [mainSide, branchSide], cwd);
+    cache.set(key, notOnBase - onNeither > 0);
   }
   return cache.get(key);
 }
 
 export function replay({ prs, base, baseTip, config, until = null, cwd = process.cwd(), onProgress = () => {} }) {
+  const untilMs = until ? instant(until, "until") : null;
   const line = baseLine({ prs, base, baseTip, cwd });
   const byNumber = new Map(prs.map((p) => [p.number, p]));
   const syncs = [];
@@ -114,6 +122,10 @@ export function replay({ prs, base, baseTip, config, until = null, cwd = process
   prs.forEach((pr, i) => {
     if (i % 200 === 0) onProgress(i, prs.length);
     for (const { commit, parents } of syncMergesOf(pr, { baseTip, cwd })) {
+      const date = git(["show", "-s", "--format=%cI", commit], { cwd }).out.trim();
+      // `until` pins a replay to a moment: a merge committed after it is not
+      // counted — in any column — so a report re-run later reproduces it.
+      if (untilMs !== null && Date.parse(date) > untilMs) continue;
       const mainParents = parents.filter((p) => line.has(p));
       if (!mainParents.length) {
         otherMerges += 1;
@@ -122,10 +134,6 @@ export function replay({ prs, base, baseTip, config, until = null, cwd = process
       const mainSide = mainParents[0];
       const branchSide = parents.find((p) => p !== mainSide);
       if (!branchSide) continue;
-      const date = git(["show", "-s", "--format=%cI", commit], { cwd }).out.trim();
-      // `until` pins a replay to a moment: a merge committed after it is not
-      // counted, so a report re-run later reproduces the same numbers.
-      if (until && new Date(date) > new Date(until)) continue;
       const records = analyzeMerge({ mainSide, branchSide, config, baseTip, cwd });
       if (!records) {
         syncs.push({ pr: pr.number, commit, date, conflicted: false, files: [] });
@@ -154,6 +162,13 @@ export function replay({ prs, base, baseTip, config, until = null, cwd = process
   return { syncs, otherMerges };
 }
 
+/** An ISO date or timestamp as epoch ms; an unparseable one is an error, never "no limit". */
+export function instant(value, name) {
+  const ms = Date.parse(value);
+  if (Number.isNaN(ms)) throw new Error(`${name} is not a date or timestamp: "${value}"`);
+  return ms;
+}
+
 /** A PR's ticket ids, read from its title and its head branch name. */
 const ticketsOf = (pr, config) => new Set([...ticketsIn(pr.title, config), ...ticketsIn(pr.head, config)]);
 
@@ -162,7 +177,10 @@ const top = (map, n) => [...map.entries()].sort((a, b) => b[1] - a[1] || String(
 
 export function aggregate({ syncs, otherMerges }, { since, config }) {
   const conflicted = syncs.filter((s) => s.conflicted);
-  const inWindow = (s) => s.date >= since;
+  // Compared as instants: `%cI` carries the committer's own UTC offset, so a
+  // string comparison against a `…Z` bound is off by that offset at the edge.
+  const sinceMs = instant(since, "since");
+  const inWindow = (s) => Date.parse(s.date) >= sinceMs;
   const declared = new Set(config.rules.map((r) => r.name));
   const groups = new Map();
   const shapes = new Map();
@@ -215,6 +233,8 @@ export function aggregate({ syncs, otherMerges }, { since, config }) {
   };
 }
 
+const cell = (s) => String(s).replace(/[&<>|`\\_*[\]]/g, (c) => `&#${c.charCodeAt(0)};`);
+
 export function renderReport(r, { repo, base }) {
   const pct = (a, b) => (b ? `${Math.round((100 * a) / b)}%` : "—");
   const out = [
@@ -228,7 +248,7 @@ export function renderReport(r, { repo, base }) {
     "",
     `| group | all | since ${r.since.slice(0, 10)} |`,
     "|---|---|---|",
-    ...r.groups.map((g) => `| ${g.declared ? g.name : `_${g.name}_`} | ${g.all} | ${g.window} |`),
+    ...r.groups.map((g) => `| ${g.declared ? cell(g.name) : `_${cell(g.name)}_`} | ${g.all} | ${g.window} |`),
     "",
     `Declared groups come from the caller's config; _italic_ rows are files no rule claims, split by conflict shape. ${r.duplicatedScopeSameTicket} of the duplicated-scope files were created by two PRs sharing a ticket id or a branch.`,
     "",
@@ -236,7 +256,7 @@ export function renderReport(r, { repo, base }) {
     "",
     "| file | conflicts |",
     "|---|---|",
-    ...r.topFilesInWindow.map((f) => `| \`${f.file}\` | ${f.count} |`),
+    ...r.topFilesInWindow.map((f) => `| ${codeOf(f.file)} | ${f.count} |`),
     "",
     "### Base-branch PRs behind the most conflicting syncs (candidates: they touched a conflicted file)",
     "",
@@ -259,7 +279,10 @@ async function listPulls(api, repo) {
 
 async function main() {
   const repo = process.env.GITHUB_REPOSITORY;
-  const base = process.env.BASE_BRANCH || "main";
+  // A `schedule` payload carries no repository object, so the action's
+  // default-branch fallback is empty there; GITHUB_REF_NAME is the default
+  // branch on a scheduled run.
+  const base = process.env.BASE_BRANCH || process.env.GITHUB_REF_NAME || "main";
   const config = loadConfig(process.env.CONFIG_PATH || ".github/conflict-monitor.json");
   const days = Number(process.env.WINDOW_DAYS || 7);
   if (!Number.isFinite(days) || days <= 0) throw new Error(`window-days must be a positive number, got "${process.env.WINDOW_DAYS}"`);
@@ -284,7 +307,7 @@ async function main() {
   log(`wrote ${outPath}`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMain(import.meta.url)) {
   main().catch((err) => {
     console.log(`::error::${err.message}`);
     process.exitCode = 1;
