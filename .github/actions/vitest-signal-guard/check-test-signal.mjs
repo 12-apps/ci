@@ -66,7 +66,7 @@ const BYPASS_LABEL = process.env.BYPASS_LABEL || 'ci:allow-zero-tests';
  */
 export function parseJUnitTotals(xml) {
   // Report comments and captured output can contain XML-looking prose.
-  xml = xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>/g, '');
+  xml = xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>/g, ' ');
   const rootMatch = xml.match(/<testsuites\b[^>]*\btests=["'](\d+)["']/i);
   if (rootMatch && rootMatch[1] !== undefined) {
     return { tests: Number.parseInt(rootMatch[1], 10), source: 'testsuites' };
@@ -97,7 +97,7 @@ export function parseJUnitTotals(xml) {
 
 /** Count executed cases, not the skipped cases included in JUnit's `tests`. */
 export function parseJUnitExecution(xml) {
-  const clean = xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>/g, '');
+  const clean = xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>/g, ' ');
   const totals = parseJUnitTotals(clean);
   if (!totals) return null;
   const cases = [...clean.matchAll(/<testcase\b[^>]*?\/>|<testcase\b[^>]*>[\s\S]*?<\/testcase\s*>/gi)];

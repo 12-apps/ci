@@ -201,6 +201,14 @@ test('real executed cases count once and never count comments or captured XML', 
   assert.equal(parseJUnitExecution('<testsuites><!-- <testcase/> --></testsuites>'), null);
 });
 
+test('discarded XML prose never joins fragments into a synthetic testcase', () => {
+  for (const gap of ['<!-- prose -->', '<![CDATA[prose]]>']) {
+    const xml = `<testsuites><test${gap}case/></testsuites>`;
+    assert.equal(parseJUnitTotals(xml), null);
+    assert.equal(parseJUnitExecution(xml), null);
+  }
+});
+
 test('invalid exclusions or truncated test cases fail closed', () => {
   for (const xml of [
     '<testsuites tests="1" skipped="2"/>',
