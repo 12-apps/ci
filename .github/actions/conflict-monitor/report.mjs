@@ -38,8 +38,9 @@ import { analyzeMerge } from "./lib/analyze.mjs";
 import { codeOf } from "./lib/comment.mjs";
 import { DEFAULT_BUCKET, loadConfig, ticketsIn } from "./lib/config.mjs";
 import { isMain } from "./lib/entry.mjs";
-import { countRange, git, lines, revParse } from "./lib/git.mjs";
+import { git, lines, revParse } from "./lib/git.mjs";
 import { githubClient } from "./lib/github.mjs";
+import { heldCommitsOf as holdsCommits } from "./lib/stack.mjs";
 
 const log = (msg) => console.log(`[conflict-monitor] ${msg}`);
 export const PR_REF = (n) => `refs/conflict-monitor/pr/${n}`;
@@ -93,23 +94,13 @@ function syncMergesOf(pr, { baseTip, cwd }) {
 
 /**
  * The branch already contained commits of `culprit`'s own PR: some of that
- * PR's commits are reachable from the branch side but not from the base side.
+ * PR's commits are reachable from the branch side but not from the base side
+ * (lib/stack.mjs).
  */
 function heldCommitsOf(culpritPr, { mainSide, branchSide, cwd, cache }) {
   const head = revParse(PR_REF(culpritPr), cwd);
   if (!head) return false;
-  const key = `${culpritPr}:${mainSide}:${branchSide}`;
-  if (!cache.has(key)) {
-    // |H \ M ∩ B|: the culprit's commits that are not on the base side but
-    // ARE on the branch side. Computed as |H \ M| − |H \ (M ∪ B)|, never as
-    // |H \ M| − |H \ B|: a parent that merged the base after the child
-    // branched holds base commits the child lacks, and those would cancel
-    // out the commits the child really holds.
-    const notOnBase = countRange(head, [mainSide], cwd);
-    const onNeither = countRange(head, [mainSide, branchSide], cwd);
-    cache.set(key, notOnBase - onNeither > 0);
-  }
-  return cache.get(key);
+  return holdsCommits(head, { mainSide, branchSide, cwd, cache });
 }
 
 export function replay({ prs, base, baseTip, config, until = null, cwd = process.cwd(), onProgress = () => {} }) {

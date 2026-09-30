@@ -12,12 +12,13 @@ import { spawnSync } from "node:child_process";
 
 const MAX_BUFFER = 512 * 1024 * 1024;
 
-export function git(args, { cwd = process.cwd(), ok = [0], input } = {}) {
+export function git(args, { cwd = process.cwd(), ok = [0], input, env } = {}) {
   const res = spawnSync("git", args, {
     cwd,
     input,
     encoding: "utf8",
     maxBuffer: MAX_BUFFER,
+    ...(env ? { env: { ...process.env, ...env } } : {}),
   });
   if (res.error) throw res.error;
   if (!ok.includes(res.status)) {

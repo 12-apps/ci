@@ -13,6 +13,8 @@
  */
 import { createHash } from "node:crypto";
 
+import { MERGED, RESOLVED as OVERLAP_RESOLVED, hiddenLines, partnersOf, stateFor } from "./overlap-state.mjs";
+
 export const MARKER = "<!-- 12-apps/ci conflict-monitor -->";
 const STATE = /<!-- conflict-monitor:state (\S+) -->/;
 export const RESOLVED = "resolved";
@@ -110,4 +112,51 @@ export function decide(records, existing, ctx) {
   }
   if (existing && current !== RESOLVED) return { action: "update", body: renderResolved(ctx) };
   return { action: "none" };
+}
+
+const OVERLAP_HINT = {
+  "same lines": "both PRs changed the same lines",
+  "same spot": "both PRs added lines at the same spot",
+  "both add": "both PRs create this file",
+  "deletes or moves": "one PR deletes or moves a file the other edits",
+};
+const MAX_OVERLAP_ROWS = 100;
+const orList = (prs) => (prs.length < 2 ? prs.join("") : `${prs.slice(0, -1).join(", ")} or ${prs[prs.length - 1]}`);
+const mergedLine = (n) => `* #${n} merged. If this PR now conflicts, the conflict comment lists the files.`;
+
+/**
+ * The overlap comment (lib/overlap-state.mjs keeps its memory). Partners are
+ * `#N` only — a title is attacker-chosen on a fork — and there is no
+ * @mention: `#N` cross-references the partner's timeline, which is the point.
+ * It asks for nothing. The only line of advice says so.
+ */
+export function renderOverlap({ rows, seen }, { base, baseSha }) {
+  const state = stateFor(rows);
+  const head = hiddenLines({ rows, seen });
+  const checked = `Checked against \`${base}\` at \`${baseSha.slice(0, 7)}\`.`;
+  if (state === OVERLAP_RESOLVED) return [...head, "### No open PR overlaps this one any more", "", checked].join("\n");
+  const merged = partnersOf(rows.filter((r) => r.merged)).map(mergedLine);
+  if (state === MERGED) {
+    return [...head, "### Every PR that overlapped this one has merged", "", checked, "", ...merged].join("\n");
+  }
+  const open = [...rows.filter((r) => !r.merged)].sort((a, b) => a.partner - b.partner || a.path.localeCompare(b.path));
+  const shown = open.slice(0, MAX_OVERLAP_ROWS).map((r) => `| #${r.partner} | ${codeOf(r.path)} | ${esc(r.kind)} |`);
+  const more = open.length > MAX_OVERLAP_ROWS ? [`| | ${open.length - MAX_OVERLAP_ROWS} more | |`] : [];
+  const hints = [...new Set(open.map((r) => r.kind))].filter((k) => OVERLAP_HINT[k]).map((k) => `**${k}**: ${OVERLAP_HINT[k]}.`);
+  const partners = partnersOf(open).map((n) => `#${n}`);
+  return [
+    ...head,
+    "### Another open PR overlaps this one",
+    "",
+    `${checked} Whichever of the two merges second will conflict on these files:`,
+    "",
+    "| PR | file | overlap |",
+    "|---|---|---|",
+    ...shown,
+    ...more,
+    "",
+    ...(hints.length ? [hints.join(" "), ""] : []),
+    ...(merged.length ? [...merged, ""] : []),
+    `No action needed. If ${orList(partners)} merges first, the conflict comment will list what to resolve.`,
+  ].join("\n");
 }
