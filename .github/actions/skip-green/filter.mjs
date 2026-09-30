@@ -134,7 +134,7 @@ function main() {
     return 1;
   }
 
-  const { manifest, why: manifestWhy } = readManifest(manifestPath, lane);
+  const { manifest, why: manifestWhy } = readManifest(manifestPath, lane, plan.inputsVersion);
   console.log(`[skip-green] ${lane}: manifest — ${manifestWhy}`);
   const { always, error: alwaysError } = readAlwaysRun(alwaysPath);
   // A list we cannot read might name anything, so it names everything.

@@ -39,7 +39,10 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
 /** Bump when the construction below changes shape — see ci-test-fingerprint's FORMAT_VERSION. */
-export const INPUTS_VERSION = "test-inputs-v1";
+export const INPUTS_VERSION = "test-inputs-v2";
+
+/** A global that is a module, whose own imports join the hash. */
+const MODULE_RE = /\.(?:[cm]?[jt]sx?)$/;
 
 /**
  * `path -> "<mode> <sha>"` for every tracked blob and gitlink at `ref`.
@@ -118,7 +121,39 @@ export function testInputs({ tests, edges, blind = [], globals = [], routes = []
   // that does not move on it, which is why the consumer's own tests must pin
   // each global as moving the hash.
   const globalFiles = [...tree.keys()].filter((p) => globals.some((re) => re.test(p))).sort();
-  const globalLines = globalFiles.map((p) => `${tree.get(p)} ${p}`);
+  // A global that is itself a MODULE — a setup file, a vitest config, the
+  // runner script — has imports of its own, and they run whenever it does.
+  // Hashing the global by its blob alone drew the boundary one hop short:
+  // `apps/client`'s setup imports a query-client helper and calls it before
+  // every case, and editing the HELPER left every suite's hash unchanged while
+  // editing the setup moved it (F3b of the 2026-09-30 audit). So a module
+  // global brings its transitive value closure along. A module global the
+  // graph does not hold, or whose closure is blind, has no bounded inputs —
+  // and then NO test in the lane does, because the global reaches all of them.
+  const globalClosure = new Set(globalFiles);
+  let globalsUnbounded = null;
+  for (const g of globalFiles) {
+    if (!MODULE_RE.test(g)) continue;
+    if (!edges.has(g)) {
+      globalsUnbounded = `${g} is a module the graph does not hold — its imports are unknown`;
+      break;
+    }
+    const { files, blind: isBlind } = closureOf(g, edges, blindFiles);
+    if (isBlind) {
+      globalsUnbounded = `${g} reaches an import that did not resolve`;
+      break;
+    }
+    for (const f of files) globalClosure.add(f);
+  }
+  const globalLines = [...globalClosure].sort().map((p) => (tree.has(p) ? `${tree.get(p)} ${p}` : null));
+  if (!globalsUnbounded && globalLines.includes(null)) globalsUnbounded = "a global's closure holds a file git does not track";
+  if (globalsUnbounded) {
+    return {
+      inputs: Object.fromEntries(tests.map((t) => [t, null])),
+      globalFiles,
+      stats: { hashed: 0, unbounded: tests.length, missing: 0, globals: globalFiles.length, globalsUnbounded },
+    };
+  }
 
   const inputs = {};
   let hashed = 0;

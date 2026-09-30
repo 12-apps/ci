@@ -245,3 +245,42 @@ test("routes without a static entry, or matching nothing tracked, change no hash
   assert.deepEqual(withNoise, plain);
 });
 
+// ── F3b: a module global carries its own imports ──────────────────────────────
+
+test("F3b: a helper the setup file imports moves every hash, though no test imports it", () => {
+  const dir = repo("global-closure", {
+    "src/setup.ts": 'import { client } from "./query-client";\nbeforeEach(() => client.clear());\n',
+    "src/query-client.ts": "export const client = { clear() {} };\n",
+    "src/a.ts": "export const a = 1;\n",
+    "src/a.test.ts": 'import { a } from "./a";\n',
+    "src/b.test.ts": "export {};\n",
+  });
+  const before = hashes(dir);
+  assert.ok(before.inputs["src/a.test.ts"] && before.inputs["src/b.test.ts"], "both hashed");
+  commit(dir, { "src/query-client.ts": "export const client = { clear() { throw new Error('x'); } };\n" }, "helper");
+  const after = hashes(dir);
+  assert.notEqual(after.inputs["src/a.test.ts"], before.inputs["src/a.test.ts"], "the setup runs the helper before every case");
+  assert.notEqual(after.inputs["src/b.test.ts"], before.inputs["src/b.test.ts"]);
+  // The global itself is still listed as the global; the closure rides inside the hash.
+  assert.deepEqual(after.globalFiles, ["src/setup.ts"]);
+});
+
+test("F3b: a module global the graph does not hold, or whose closure is blind, withholds EVERY hash", () => {
+  const outside = repo("global-outside", {
+    "tests/setup.ts": "globalThis.x = 1;\n",
+    "src/a.test.ts": "export {};\n",
+  });
+  const files = listSourceFiles(outside, ["src"]);
+  const { edges } = buildGraph(outside, files, { packages: new Map(), aliases: [] });
+  const report = testInputs({ tests: ["src/a.test.ts"], edges, globals: [/^tests\/setup\.ts$/], tree: treeIndex(outside) });
+  assert.equal(report.inputs["src/a.test.ts"], null);
+  assert.match(report.stats.globalsUnbounded, /graph does not hold/);
+
+  const blind = repo("global-blind", {
+    "src/setup.ts": 'import "./missing";\n',
+    "src/a.test.ts": "export {};\n",
+  });
+  const b = hashes(blind);
+  assert.equal(b.inputs["src/a.test.ts"], null);
+  assert.match(b.stats.globalsUnbounded, /did not resolve/);
+});

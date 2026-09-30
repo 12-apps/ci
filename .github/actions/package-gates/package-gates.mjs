@@ -52,7 +52,10 @@ export function runGates(gates, { cwd = '.', run = defaultRun, log = console.log
 }
 
 function defaultRun(command, cwd) {
-  const result = spawnSync('bash', ['-c', command], { cwd, stdio: 'inherit' });
+  // `pipefail`: a gate written as a pipeline (`node gate.mjs | tee gate.log`)
+  // used to report the LAST stage's exit — `tee`'s 0 — and a failing gate
+  // printed "all gates passed" (E9 of the 2026-09-30 audit).
+  const result = spawnSync('bash', ['-o', 'pipefail', '-c', command], { cwd, stdio: 'inherit' });
   // A command killed by a signal reports status null; that is a failure, and
   // returning 0 for it would be the silent pass this file exists to avoid.
   if (result.status === null) return result.signal ? 1 : 1;

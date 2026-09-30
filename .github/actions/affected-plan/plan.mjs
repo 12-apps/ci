@@ -25,7 +25,7 @@ import { dirname, join, resolve } from "node:path";
 import { databaseRoutes } from "./lib/database.mjs";
 import { explainByChange, explainByTest } from "./lib/explain.mjs";
 import { gherkinFeatures } from "./lib/gherkin.mjs";
-import { INPUTS_VERSION, testInputs, treeIndex } from "./lib/inputs.mjs";
+import { INPUTS_VERSION, closureOf, testInputs, treeIndex } from "./lib/inputs.mjs";
 import { fileKeys, keyedChange, keyPatterns, wiringOf } from "./lib/keys.mjs";
 import { listSourceFiles, stripComments } from "./lib/modules.mjs";
 import { entriesForMatches } from "./lib/occurrences.mjs";
@@ -463,7 +463,32 @@ const readBase = (file) => {
   }
 };
 
-const result = selectAffected({
+const isIgnored = (f) => Boolean(ignoreRe?.test(f)) || Boolean(laneIgnoreRe?.test(f));
+
+/**
+ * The lane's module globals — a setup file, a vitest config, the runner
+ * script — graphed beside the roots. Their imports must be known: they run
+ * before every test, so their closure is part of every test's inputs
+ * (lib/inputs.mjs, F3b of the 2026-09-30 audit), and a lane whose roots do not
+ * cover one (the integration lane and `scripts/`, say) would otherwise hold no
+ * bounded hash at all.
+ */
+const MODULE_RE = /\.(?:[cm]?[jt]sx?)$/;
+const globalPatterns = (laneConfig.skipGreen?.globals ?? []).map((source) => new RegExp(source));
+const moduleGlobals = globalPatterns.length === 0 ? [] : [...trackedFiles()].filter((f) => MODULE_RE.test(f) && globalPatterns.some((re) => re.test(f)));
+
+/**
+ * `opaqueImports: [{ match, why }]` — files whose dynamic imports the consumer
+ * vouches for, because a route already carries what they reach (a route table
+ * that `import()`s each `route.ts`, where the `route.ts` files themselves are
+ * routed). Anywhere else an `import(expr)` or `import.meta.glob(...)` makes the
+ * file blind: widened, and never given a skip hash (E6). Repo-wide and per
+ * lane, like `routes`.
+ */
+const opaqueOkRes = [...(config.opaqueImports ?? []), ...(laneConfig.opaqueImports ?? [])].map((r) => rx(r.match)).filter(Boolean);
+const opaqueOk = (f) => opaqueOkRes.some((re) => re.test(f));
+
+let result = selectAffected({
   repoRoot,
   changed,
   deleted,
@@ -471,12 +496,55 @@ const result = selectAffected({
   roots: laneConfig.roots ?? dirs,
   workspaceDirs: dirs,
   isTest,
-  isIgnored: (f) => Boolean(ignoreRe?.test(f)) || Boolean(laneIgnoreRe?.test(f)),
+  isIgnored,
   isSource,
   routeOf,
   aliasesFor,
   calls: gherkin?.calls ?? [],
+  extraFiles: moduleGlobals,
+  opaqueOk,
 });
+
+// A lane-GLOBAL input changed and nothing routes it. The consumer declares
+// `skipGreen.globals` as "paths that can change any verdict in the lane
+// without being imported" — a setup file, a vitest config, the runner script.
+// Selection walks imports, so a change to one of these alone selected NOTHING:
+// the audit of 2026-09-30 (F3a) changed only a `setup.ts` the runner loads with
+// `setupFiles`, the test asserting its value failed, and the plan said `none`
+// with no unresolved import. A global that is neither ignored nor routed is
+// therefore the whole lane's business, and the plan is `full`. Routed globals
+// (the lockfile through the catalog command, a manifest through its entry)
+// keep their narrower answer — the route IS their classification.
+const globalRes = (laneConfig.skipGreen?.globals ?? []).map((source) => new RegExp(source));
+if (globalRes.length > 0 && result.mode !== "full" && result.mode !== "unclassified") {
+  const routed = (f) => {
+    const r = routeOf(f);
+    return Array.isArray(r) ? r.length > 0 : true;
+  };
+  // A global that is a module carries its imports (F3b): the helper a setup
+  // file calls before every case is as much the lane's business as the setup
+  // itself, and a change to it alone selects nothing either.
+  const globalClosure = new Set(moduleGlobals);
+  if (result.graph?.edges) {
+    const blind = new Set(result.graph.blind ?? []);
+    for (const g of moduleGlobals) for (const f of closureOf(g, result.graph.edges, blind).files) globalClosure.add(f);
+  }
+  const silent = [...changed, ...deleted].filter(
+    (f) => !isIgnored(f) && !isTest(f) && (globalRes.some((re) => re.test(f)) || globalClosure.has(f)) && !routed(f),
+  );
+  if (silent.length > 0) {
+    console.error(`[affected-plan] ${silent.length} lane-global input(s) changed and nothing routes them — planning the FULL suite: ${silent.slice(0, 6).join(", ")}`);
+    result = {
+      ...result,
+      mode: "full",
+      tests: [],
+      reasons: {},
+      graph: null,
+      stats: { ...(result.stats ?? {}), globals: silent.length },
+      why: `a lane-global input changed and nothing routes it: ${silent.slice(0, 6).join(", ")} — every test in the lane can see it`,
+    };
+  }
+}
 
 // Gherkin: the features the reached step DEFINITIONS are spoken in
 // (lib/gherkin.mjs). The step files stay in `tests` for a caller that reads
@@ -492,6 +560,34 @@ const gherkinReport =
 // WITHOUT importing them — a lockfile, a setup file, a migration folder — is
 // something only the consumer can declare, and a lane with no declaration
 // gets no hashes rather than hashes that miss its globals.
+/**
+ * The `database` block's readers, as static routes for the per-test hash.
+ *
+ * Selection routes a migration by what it changes in the database
+ * (lib/database.mjs), and that is right for selection. The HASH asks a
+ * different question — "can this test's verdict turn on this file?" — and for
+ * a test that lists the migrations folder or replays it, the answer is every
+ * migration, by name and by content. Only the static routes reached the hash,
+ * so `migration-discovery.test.ts` was hashed over its imports alone: the
+ * audit of 2026-09-30 (F1) renamed a migration, one assertion went red, the
+ * hash did not move, and an enforced skip dropped the test as green. Every
+ * tracked migration now joins the hash of any test whose closure holds a
+ * migration reader, a carrier or an always-run file; every schema file, of one
+ * holding a schema reader. Glob carriers cannot be entries and are left to the
+ * consumer's globals.
+ */
+const databaseInputRoutes = () => {
+  const db = config.database;
+  if (!db || db.lanes?.[lane] === "off") return [];
+  const out = [];
+  const migrationReaders = [...(db.migrationReaders ?? []), ...(db.carriers ?? []), ...(db.always ?? [])].filter((e) => !/[*?[]/.test(e));
+  if (migrationReaders.length > 0) {
+    out.push({ match: new RegExp(db.migrations ?? String.raw`(^|/)prisma/migrations/[^/]+/migration\.sql$`), entries: migrationReaders });
+  }
+  if (db.schemaFiles && (db.schemaReaders ?? []).length > 0) out.push({ match: new RegExp(db.schemaFiles), entries: db.schemaReaders });
+  return out;
+};
+
 const skipGreen = laneConfig.skipGreen;
 let inputsReport = null;
 if (skipGreen && result.mode === "narrowed" && result.graph) {
@@ -504,13 +600,17 @@ if (skipGreen && result.mode === "narrowed" && result.graph) {
       globals,
       // The plan's static routes: a file a suite reads off disk is an input of
       // that suite even though no import reaches it (lib/inputs.mjs).
-      routes: routes.filter((r) => r.match && r.entry).map((r) => ({ match: r.match, entries: r.entry })),
+      routes: [
+        ...routes.filter((r) => r.match && r.entry).map((r) => ({ match: r.match, entries: r.entry })),
+        ...databaseInputRoutes(),
+      ],
       tree: treeIndex(repoRoot),
     });
     console.error(
       `[inputs] ${inputsReport.stats.hashed} test(s) hashed over their import closure + ${inputsReport.stats.globals} global path(s)` +
         (inputsReport.stats.unbounded ? `; ${inputsReport.stats.unbounded} unbounded (an unresolved import) — never skippable` : "") +
-        (inputsReport.stats.missing ? `; ${inputsReport.stats.missing} with a closure file git does not track — never skippable` : ""),
+        (inputsReport.stats.missing ? `; ${inputsReport.stats.missing} with a closure file git does not track — never skippable` : "") +
+        (inputsReport.stats.globalsUnbounded ? `; every hash withheld — ${inputsReport.stats.globalsUnbounded}` : ""),
     );
   } catch (error) {
     // No hashes is the safe answer: the caller then skips nothing. It is never
@@ -552,11 +652,16 @@ function emit(plan) {
   // outputs must agree about that — the document is the artifact a reviewer
   // reads afterwards, so a `1` recorded beside `shards=[]` is a record of a
   // run that did not happen.
+  //
+  // `full` is decided FIRST: it carries no test list by construction (the
+  // shards run the whole suite), so reading `tests.length === 0` before the
+  // mode gave the full suite ZERO shards — the log said "running the FULL
+  // suite" and the matrix was off (E1 of the 2026-09-30 audit; since #84).
   const shardTotal =
-    tests.length === 0
-      ? 0
-      : plan.mode === "full"
-        ? maxShards
+    plan.mode === "full"
+      ? maxShards
+      : tests.length === 0
+        ? 0
         : Math.max(1, Math.min(maxShards, Math.ceil(tests.length / perShard)));
   const document = {
     lane: plan.lane ?? lane,

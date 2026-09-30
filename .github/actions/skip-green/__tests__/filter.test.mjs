@@ -114,6 +114,13 @@ test("readManifest refuses another lane's file, a wrong version and malformed en
   assert.deepEqual(Object.keys(readManifest(mixed, "unit").manifest.entries), ["src/b.test.ts"], "a bad line costs its own test, never the lane");
   assert.equal(readManifest(write("garbage.json", "{not json"), "unit").manifest, null);
   assert.equal(readManifest(join(TMP, "absent.json"), "unit").manifest, null);
+  // A manifest hashed under another inputs construction (F1–F3 of the
+  // 2026-09-30 audit widened what a hash covers) answers for different inputs.
+  const v1 = write("v1-inputs.json", JSON.stringify({ ...manifest({ "src/a.test.ts": { hash: H(1), sha: SHA, run: "1" } }), inputs: "test-inputs-v1" }));
+  assert.equal(readManifest(v1, "unit", "test-inputs-v2").manifest, null, "older hashes are retired, not trusted");
+  assert.match(readManifest(v1, "unit", "test-inputs-v2").why, /made with "test-inputs-v1"/);
+  assert.ok(readManifest(v1, "unit", "test-inputs-v1").manifest, "the same construction still reads");
+  assert.ok(readManifest(v1, "unit").manifest, "a caller that names no version keeps the old contract");
 });
 
 test("readAlwaysRun accepts an array or {tests}, and reports an unreadable list as an error", () => {

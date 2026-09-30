@@ -684,21 +684,39 @@ jobs:
           # would make the skip miss on precisely the pushes it exists for.
           LANE_NODE: ${{ inputs.node-version }}
           LANE_PRE: ${{ inputs.pre-test-command }}
+          # The verdict's IDENTITY beyond the tree (2026-09-30 audit, E7/E8):
+          # the base the selection diffed against — the same tree retargeted
+          # at another base selects another set; the engine revision that ran
+          # the lane — a fix here must not inherit a verdict the old logic
+          # earned; and the runner image, which decides what the lane ran on.
+          LANE_BASE: ${{ github.event.pull_request.base.sha }}
+          LANE_ENGINE: ${{ github.job_workflow_sha }}
+          LANE_RUNNER: ${{ runner.os }}-${{ runner.arch }}
+          LANE_SCHEMA: verdict-v2
           LANE_CMD: ${{ inputs.unit-test-command }}
         run: |
           set -o pipefail
           # NOT `set -e`: every failure here must fall through to an empty
           # fingerprint, which disables the lookup and runs the lane. An
           # optimisation that cannot answer must answer "run it".
-          fp="$(bash -c "$FP_CMD")" || fp=""
+          # `pipefail` INSIDE the consumer's shell too: `git ls-tree missing | sha256sum`
+          # prints the digest of EMPTY input and exits 0 without it (E9), and
+          # that digest is refused below by value as well.
+          fp="$(bash -o pipefail -c "$FP_CMD")" || fp=""
           fp="$(printf '%s' "$fp" | tr -d '[:space:]')"
+          case "$fp" in
+            d41d8cd98f00b204e9800998ecf8427e|da39a3ee5e6b4b0d3255bfef95601890afd80709|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e)
+              echo "::warning::unit-fingerprint-command hashed EMPTY input — its producer failed; running the lane."
+              fp="";;
+          esac
           if ! printf '%s' "$fp" | grep -Eq '^[0-9a-f]{32,128}$'; then
             echo "::warning::unit-fingerprint-command produced no usable hash — running the lane."
             echo "value=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          lane="$(printf '%s\0%s\0%s\0%s' \
-            "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" "$FP_CMD" \
+          lane="$(printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s' \
+            "$LANE_SCHEMA" "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" "$FP_CMD" \
+            "$LANE_BASE" "$LANE_ENGINE" "$LANE_RUNNER" \
             | sha256sum | cut -c1-16)"
           echo "value=${lane}-${fp}" >> "$GITHUB_OUTPUT"
           echo "unit lane verdict key: ${lane}-${fp}"
@@ -1386,6 +1404,9 @@ jobs:
             node=${{ inputs.node-version }}
             pre=${{ inputs.pre-build-command }}
             pnpm turbo run build --affected
+            base=${{ github.event.pull_request.base.sha }}
+            engine=${{ github.job_workflow_sha }}
+            runner=${{ runner.os }}-${{ runner.arch }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         with:
@@ -1670,22 +1691,40 @@ jobs:
           # be answerable by a run that sized 4 yesterday. Including the count
           # would make the skip miss on precisely the pushes it exists for.
           LANE_NODE: ${{ inputs.node-version }}
-          LANE_PRE: ${{ inputs.pre-test-command }}
+          LANE_PRE: ${{ inputs.pre-integration-command }}
+          # The verdict's IDENTITY beyond the tree (2026-09-30 audit, E7/E8):
+          # the base the selection diffed against — the same tree retargeted
+          # at another base selects another set; the engine revision that ran
+          # the lane — a fix here must not inherit a verdict the old logic
+          # earned; and the runner image, which decides what the lane ran on.
+          LANE_BASE: ${{ github.event.pull_request.base.sha }}
+          LANE_ENGINE: ${{ github.job_workflow_sha }}
+          LANE_RUNNER: ${{ runner.os }}-${{ runner.arch }}
+          LANE_SCHEMA: verdict-v2
           LANE_CMD: ${{ inputs.integration-command }}
         run: |
           set -o pipefail
           # NOT `set -e`: every failure here must fall through to an empty
           # fingerprint, which disables the lookup and runs the lane. An
           # optimisation that cannot answer must answer "run it".
-          fp="$(bash -c "$FP_CMD")" || fp=""
+          # `pipefail` INSIDE the consumer's shell too: `git ls-tree missing | sha256sum`
+          # prints the digest of EMPTY input and exits 0 without it (E9), and
+          # that digest is refused below by value as well.
+          fp="$(bash -o pipefail -c "$FP_CMD")" || fp=""
           fp="$(printf '%s' "$fp" | tr -d '[:space:]')"
+          case "$fp" in
+            d41d8cd98f00b204e9800998ecf8427e|da39a3ee5e6b4b0d3255bfef95601890afd80709|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e)
+              echo "::warning::integration-fingerprint-command hashed EMPTY input — its producer failed; running the lane."
+              fp="";;
+          esac
           if ! printf '%s' "$fp" | grep -Eq '^[0-9a-f]{32,128}$'; then
             echo "::warning::integration-fingerprint-command produced no usable hash — running the lane."
             echo "value=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          lane="$(printf '%s\0%s\0%s\0%s' \
-            "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" "$FP_CMD" \
+          lane="$(printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s' \
+            "$LANE_SCHEMA" "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" "$FP_CMD" \
+            "$LANE_BASE" "$LANE_ENGINE" "$LANE_RUNNER" \
             | sha256sum | cut -c1-16)"
           echo "value=${lane}-${fp}" >> "$GITHUB_OUTPUT"
           echo "integration lane verdict key: ${lane}-${fp}"

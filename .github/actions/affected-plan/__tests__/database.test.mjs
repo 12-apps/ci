@@ -218,3 +218,32 @@ UPDATE "orders" SET "status" = 'x' WHERE false;
   assert.ok(doc.tests.includes("src/tenant.test.ts"), JSON.stringify(doc.tests));
   assert.ok(doc.tests.includes("src/cancel-roles.test.ts"));
 });
+
+// ── F1: the readers' inputs ────────────────────────────────────────────────────
+
+test("F1: every migration joins the skip hash of a test that replays or lists them — and of no other", () => {
+  // The audit renamed a migration: the reader's assertion went red while its
+  // hash, computed over its imports alone, stayed put. The database block's
+  // readers, carriers and always-run files now bring every tracked migration
+  // into their hash; a test that never touches the folder is unmoved.
+  // Without the legacy client-entry route: it is a STATIC route, so it would
+  // hand every migration to every test that loads the client — the very
+  // over-selection the database block replaced.
+  const withSkip = { ...CONFIG, routes: [], lanes: { unit: { ...CONFIG.lanes.unit, skipGreen: { globals: [] } } } };
+  const run = (migration) => {
+    const { root, base } = repo({
+      "src/orders.ts": SOURCE["src/orders.ts"].replace("return status", "return status.trim()"),
+      "db/migrations/20260103000000_note/migration.sql": migration,
+    });
+    writeFileSync(join(root, ".affected-plan.json"), JSON.stringify(withSkip));
+    const { code, doc, err } = plan(root, base);
+    assert.equal(code, 0, err);
+    assert.ok(doc.tests.includes("src/replay.test.ts") && doc.tests.includes("src/label.test.ts"), doc.tests.join(","));
+    return doc.inputs;
+  };
+  const one = run(`-- @domains: orders\nCREATE INDEX "orders_status" ON "orders" ("status");\n`);
+  const two = run(`-- @domains: orders\nCREATE INDEX "orders_status_2" ON "orders" ("status");\n`);
+  assert.ok(one["src/replay.test.ts"] && two["src/replay.test.ts"], "the replayer is hashed");
+  assert.notEqual(one["src/replay.test.ts"], two["src/replay.test.ts"], "the migration's content is the replayer's input");
+  assert.equal(one["src/label.test.ts"], two["src/label.test.ts"], "a test that never reads the folder is unmoved");
+});

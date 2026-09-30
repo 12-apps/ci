@@ -71,17 +71,99 @@ function declarationEnd(lines, startLine) {
 }
 
 /**
+ * Collapse whitespace OUTSIDE string and template literals.
+ *
+ * Inside a literal every character is the value: `'a  b'` and `'a b'` are
+ * different strings, and a hash that read them alike let a literal-only edit
+ * through unselected — the test comparing the value failed while the plan
+ * said `none` (E4 of the 2026-09-30 audit). Escapes are honoured. A template's
+ * `${…}` is kept verbatim too, which can only make two bodies compare UNEQUAL,
+ * never equal — the safe direction.
+ */
+function collapseWhitespace(text) {
+  let out = "";
+  let quote = null;
+  let space = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote) {
+      out += ch;
+      if (ch === "\\" && i + 1 < text.length) {
+        out += text[i + 1];
+        i += 1;
+      } else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      out += ch;
+      space = false;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (!space) {
+        out += " ";
+        space = true;
+      }
+      continue;
+    }
+    out += ch;
+    space = false;
+  }
+  return out.trim();
+}
+
+/** Declaration kinds whose initializer RUNS when the module loads. */
+const INIT_KINDS = new Set(["const", "let", "var"]);
+/** The first `=` that is an assignment — not `==`, `=>`, `>=`, `<=`, `!=`. */
+const ASSIGN = /(^|[^=!<>])=(?![=>])/;
+/** An initializer that only DEFINES code: nothing runs until it is called. */
+const FUNCTION_LIKE = /^(?:async\s*)?(?:function\b|class\b|\([^)]*\)\s*(?::\s*[^=]*)?=>|[A-Za-z_$][\w$]*\s*=>|<[^>]*>\s*\()/;
+const STRING_LITERALS = /"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`/g;
+
+/** `export const x = <init>` → the init text; `null` for a function, class, type, interface or enum. */
+function initializerOf(decl) {
+  if (!decl || !INIT_KINDS.has(decl.kind)) return null;
+  const m = ASSIGN.exec(decl.text);
+  return m ? decl.text.slice(m.index + m[0].length).trim() : "";
+}
+
+/**
+ * Whether an initializer can be observed by an importer that never names the
+ * symbol.
+ *
+ * `export const setup = JSON.parse("oops")` throws for EVERY importer of the
+ * module, including the test that imports only `value` from it — yet a
+ * per-symbol diff marks `setup` alone and never reaches that test (E5 of the
+ * 2026-09-30 audit). Symbol granularity is only honest for an initializer
+ * that runs no code at load: a literal, an identifier, an object or array of
+ * those, or a function/class/arrow, whose body is deferred. Anything with a
+ * call, `new`, `await`, `yield` or a template substitution is treated as a
+ * module-level effect, and a change to it widens to every export.
+ */
+function inertInitializer(init) {
+  if (init === null) return true;
+  if (/`[^`]*\$\{/.test(init)) return false;
+  const masked = init.replace(STRING_LITERALS, '""');
+  if (FUNCTION_LIKE.test(masked)) return true;
+  return !/[(]|\bnew\b|\bawait\b|\byield\b/.test(masked);
+}
+
+/**
  * Every exported symbol in a source file, with a hash of its body.
  *
- * @returns {{symbols:Map<string,string>, moduleLevel:string[], reexports:{names:string[],spec:string,star:boolean}[], ok:boolean}}
+ * @returns {{symbols:Map<string,string>, decls:Map<string,{kind:string,text:string}>, moduleLevel:string[], reexports:{names:string[],spec:string,star:boolean}[], ok:boolean}}
  *   `moduleLevel` is every line NOT owned by a declaration — imports and
- *   side-effecting top-level code. `ok:false` means extraction was not
- *   confident and the caller must treat the whole file as affected.
+ *   side-effecting top-level code. `decls` keeps each declaration's kind and
+ *   normalised text, for the initializer check below. `ok:false` means
+ *   extraction was not confident and the caller must treat the whole file as
+ *   affected.
  */
 export function exportedSymbols(source) {
   const clean = stripComments(source);
   const lines = clean.split("\n");
   const symbols = new Map();
+  const decls = new Map();
   const owned = new Set();
   const reexports = [];
   let ok = true;
@@ -116,12 +198,9 @@ export function exportedSymbols(source) {
       ok = false;
       break;
     }
-    const body = lines
-      .slice(i, end + 1)
-      .join("\n")
-      .replace(/\s+/g, " ")
-      .trim();
+    const body = collapseWhitespace(lines.slice(i, end + 1).join("\n"));
     symbols.set(decl[2], hash(body));
+    decls.set(decl[2], { kind: decl[1], text: body });
     for (let k = i; k <= end; k += 1) owned.add(k);
   }
 
@@ -131,7 +210,7 @@ export function exportedSymbols(source) {
     const text = lines[i].trim();
     if (text) moduleLevel.push(text);
   }
-  return { symbols, moduleLevel, reexports, ok };
+  return { symbols, decls, moduleLevel, reexports, ok };
 }
 
 /** An import statement contributes no behaviour of its own — see below. */
@@ -191,13 +270,109 @@ export function affectedExports(baseSource, headSource, baseByName = new Map(), 
     ...headModule.filter((l) => !baseModule.includes(l)),
     ...baseModule.filter((l) => !headModule.includes(l)),
   ];
-  // …with one exception: an IMPORT line. Its only effect is to bind a name,
-  // and whether that name's behaviour moved is already decided by hashing the
-  // symbol itself. Without this, relocating a helper into a new module widens
-  // to the whole file and the move-awareness above buys nothing.
+  // …with one exception: an IMPORT line, when the change to it is a PROVEN
+  // move. Rewiring `import { value } from "./good"` to `"./bad"` changes what
+  // every export reading `value` returns without touching one body (E3 of
+  // the 2026-09-30 audit), so an import edit is harmless only when the bound
+  // symbol's body is the same on both sides of the diff — the shape of a
+  // relocation, which is the case this exception exists to keep cheap.
   if (changedModuleLines.some((l) => !IS_IMPORT_LINE.test(l))) return new Set(["*"]);
+  const baseChanged = baseModule.filter((l) => !headModule.includes(l));
+  const headChanged = headModule.filter((l) => !baseModule.includes(l));
+  if (!importChangeIsProvenMove(baseChanged, headChanged, baseByName, headByName)) return new Set(["*"]);
+  if (!reexportChangeIsProvenMove(base.reexports, head.reexports, baseByName, headByName)) return new Set(["*"]);
+
+  // E5: an affected variable whose initializer runs code at load (on either
+  // side) is observed by every importer of the module, named or not.
+  for (const name of affected) {
+    if (!inertInitializer(initializerOf(head.decls.get(name))) || !inertInitializer(initializerOf(base.decls.get(name)))) {
+      return new Set(["*"]);
+    }
+  }
 
   return affected;
+}
+
+const IMPORT_FROM_LINE = /^import\s+(type\s+)?([^"']*?)\s*from\s*["']([^"']+)["']\s*;?$/;
+const BARE_IMPORT_LINE = /^import\s*["']([^"']+)["']\s*;?$/;
+
+/**
+ * `<spec>#<exported name>` for every value binding the given import lines
+ * create; `#default`, `#*` and `#<side-effect>` for the shapes no symbol hash
+ * can vouch for. `ok:false` when a line that looks like an import cannot be
+ * read as one (a multi-line import's first line, for instance).
+ */
+function importBindings(lines) {
+  const bindings = new Set();
+  let ok = true;
+  for (const line of lines) {
+    if (!IS_IMPORT_LINE.test(line)) continue;
+    const bare = BARE_IMPORT_LINE.exec(line);
+    if (bare) {
+      bindings.add(`${bare[1]}#<side-effect>`);
+      continue;
+    }
+    const m = IMPORT_FROM_LINE.exec(line);
+    if (!m) {
+      ok = false;
+      continue;
+    }
+    if (m[1]) continue; // `import type` is erased before any module exists
+    const [, , clause, spec] = m;
+    const braces = /\{([^}]*)\}/.exec(clause);
+    const rest = clause.replace(/\{[^}]*\}/, "").replace(/,/g, " ").trim();
+    if (rest) bindings.add(`${spec}#${rest.startsWith("*") ? "*" : "default"}`);
+    for (const part of (braces?.[1] ?? "").split(",")) {
+      const name = part.trim();
+      if (!name || /^type\s/.test(name)) continue;
+      bindings.add(`${spec}#${name.split(/\s+as\s+/)[0].trim()}`);
+    }
+  }
+  return { bindings, ok };
+}
+
+/** A bound name whose body is identical on both sides of the diff — a move, not a change. */
+const provenSame = (name, baseByName, headByName) => baseByName.has(name) && baseByName.get(name) === headByName.get(name);
+
+function importChangeIsProvenMove(baseLines, headLines, baseByName, headByName) {
+  const before = importBindings(baseLines);
+  const after = importBindings(headLines);
+  if (!before.ok || !after.ok) return false;
+  const changed = [
+    ...[...before.bindings].filter((b) => !after.bindings.has(b)),
+    ...[...after.bindings].filter((b) => !before.bindings.has(b)),
+  ];
+  return changed.every((binding) => {
+    const name = binding.slice(binding.indexOf("#") + 1);
+    if (name === "<side-effect>" || name === "*" || name === "default") return false;
+    return provenSame(name, baseByName, headByName);
+  });
+}
+
+/**
+ * `export { x } from "./a"` → `from "./b"` keeps the hash `reexport:x` on
+ * both sides, so `settle` alone would call it unchanged even when `./b`'s `x`
+ * is a different thing. A re-export whose source moved is a move only when
+ * the named body is the same across the diff; a changed `export *` is never
+ * provable.
+ */
+function reexportChangeIsProvenMove(before, after, baseByName, headByName) {
+  const specsOf = (list) => {
+    const stars = new Set();
+    const named = new Map();
+    for (const r of list) {
+      if (r.star) stars.add(r.spec ?? "");
+      for (const n of r.names) named.set(n, r.spec ?? "<local>");
+    }
+    return { stars, named };
+  };
+  const b = specsOf(before);
+  const h = specsOf(after);
+  if (b.stars.size !== h.stars.size || [...b.stars].some((s) => !h.stars.has(s))) return false;
+  for (const [name, spec] of h.named) {
+    if (b.named.has(name) && b.named.get(name) !== spec && !provenSame(name, baseByName, headByName)) return false;
+  }
+  return true;
 }
 
 export { hash };

@@ -63,9 +63,26 @@ const SKIP_DIRS = new Set([
 const FROM_STATEMENT = /(?:^|[\n;])[ \t]*(import|export)\b([^;]*?)\bfrom\s*["']([^"']+)["']/g;
 /** `import "./side-effect"` — no clause, always a value edge. */
 const BARE_IMPORT = /(?:^|[\n;])[ \t]*import\s*["']([^"']+)["']/g;
-/** `import("./x")` and `require("./x")` — dynamic, always a value edge. */
-const DYNAMIC_IMPORT = /\bimport\(\s*["']([^"']+)["']\s*\)/g;
-const REQUIRE_CALL = /\brequire\(\s*["']([^"']+)["']\s*\)/g;
+/**
+ * `import("./x")` and `require("./x")` — dynamic, always a value edge. The
+ * space before the parenthesis is legal JavaScript (`import ("./x")`), and a
+ * regex that did not allow it dropped the edge SILENTLY — no `unresolved`, no
+ * blind file, a closure that looked complete (E6 of the 2026-09-30 audit).
+ */
+const DYNAMIC_IMPORT = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
+const REQUIRE_CALL = /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g;
+/**
+ * A dependency the parser cannot NAME: `import(source)` or `require(expr)`
+ * with anything but a string literal, and Vite's `import.meta.glob(...)`,
+ * which binds every file a pattern matches at build time. None of these can
+ * be resolved to a path here, so the file has no bounded closure. Recognising
+ * only part of the syntax is not proof of no dependency: each is reported as
+ * an opaque import, which `buildGraph` records as unresolved — the file is
+ * then blind, which widens it and refuses it a skip hash. A METHOD named
+ * `import` or `require` (`jiti.import(path)`, `entitlements.require(id)`) is
+ * not the keyword, so a preceding `.` (or identifier character) excludes it.
+ */
+const OPAQUE_IMPORT = /(?<![.\w$])(?:import|require)\s*\((?!\s*["'])|(?<![.\w$])import\.meta\.glob(?:Eager)?\s*\(/g;
 
 /**
  * One scan, two views of the same source.
@@ -282,7 +299,9 @@ export function bindingsOf(clause) {
 /**
  * Every import statement in one file's source.
  *
- * @returns {{spec:string, typeOnly:boolean, wildcard:boolean, names:string[], line:number, text:string}[]}
+ * @returns {{spec:string, typeOnly:boolean, wildcard:boolean, names:string[], line:number, text:string, opaque?:boolean}[]}
+ *   `opaque` marks a dependency that exists but cannot be named (see
+ *   OPAQUE_IMPORT); its `spec` is a description, never a path.
  */
 export function parseImports(rawSource) {
   // Comments are stripped FIRST. A docblock that explains a dynamic
@@ -318,6 +337,10 @@ export function parseImports(rawSource) {
   for (const m of inCode(BARE_IMPORT)) push(m[1], "", m.index, true);
   for (const m of inCode(DYNAMIC_IMPORT)) push(m[1], "", m.index, true);
   for (const m of inCode(REQUIRE_CALL)) push(m[1], "", m.index, true);
+  for (const m of inCode(OPAQUE_IMPORT)) {
+    const line = lineAt(source, m.index);
+    out.push({ spec: `<opaque ${m[0].trim()}…)>`, typeOnly: false, wildcard: true, names: [], line, text: (lines[line - 1] ?? "").trim(), opaque: true });
+  }
   return out;
 }
 
@@ -493,7 +516,17 @@ export function listSourceFiles(repoRoot, roots) {
 export function buildGraph(repoRoot, files, options = {}) {
   const edges = new Map();
   const unresolved = [];
-  for (const file of files) {
+  const opaqueOk = typeof options.opaqueOk === "function" ? options.opaqueOk : () => false;
+  // A worklist, not a single pass: a resolved target OUTSIDE the listed files
+  // (a root's module importing a helper from a directory no root names) used
+  // to enter the graph as a leaf with no edges of its own, so the closure
+  // stopped one hop short and nobody was told (the P2 beside E6 of the
+  // 2026-09-30 audit). Every resolved target is parsed in turn, so `roots`
+  // decide where the walk STARTS, never where a dependency chain ends.
+  const queue = [...files];
+  const seen = new Set(files);
+  while (queue.length > 0) {
+    const file = queue.shift();
     let source;
     try {
       source = readFileSync(join(repoRoot, file), "utf8");
@@ -504,12 +537,26 @@ export function buildGraph(repoRoot, files, options = {}) {
     const out = [];
     for (const imp of parseImports(source)) {
       if (imp.typeOnly) continue;
+      // An import the parser saw but cannot name (E6): a hole in the graph by
+      // definition, so it is unresolved — never tolerated as an asset — unless
+      // the caller vouches for THIS file (a route already carries what the
+      // dynamic import reaches; see `opaqueImports` in the plan config).
+      if (imp.opaque) {
+        if (!opaqueOk(file)) unresolved.push({ file, spec: imp.spec, line: imp.line });
+        continue;
+      }
       const aliases = typeof options.aliasesFor === "function" ? options.aliasesFor(file) : (options.aliases ?? []);
       const { file: target, external, asset } = resolveSpecifier(repoRoot, imp.spec, file, {
         packages: options.packages,
         aliases,
       });
-      if (target) out.push({ ...imp, target });
+      if (target) {
+        out.push({ ...imp, target });
+        if (!seen.has(target) && EXTENSIONS.includes(target.slice(target.lastIndexOf(".")))) {
+          seen.add(target);
+          queue.push(target);
+        }
+      }
       // An unresolved ASSET is tolerated (generated, virtual, plugin-served);
       // an unresolved JS module means this walker misread the tree, and the
       // caller must widen rather than narrow against a graph with holes.

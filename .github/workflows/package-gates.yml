@@ -202,6 +202,9 @@ jobs:
             gates=${{ inputs.gates }}
             mcp=${{ inputs.mcp-test-exemptions }} ${{ inputs.mcp-test-coverage-dir }}
             scope=${{ inputs.github-packages-scope }}
+            base=${{ github.event.pull_request.base.sha }}
+            engine=${{ github.job_workflow_sha }}
+            runner=${{ runner.os }}-${{ runner.arch }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         with:
