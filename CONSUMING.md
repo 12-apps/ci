@@ -624,7 +624,7 @@ being mutually exclusive.
 
 **What makes the skip sound.** The failure direction here is a green lane that
 ran nothing, so the claim a hit makes is deliberately narrow: *this exact
-test-relevant tree has passed this exact lane before*. Three things hold it up,
+test-relevant tree has passed this exact lane before*. These conditions hold it up,
 and the first is the consumer's responsibility:
 
 - **Hash the TREE, not a diff.** On `pull_request` the checkout is the MERGE
@@ -640,21 +640,34 @@ and the first is the consumer's responsibility:
   apart routinely cancel the first run mid-suite. Anything keyed on "nothing
   changed since the last push" would skip on that run's behalf, and the pull
   request would go green having tested neither push.
-- **The lane's own commands are in the KEY.** `node-version`, `pre-test-command`
-  and `unit-test-command` are folded into the cache key beside the hash. They
-  live in a workflow file, which any sane "can this change a test outcome?" rule
-  ignores, so without this, editing `unit-test-command` would inherit the
-  previous command's verdict. The SHARD COUNT is deliberately absent: a
-  lane-level verdict says every test the lane selected for this tree passed,
-  which is true however the set was sliced, so including the count would make
-  the skip miss on precisely the repeat pushes it exists for.
+- **Execution and selection context are in the KEY.** Resolved Node patch,
+  commands (including the integration pre-command), central action/workflow
+  source, caller workflow blobs, repository variables and available runner/image
+  identity all participate. Whole-lane reuse also binds the immutable fetched
+  base/stack selection and plan configuration. A retargeted PR with the same
+  tree is not necessarily the same coverage. Shard count remains excluded from
+  lane-level verdicts: changing the partition does not change the tested set.
+- **Only complete lane evidence is reused.** The legacy unit per-shard cache is
+  removed. Lookup stays before the matrix, and recording waits for the matrix
+  and signal. A skipped/disabled JUnit case does not count as executed signal.
 
 Never active on `push` — the post-merge safety net exists to skip nothing.
 
-The command must be dependency-free: it runs on the runner's system Node, before
-pnpm and before the install, because skipping the suite while still paying to
-prepare for it gives back only a fraction of what the repeat costs. If it fails
-or prints anything that is not a hex digest, the step warns and the lane runs.
+Fingerprint commands remain dependency-free and run before pnpm/install, but
+under the resolved Node version the shards will use. Resolving Node and the base
+adds some cache-hit preparation time; its cost has not yet been measured.
+Command subprocesses use `bash -e -o pipefail`; a failed producer cannot turn
+into a valid constant digest through a successful hashing pipeline. Missing
+execution identity, base or config disables reuse. An unfiltered plan is still
+uploaded if the reuse key cannot be computed.
+
+The new cache era invalidates old verdicts once. The same safe tree/context on a
+later push still reuses. Per-test hashes remain dependency-based, so an
+unrelated push does not erase an unchanged test's proof. Database domain routing
+is retained: migrations invalidate the reader/query/replay inputs that observe
+them, rather than disabling deduplication or selecting every database suite.
+Runtime inputs outside the modeled imports/routes must still be declared by the
+consumer; non-hermetic tests must use its always-run list.
 
 `future-pay`'s implementation (`scripts/ci-test-fingerprint.mjs`, ~40 lines plus
 its reasoning) is copyable; the one thing worth preserving verbatim is that it
@@ -891,18 +904,21 @@ File-level selection ("does this test load the changed file?") collapses on any
 repo with a shared entry module: the entry is loaded by nearly everything, so
 touching it selects nearly everything — whether or not the code those tests
 execute is different afterwards. Measured on one consumer pull request of 13
-files, the unit lane ran 462 of 761 test files and the integration lane 65 of
-143; at symbol level the same diff needs 125 and 0.
+files, the original implementation reported 462 of 761 unit files versus 125,
+and 65 of 143 integration files versus 0. Those historical counts are not a
+coverage proof or a measurement of the corrected selector.
 
-Two properties do the work: each exported symbol's body is hashed with comments
-stripped, and those hashes are keyed by NAME across the whole diff, so code that
-MOVED with an identical body is recognised as unchanged. An importer is followed
-only when it imports a symbol that actually changed.
+Same-file deferred exports can narrow by the bindings that observe them.
+Literal bytes and module context participate: equal names/bodies in another
+file do not prove relocation harmless. Import rewrites and eager initialization
+propagate through all runtime importers. Resolved dependencies beyond the root
+inventory are followed; unbounded imports widen their owners and dependent
+tests, whose input hashes cannot be reused.
 
-Every uncertainty widens to `mode=full` — an unresolvable import, an unparseable
-declaration, a manifest change, a missing config. Pair it with a full run on the
-default branch; strict PR-time selection is only sound when something
-unconditional runs afterwards.
+Missing configuration or unavailable selection context produces `mode=full`
+with a positive shard count. Other uncertainty widens the affected module;
+unclassified paths stop the plan. Pair it with a full run on the default branch;
+strict PR-time selection still needs that unconditional safety net.
 
 ```yaml
 - uses: 12-apps/ci/.github/actions/fetch-base@v2
@@ -929,6 +945,17 @@ two implementations of one decision, and they drift.
 
 Config reference, the plan document's shape, and the full rationale:
 [`.github/actions/affected-plan/README.md`](.github/actions/affected-plan/README.md).
+
+Literal relative `import.meta.glob` dependencies are also tracked: supported
+`*`/`?`/`**` patterns, arrays and relative exclusions include matching file
+contents and add/remove/rename membership in selection and per-test hashes.
+Normal source importers remain in the plan. Built-in `?raw`/`?url` glob reads
+are terminal bytes; ordinary matched source modules retain transitive imports.
+Computed or unsupported patterns/options (including `base` and
+`caseSensitive: false`), symlink/read uncertainty and untracked members prevent
+reuse. No opaque-import allowlist can suppress that safeguard. See the action
+README's **Vite glob inputs** section for the bounded subset and test limits.
+
 
 # Consuming the Quality gate
 

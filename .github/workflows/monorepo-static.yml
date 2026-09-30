@@ -750,8 +750,52 @@ jobs:
           fetch-depth: 0
 
 
+      # Resolve the real Node patch before reusing a runtime-dependent pass.
+      # pnpm and its dependency cache still wait for a verdict miss.
+      - name: Resolve Node for the verdict
+        id: verdict-node
+        if: ${{ inputs.lint-fingerprint-command != '' && github.event_name == 'pull_request' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      # Resolve selection BEFORE lookup, then execute against that same SHA.
+      - name: Fetch the base for turbo --affected
+        id: base
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/fetch-base@v2
+
+      - name: Pin the affected selection context
+        id: selection
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        env:
+          STACK_BASE: ${{ needs.changes.outputs.stack-base }}
+          BASE_SHA: ${{ steps.base.outputs.base-sha }}
+        run: |
+          set -euo pipefail
+          base="${STACK_BASE:-$BASE_SHA}"
+          # An unresolved base is never reusable evidence. The work step below
+          # runs the FULL lane, and no verdict is looked up or recorded.
+          if [ -z "$base" ] || ! base="$(git rev-parse --verify "$base^{commit}")"; then
+            echo "::warning::No immutable selection base; running without a verdict."
+            exit 0
+          fi
+          if ! merge_base="$(git merge-base "$base" HEAD)"; then
+            echo "::warning::No selection merge base; running without a verdict."
+            exit 0
+          fi
+          {
+            echo "base-sha=$base"
+            echo "merge-base=$merge_base"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "TURBO_SCM_BASE=$base"
+            echo "TURBO_SCM_HEAD=HEAD"
+          } >> "$GITHUB_ENV"
+
       # ── Skip a lane this exact tree already passed (opt-in) ────────────────
-      # First, before any install: the consumer's `lint-fingerprint-command` hashes every
+      # After resolving runtime/selection, before any install: the consumer's `lint-fingerprint-command` hashes every
       # tracked path that can change this lane's outcome, the action keys it to
       # how the lane RUNS (below), and a verdict recorded under that key means
       # every step after this one is skipped — the job is green on the earlier
@@ -761,18 +805,18 @@ jobs:
       # safety net and skips nothing.
       - name: Look up a recorded lane verdict
         id: lane-verdict
-        if: ${{ inputs.lint-fingerprint-command != '' && github.event_name == 'pull_request' }}
+        if: ${{ inputs.lint-fingerprint-command != '' && github.event_name == 'pull_request' && steps.selection.outputs.base-sha != '' }}
         uses: 12-apps/ci/.github/actions/lane-verdict@v2
         with:
           lane: lint
           fingerprint-command: ${{ inputs.lint-fingerprint-command }}
           key-material: |
             node=${{ inputs.node-version }}
+            vars=${{ toJSON(vars) }}
+            selection=turbo-affected-v1
+            base=${{ steps.selection.outputs.base-sha }}
+            merge-base=${{ steps.selection.outputs.merge-base }}
             pnpm turbo run lint --affected
-            base=${{ github.event.pull_request.base.sha }}
-            stack-base=${{ needs.changes.outputs.stack-base }}
-            engine=${{ github.job_workflow_sha }}
-            runner=${{ runner.os }}-${{ runner.arch }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         with:
@@ -781,7 +825,7 @@ jobs:
       - uses: actions/setup-node@v4
         if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         with:
-          node-version: ${{ inputs.node-version }}
+          node-version: ${{ steps.verdict-node.outputs.node-version || inputs.node-version }}
           cache: ${{ !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
 
       - name: Install dependencies
@@ -819,61 +863,17 @@ jobs:
           restore-keys: |
             turbo-lint-
 
-      # `turbo --affected` derives base...head from GITHUB_BASE_REF, which
-      # mid-stack is the branch BELOW this pull request — so it would select
-      # only this layer's packages and silently skip every package the layers
-      # underneath touched. TURBO_SCM_BASE overrides that base.
-      #
-      # Off a stack this used to set NOTHING, leaving turbo to resolve
-      # GITHUB_BASE_REF by NAME — and a pull request checkout has no local
-      # `main` branch. Turbo printed "Failed to resolve base ref 'main' …
-      # unknown revision", then "unable to detect git range, assuming all files
-      # have changed", and ran EVERY package while still reporting success
-      # (measured: all 26 packages for a three-file diff). So the ordinary pull
-      # request — not the stacked edge case — was the one silently paying for a
-      # full run. Fetching the base and pinning turbo to its SHA is what makes
-      # `--affected` mean anything here.
-      #
-      # Still written to GITHUB_ENV from a CONDITIONAL branch rather than a
-      # job-level `env:` that can resolve to '': turbo documents
-      # TURBO_SCM_BASE as "base used by --affected" but does NOT document how it
-      # treats an empty value, and an unset variable is the only behaviour we
-      # can be sure of.
-      # No `with:` — the step only runs on a pull request, where the action's
-      # default (GITHUB_BASE_REF) is exactly the ref wanted.
-      - name: Fetch the base for turbo --affected
-        id: base
-        if: ${{ (github.event_name == 'pull_request') && steps.lane-verdict.outputs.hit != 'true' }}
-        uses: 12-apps/ci/.github/actions/fetch-base@v2
-
-      - name: Point turbo --affected at the base
-        if: ${{ (github.event_name == 'pull_request') && steps.lane-verdict.outputs.hit != 'true' }}
-        shell: bash
-        env:
-          STACK_BASE: ${{ needs.changes.outputs.stack-base }}
-          BASE_SHA: ${{ steps.base.outputs.base-sha }}
-        run: |
-          set -euo pipefail
-          # Both empty means unrelated histories: set nothing and let turbo run
-          # everything, which is the safe direction to fail in.
-          base="${STACK_BASE:-$BASE_SHA}"
-          if [ -n "$base" ]; then
-            {
-              echo "TURBO_SCM_BASE=$base"
-              echo "TURBO_SCM_HEAD=HEAD"
-            } >> "$GITHUB_ENV"
-            echo "--affected diffs against $base"
-          fi
-
       - name: Lint
         if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         shell: bash
+        env:
+          SELECTION_BASE: ${{ steps.selection.outputs.base-sha }}
         # PR: --affected lints only the packages the diff touched (plus
         # dependents). Push (safety net): everything — --affected against the
         # branch's own tip would diff empty and lint nothing.
         run: |
           set -o pipefail
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "$SELECTION_BASE" ]; then
             pnpm turbo run lint --affected 2>&1 | tee lint.log
           else
             pnpm turbo run lint 2>&1 | tee lint.log
@@ -926,8 +926,52 @@ jobs:
           fetch-depth: 0
 
 
+      # Resolve the real Node patch before reusing a runtime-dependent pass.
+      # pnpm and its dependency cache still wait for a verdict miss.
+      - name: Resolve Node for the verdict
+        id: verdict-node
+        if: ${{ inputs.type-check-fingerprint-command != '' && github.event_name == 'pull_request' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      # Resolve selection BEFORE lookup, then execute against that same SHA.
+      - name: Fetch the base for turbo --affected
+        id: base
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/fetch-base@v2
+
+      - name: Pin the affected selection context
+        id: selection
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        env:
+          STACK_BASE: ${{ needs.changes.outputs.stack-base }}
+          BASE_SHA: ${{ steps.base.outputs.base-sha }}
+        run: |
+          set -euo pipefail
+          base="${STACK_BASE:-$BASE_SHA}"
+          # An unresolved base is never reusable evidence. The work step below
+          # runs the FULL lane, and no verdict is looked up or recorded.
+          if [ -z "$base" ] || ! base="$(git rev-parse --verify "$base^{commit}")"; then
+            echo "::warning::No immutable selection base; running without a verdict."
+            exit 0
+          fi
+          if ! merge_base="$(git merge-base "$base" HEAD)"; then
+            echo "::warning::No selection merge base; running without a verdict."
+            exit 0
+          fi
+          {
+            echo "base-sha=$base"
+            echo "merge-base=$merge_base"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "TURBO_SCM_BASE=$base"
+            echo "TURBO_SCM_HEAD=HEAD"
+          } >> "$GITHUB_ENV"
+
       # ── Skip a lane this exact tree already passed (opt-in) ────────────────
-      # First, before any install: the consumer's `type-check-fingerprint-command` hashes every
+      # After resolving runtime/selection, before any install: the consumer's `type-check-fingerprint-command` hashes every
       # tracked path that can change this lane's outcome, the action keys it to
       # how the lane RUNS (below), and a verdict recorded under that key means
       # every step after this one is skipped — the job is green on the earlier
@@ -937,19 +981,19 @@ jobs:
       # safety net and skips nothing.
       - name: Look up a recorded lane verdict
         id: lane-verdict
-        if: ${{ inputs.type-check-fingerprint-command != '' && github.event_name == 'pull_request' }}
+        if: ${{ inputs.type-check-fingerprint-command != '' && github.event_name == 'pull_request' && steps.selection.outputs.base-sha != '' }}
         uses: 12-apps/ci/.github/actions/lane-verdict@v2
         with:
           lane: type-check
           fingerprint-command: ${{ inputs.type-check-fingerprint-command }}
           key-material: |
             node=${{ inputs.node-version }}
+            vars=${{ toJSON(vars) }}
+            selection=turbo-affected-v1
+            base=${{ steps.selection.outputs.base-sha }}
+            merge-base=${{ steps.selection.outputs.merge-base }}
             pre=${{ inputs.pre-typecheck-command }}
             pnpm turbo run check-types --affected
-            base=${{ github.event.pull_request.base.sha }}
-            stack-base=${{ needs.changes.outputs.stack-base }}
-            engine=${{ github.job_workflow_sha }}
-            runner=${{ runner.os }}-${{ runner.arch }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         with:
@@ -958,7 +1002,7 @@ jobs:
       - uses: actions/setup-node@v4
         if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         with:
-          node-version: ${{ inputs.node-version }}
+          node-version: ${{ steps.verdict-node.outputs.node-version || inputs.node-version }}
           cache: ${{ !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
 
       - name: Install dependencies
@@ -978,7 +1022,7 @@ jobs:
           PRE_CMD: ${{ inputs.pre-typecheck-command }}
         run: |
           set -o pipefail
-          bash -c "$PRE_CMD" 2>&1 | tee pre-typecheck.log
+          bash -e -o pipefail -c "$PRE_CMD" 2>&1 | tee pre-typecheck.log
 
       # RESTORE ONLY — the save is a separate, conditional step below.
       #
@@ -1008,22 +1052,16 @@ jobs:
           restore-keys: |
             turbo-typecheck-
 
-      # Same reasoning as the lint lane: mid-stack, turbo's default base is the
-      # layer below, so type-check would skip the packages the lower layers
-      # touched. See the note there for why this is a conditional step.
-      - name: Point turbo --affected at the stack base
-        if: ${{ (needs.changes.outputs.stack-base != '') && steps.lane-verdict.outputs.hit != 'true' }}
-        shell: bash
-        run: echo "TURBO_SCM_BASE=${{ needs.changes.outputs.stack-base }}" >> "$GITHUB_ENV"
-
       - name: Type check
         if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         shell: bash
+        env:
+          SELECTION_BASE: ${{ steps.selection.outputs.base-sha }}
         # PR: --affected (turbo still builds each affected package's upstream
         # deps first, so cross-package type errors are caught). Push: everything.
         run: |
           set -o pipefail
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "$SELECTION_BASE" ]; then
             pnpm turbo run check-types --affected 2>&1 | tee typecheck.log
           else
             pnpm turbo run check-types 2>&1 | tee typecheck.log

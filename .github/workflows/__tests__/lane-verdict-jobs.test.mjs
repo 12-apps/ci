@@ -1,5 +1,6 @@
-// A single-job lane verdict is looked up FIRST and recorded LAST — and every
-// step in between is gated on it.
+// A single-job lane verdict follows resolution of its immutable selection and
+// runtime, precedes dependency setup/work, and is recorded LAST. The corrected
+// placement adds a small startup cost; an unresolved context cannot be skipped.
 //
 // Three placements, each of which fails silently when broken:
 //
@@ -24,6 +25,8 @@ import { jobBlocks } from "./matrix-zero-guard.test.mjs";
 const WORKFLOWS = fileURLToPath(new URL("../", import.meta.url));
 const read = (file) => readFileSync(path.join(WORKFLOWS, file), "utf8");
 const ACTION = readFileSync(path.join(WORKFLOWS, "../actions/lane-verdict/action.yml"), "utf8");
+const VERDICT = readFileSync(path.join(WORKFLOWS, "../actions/lane-verdict/verdict.mjs"), "utf8");
+const PROVENANCE = readFileSync(path.join(WORKFLOWS, "../actions/lane-verdict/provenance.mjs"), "utf8");
 
 /** Every job that carries a lane verdict, and the input that turns it on. */
 const JOBS = [
@@ -51,28 +54,49 @@ for (const { file, job, lane, input } of JOBS) {
     assert.match(block[1], /default: ''/);
   });
 
-  test(`${job}: the lookup is the step right after checkout, before any install`, () => {
+  test(`${job}: lookup follows context resolution but precedes dependency setup and work`, () => {
     const all = steps(body);
     const checkout = all.findIndex((s) => /actions\/checkout@/.test(s.block));
     const lookup = all.findIndex((s) => /id: lane-verdict/.test(s.block));
     assert.notEqual(lookup, -1, `${job} has no lane-verdict lookup`);
-    assert.equal(lookup, checkout + 1, "nothing but the checkout may run before the lookup");
-    const setup = all.findIndex((s) => /pnpm\/action-setup@|actions\/setup-node@/.test(s.block));
-    assert.ok(lookup < setup, "the lookup must precede the toolchain setup");
-    assert.match(all[lookup].block, new RegExp(`if: \\$\\{\\{ inputs\\.${input} != '' && github\\.event_name == 'pull_request' \\}\\}`), "opt-in, and never off a pull request");
+    assert.ok(checkout < lookup);
+    const allowed = /actions\/checkout@|id: verdict-node|id: base\n|id: selection\n|id: ratchet-base\n/;
+    assert.deepEqual(all.slice(0, lookup).filter((s) => !allowed.test(s.block)), [], "only checkout and verifiable context resolution precede lookup");
+    const node = all.findIndex((s) => /id: verdict-node/.test(s.block));
+    assert.ok(checkout < node && node < lookup, "the actual Node patch is resolved before lookup");
+    assert.doesNotMatch(all[node].block, /\n\s+cache:/, "dependency-cache work stays after a miss");
+    const setup = all.findIndex((s) => /pnpm\/action-setup@/.test(s.block));
+    assert.ok(lookup < setup, "the lookup must precede pnpm setup and dependency installation");
+    assert.match(all[lookup].block, new RegExp(`if: \\$\\{\\{ inputs\\.${input} != '' && github\\.event_name == 'pull_request'`), "opt-in, and never off a pull request");
     assert.match(all[lookup].block, /uses: 12-apps\/ci\/\.github\/actions\/lane-verdict@v2/);
     assert.match(all[lookup].block, new RegExp(`lane: ${lane}\\n`));
     assert.match(all[lookup].block, new RegExp(`fingerprint-command: \\$\\{\\{ inputs\\.${input} \\}\\}`));
     assert.match(all[lookup].block, /key-material: \|\n\s+node=\$\{\{ inputs\.node-version \}\}/, "the Node version is part of how the lane runs");
-    // E7/E8 (2026-09-30 audit): the same tree retargeted at another base
-    // selects another `--affected` set; an engine fix must not inherit a
-    // verdict the old logic earned; the runner image decides what ran.
-    assert.match(all[lookup].block, /\n\s+base=\$\{\{ github\.event\.pull_request\.base\.sha \}\}\n/, "the base the lane selected against");
-    assert.match(all[lookup].block, /\n\s+engine=\$\{\{ github\.job_workflow_sha \}\}\n/, "the engine revision that ran it");
-    assert.match(all[lookup].block, /\n\s+runner=\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}(\n|$)/, "the runner it ran on");
-    if (file === "monorepo-static.yml") {
-      assert.match(all[lookup].block, /\n\s+stack-base=\$\{\{ needs\.changes\.outputs\.stack-base \}\}\n/, "mid-stack, `--affected` diffs against the stack base");
+    assert.match(all.find((s) => /actions\/setup-node@/.test(s.block) && !/id: verdict-node/.test(s.block)).block,
+      /node-version: \$\{\{ steps\.verdict-node\.outputs\.node-version \|\| inputs\.node-version \}\}/,
+      "execution reuses the exact resolved patch rather than resolving a floating version twice");
+  });
+
+  test(`${job}: E7/E8 identity uses the resolved base, central implementation and actual runtime`, () => {
+    const lookup = steps(body).find((s) => /id: lane-verdict/.test(s.block)).block;
+    if (job === "gates") {
+      assert.match(lookup, /ratchet-base=\$\{\{ steps\.ratchet-base\.outputs\.base-sha \}\}/);
+      assert.match(lookup, /ratchet-merge-base=\$\{\{ steps\.ratchet-base\.outputs\.merge-base \}\}/);
+    } else {
+      assert.match(lookup, /base=\$\{\{ steps\.selection\.outputs\.base-sha \}\}/);
+      assert.match(lookup, /merge-base=\$\{\{ steps\.selection\.outputs\.merge-base \}\}/);
+      if (file === "monorepo-static.yml") assert.match(body, /STACK_BASE: \$\{\{ needs\.changes\.outputs\.stack-base \}\}/);
     }
+    // The action adds this automatically instead of relying on a workflow
+    // context property to identify an independently moving @v2 action.
+    assert.match(VERDICT, /identity = executionIdentity/);
+    assert.match(VERDICT, /context = identity\(\)/);
+    assert.match(VERDICT, /JSON\.stringify\(\[context, material, fingerprintCommand\]\)/);
+    assert.match(PROVENANCE, /implementation: implementationHash\(sourceRoot\)/);
+    for (const name of ["process.version", "process.platform", "process.arch", "env.RUNNER_OS", "env.RUNNER_ARCH", "env.ImageOS", "env.ImageVersion"]) {
+      assert.ok(PROVENANCE.includes(name), name);
+    }
+    assert.doesNotMatch(lookup, /github\.job_workflow_sha|github\.event\.pull_request\.base\.sha/);
   });
 
   test(`${job}: every step after the lookup is gated on the verdict, and the record is last`, () => {

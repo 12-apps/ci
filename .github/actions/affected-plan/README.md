@@ -19,83 +19,78 @@ shared route entry and a component every app shell renders:
 | unit | 462 of 761 files (61%), 3,550 tests, 794s | **125 (16%)** |
 | integration | 65 of 143 files (45%), 776 cases, 503s | **0** |
 
-The 337 unit files that dropped out were not a heuristic guess. Every one of
-them reached the changed module through `packageRoutes`, `wireEndpoint` or
-`wireCall` — all three byte-identical across that diff. The two functions that
-did move (`wireQuery`, `wireBody`) moved *verbatim* into a new file and were
-re-exported under the same names, so nothing downstream could observe anything.
-The whole diff, once the move and the comments are subtracted, was **two comment
-lines** plus one genuinely new export that exactly one file imports.
-
-This action asks the useful question instead:
-
-> is the code **reachable** from this test different?
+Those are historical measurements of the original implementation, not a
+coverage proof. Identical export names and bodies in different files can
+observe different imported bindings or module initialization. The selector now
+reruns callers of import/re-export rewrites rather than assuming relocation is
+behavior-preserving. The cost of that correction needs a new consumer run.
 
 ## How it decides
 
-1. **Hash every exported symbol's body**, comments stripped. A comment cannot
-   change behaviour, so documenting a shared module must not re-run the suite.
-2. **Key those hashes by NAME across the whole diff.** A function moved between
-   files with an identical body is unchanged. Relocation is the most common
-   shape of refactor, and treating it as "everything changed" makes a selector
-   useless exactly when the diff is largest. Re-exports are settled to the body
-   they forward, so `export function x` → `export { x } from "./moved"` is a
-   move, not a change.
-3. **Follow an importer only when it imports a changed symbol.** An importer
-   taking `packageRoutes` from a module whose `packageRoutes` is identical is
-   not affected, however much else in that module moved.
-4. **Once affected, a file's own exports are all treated as changed.** A
-   deliberate over-approximation: tracking which of its exports actually differ
-   would need to type-check the program.
+1. **Compare same-file exported bodies**, preserving literal bytes while
+   stripping comments. A string, template or regular-expression edit is a
+   behavior change even when it only changes whitespace.
+2. **Compare module context too.** Import targets, bindings, re-exports and
+   top-level statements can change behavior without changing a function body.
+   Equality with an export in another file is not evidence of equivalence.
+3. **Narrow deferred functions by the bindings they observe.** Independent
+   unchanged function exports can still avoid unrelated tests.
+4. **Propagate module evaluation effects through every runtime importer.** An
+   eager initializer may throw before the imported binding is used. Unknown
+   initialization and import rewrites therefore widen that module's importers,
+   including barrels and unused imports.
+5. **Follow resolved source dependencies beyond the configured roots.** Roots
+   discover the lane's test inventory; they do not truncate import closures.
+   Computed imports are unbounded. Their owners and dependent tests run, and
+   those closures cannot produce reusable per-test hashes.
 
-Type-only imports are not edges — they are erased before any module graph
-exists, so a change cannot travel through one.
+Whole-statement `import type` / `export type` declarations are erased and are
+not runtime edges. Inline-only clauses such as `import { type Foo }` can still
+evaluate the target module (including under Node's TypeScript stripping), so
+they retain a module-evaluation edge even though they bind no runtime value.
 
-Three places where symbol granularity is NOT honest, each found by the
-2026-09-30 audit and each answered by widening (`symbols.mjs`):
+## Vite glob inputs
 
-- **An import line that changed** is a move only when the diff proves it — the
-  bound name carries the same body on both sides. `import { value } from
-  "./good"` → `"./bad"` with an unchanged body reading `value` changes what
-  every export returns (E3); nothing in the diff vouches for `./bad`, so the
-  file widens. Default, namespace and side-effect imports are never provable.
-  A re-export whose source moved is held to the same test.
-- **Whitespace inside a string or template literal is content.** `'a  b'` and
-  `'a b'` hash differently (E4); only whitespace between tokens is collapsed.
-- **An initializer that runs code at load** — a call, `new`, `await`, a
-  template substitution — is observed by every importer, named or not:
-  `export const setup = JSON.parse("oops")` throws for the test that imports
-  only `value` (E5). A change to, or the arrival or removal of, such an export
-  widens to every export. Literals, identifiers, object and array literals of
-  those, functions, classes and arrows keep symbol granularity.
+Literal [`import.meta.glob`](https://vite.dev/guide/features#glob-import) calls
+are dependency sets, including their membership. The bounded subset accepts
+relative `./`/`../` string patterns, arrays with relative `!` exclusions, `*`,
+`?` and whole-segment `**`. Literal `eager`/`import` options and built-in
+`query: '?raw'` / `'?url'` are supported. Matching is case-sensitive and
+non-exhaustive; a simple TypeScript type argument is recognized too.
+
+Matched source modules are followed transitively, even beyond graph roots.
+JSON and raw/URL reads contribute their bytes; raw/URL edges do not execute a
+matched source file's imports. Member addition, removal and rename select the
+glob's readers and change their input hashes, including normally ignored
+assets. These dependencies supplement ordinary source importers rather than
+replacing them. Unrelated tests can still reuse identical inputs.
+
+This is not full tinyglobby compatibility. Computed arguments/options, `base`,
+case-insensitive or exhaustive matching, absolute/alias patterns, richer glob
+syntax, unmodeled asset transforms, symlinks and unreadable inventories leave
+the importer **blind and unskippable**. Filesystem matches are enumerated, so
+an untracked/generated member also prevents a reusable hash. There is no
+`opaqueImports` bypass or unchecked promise that an unknown import is safe.
+
+`glob-imports.test.mjs` exercises the actual planner, hashes and skip-green
+filter across multiple synthetic commits. It does not execute Vite or claim a
+hosted consumer run; that remains a separate integration proof.
 
 ## Failing safe
 
 Both failure directions are green, and they are not symmetric. Running too much
 costs minutes. Running too little reports success on code no test touched, which
-looks exactly like success on code every test touched. So every uncertainty
-widens to `mode=full`:
+looks exactly like success on code every test touched. Uncertainty widens the affected module and its importers, or the full lane
+when its inventory or selection context cannot be established:
 
 | situation | result |
 |---|---|
 | config missing or unreadable | `full` |
 | unknown lane | `full` |
-| the diff cannot be computed | `full` |
-| a relative import does not resolve | that file is **blind**: widened, and never given a skip hash |
-| an import the parser cannot name — `import(expr)`, `require(expr)`, `import.meta.glob(…)` | the same: blind. Recognising part of the syntax is not proof of no dependency (E6). `opaqueImports` lets the consumer vouch for a file a route already covers |
+| the diff cannot be computed | `full`, with a positive shard count even when the test list is unknown |
+| an import is unresolved/computed | run its owner and dependent tests; never reuse an unbounded closure |
 | a declaration cannot be bracketed | that file reports `*` (all exports) |
-| a lane-global input (`skipGreen.globals`) changed and nothing routes it — a setup file, or a module its closure holds | `full` — nothing imports a setup file, and every test runs under it (F3a) |
 | a changed path matching no rule | **`unclassified` — the action exits 1** |
-
-`full` always sizes a **positive** matrix (`--max-shards` shards). It carries no
-test list by construction, and reading the empty list before the mode gave the
-full suite zero shards — the log said "running the FULL suite" while the matrix
-was off (E1; `#84` to the 2026-09-30 audit).
-
-The graph follows every resolved import, not only files under a lane's
-`roots`: a root's module importing a helper from a directory no root names used
-to enter as a leaf, and the closure stopped one hop short. `roots` decide where
-the walk starts, never where a dependency chain ends.
 
 There is deliberately no `full` for an unrecognised path. It used to be the
 answer, and on the first consuming repo it fired on **69% of commits**: the old
@@ -203,10 +198,8 @@ the barrel does.
 | `routes[].match` + `.entry` | a codegen INPUT, replaced by the source file carrying its whole effect, then traced normally. A Prisma schema is the motivating case: non-`.ts`, but its only runtime effect is the generated client's surface |
 | `routes[].match` + `.command` | for an input whose entry cannot be named in a regex — a catalog bump's entry is whichever source imports the packages whose pins moved. Run once with every matching path, printing one entry per line |
 | `lanes.<name>.ignore` | added to the repo-wide `ignore` for this lane only — never subtracted. Prisma migrations are the case: they decide what integration runs against a real database and cannot reach a unit test, which mocks the client |
-| `lanes.<name>.roots` | directories to build the graph over. A lane's module globals (below) are graphed beside them |
+| `lanes.<name>.roots` | directories to build the graph over |
 | `lanes.<name>.test` / `.exclude` | which files are this lane's tests |
-| `lanes.<name>.skipGreen.globals` | paths that can change ANY verdict in the lane without being imported (the lockfile, vitest configs, setup files, a database lane's migrations). They join every test's skip hash — a module global with its own import closure — and a change to one that nothing routes plans the full suite. See `skip-green` |
-| `opaqueImports[].match` + `.why` | files whose dynamic imports (`import(expr)`, `import.meta.glob`) the consumer vouches for because a route already carries what they reach — a route table that `import()`s each `route.ts` when the `route.ts` files are themselves routed. Everywhere else such an import makes the file blind. Repo-wide, and per lane under `lanes.<name>.opaqueImports` |
 
 A route whose command fails, or prints nothing, leaves its paths **unclassified**
 rather than routed-to-nothing. A silent empty there would skip exactly the tests
@@ -411,3 +404,24 @@ were reached, and which features they select).
 `affectedSymbols` and `reasons` are what make a narrowed lane reviewable: for
 every selected file there is a chain of real import statements with line
 numbers, and anyone can open those files and check.
+
+## Reusable input coverage
+
+`skipGreen.globals` declares inputs loaded outside test imports, such as runner
+configuration and setup files. The global files **and their transitive
+imports/routed reads** enter every per-test hash. A change to one seeds the
+lane's tests even when no test imports that setup file. A blind global prevents
+reuse. Database-owned paths retain domain-aware selection instead of widening
+all tests merely because the consumer also lists migrations as hash globals.
+
+Static runtime-read routes and database routes are hash dependencies as well as
+selection declarations. Database hash routes are computed from the complete
+current inventory, not just the current pull-request diff, so a later push
+cannot reuse a migration reader's result after the migration is edited, renamed
+or deleted. Unchanged bounded inputs remain reusable. SQL comment-only changes
+retain their narrow behavior; quoted SQL values are not discarded as comments.
+
+The `test-inputs-v2` format and green-manifest v2 retire earlier incomplete
+proofs. Source/runtime identity is separately included in the workflow's key.
+The caller must still declare runtime inputs that imports and database routing
+cannot discover; non-hermetic tests belong in the always-run list.

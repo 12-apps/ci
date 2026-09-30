@@ -178,8 +178,26 @@ jobs:
           fetch-depth: ${{ (inputs.mcp-test-exemptions != '' && github.event_name == 'pull_request') && '0' || '1' }}
 
 
+      # Resolve the real Node patch before reusing a runtime-dependent pass.
+      # pnpm and its dependency cache still wait for a verdict miss.
+      - name: Resolve Node for the verdict
+        id: verdict-node
+        if: ${{ inputs.fingerprint-command != '' && github.event_name == 'pull_request' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      # The ratchet must execute against the SAME base that identifies the
+      # verdict, rather than fetching a possibly advanced branch after lookup.
+      - name: Resolve the ratchet base
+        id: ratchet-base
+        if: ${{ inputs.mcp-test-exemptions != '' && github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/fetch-base@v2
+        with:
+          base-ref: ${{ github.base_ref || 'main' }}
+
       # ── Skip a lane this exact tree already passed (opt-in) ────────────────
-      # First, before any install: the consumer's `fingerprint-command` hashes every
+      # After resolving runtime/selection, before any install: the consumer's `fingerprint-command` hashes every
       # tracked path that can change this lane's outcome, the action keys it to
       # how the lane RUNS (below), and a verdict recorded under that key means
       # every step after this one is skipped — the job is green on the earlier
@@ -189,22 +207,22 @@ jobs:
       # safety net and skips nothing.
       - name: Look up a recorded lane verdict
         id: lane-verdict
-        if: ${{ inputs.fingerprint-command != '' && github.event_name == 'pull_request' }}
+        if: ${{ inputs.fingerprint-command != '' && github.event_name == 'pull_request' && (inputs.mcp-test-exemptions == '' || steps.ratchet-base.outputs.merge-base != '') }}
         uses: 12-apps/ci/.github/actions/lane-verdict@v2
         with:
           lane: gates
           fingerprint-command: ${{ inputs.fingerprint-command }}
           key-material: |
             node=${{ inputs.node-version }}
+            vars=${{ toJSON(vars) }}
+            ratchet-base=${{ steps.ratchet-base.outputs.base-sha }}
+            ratchet-merge-base=${{ steps.ratchet-base.outputs.merge-base }}
             install=${{ inputs.install }}
             dir=${{ inputs.package-dir }}
             pre=${{ inputs.pre-command }}
             gates=${{ inputs.gates }}
             mcp=${{ inputs.mcp-test-exemptions }} ${{ inputs.mcp-test-coverage-dir }}
             scope=${{ inputs.github-packages-scope }}
-            base=${{ github.event.pull_request.base.sha }}
-            engine=${{ github.job_workflow_sha }}
-            runner=${{ runner.os }}-${{ runner.arch }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         with:
@@ -213,7 +231,7 @@ jobs:
       - uses: actions/setup-node@v4
         if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         with:
-          node-version: ${{ inputs.node-version }}
+          node-version: ${{ steps.verdict-node.outputs.node-version || inputs.node-version }}
           cache: ${{ !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
 
       # Wire ~/.npmrc for private GitHub Packages BEFORE install, using the
@@ -276,6 +294,7 @@ jobs:
           exemptions-file: ${{ inputs.mcp-test-exemptions }}
           package-dir: ${{ inputs.mcp-test-coverage-dir }}
           base-ref: ${{ github.base_ref || 'main' }}
+          base-sha: ${{ steps.ratchet-base.outputs.base-sha }}
 
       # The claim is made LAST, by the job that earned it: `success()` means
       # every step above passed, so the next pull-request run of this exact
@@ -288,4 +307,3 @@ jobs:
           mode: record
           lane: gates
           key: ${{ steps.lane-verdict.outputs.key }}
-

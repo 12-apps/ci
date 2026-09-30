@@ -535,6 +535,8 @@ jobs:
       # two things that can disagree, and a recorder writing a DIFFERENT key
       # from the one the next run looks up is a skip that silently never happens.
       fingerprint: ${{ steps.fingerprint.outputs.value }}
+      node-version: ${{ steps.verdict-node.outputs.node-version }}
+      base-sha: ${{ steps.base.outputs.base-sha }}
       # Non-empty only when `skip-green` is on for this run: the key half of the
       # green manifest's cache name, handed to the post-matrix recorder for the
       # same reason the fingerprint is — one computation, never two.
@@ -560,11 +562,27 @@ jobs:
       # the plan and the run resolve the SAME base — a plan sized against a
       # different one would be sizing a diff the lane never runs.
       - name: Fetch the base for affected selection
-        if: ${{ (inputs.unit-plan-command != '' || inputs.affected-plan-config != '') && github.event_name == 'pull_request' }}
+        id: base
+        if: ${{ (inputs.unit-plan-command != '' || inputs.affected-plan-config != '' || inputs.unit-fingerprint-command != '') && github.event_name == 'pull_request' }}
         uses: 12-apps/ci/.github/actions/fetch-base@v2
         with:
           base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
           fallback-branch: ${{ inputs.default-branch }}
+      # Resolve the actual toolchain before a verdict can claim equivalence.
+      # No dependency install or pnpm cache is needed in the plan job.
+      - name: Resolve Node for reusable verdicts
+        id: verdict-node
+        if: ${{ github.event_name == 'pull_request' && (inputs.unit-fingerprint-command != '' || (inputs.skip-green != '' && inputs.affected-plan-config != '')) }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Identify the CI implementation and runtime
+        id: execution
+        if: ${{ steps.verdict-node.outcome == 'success' }}
+        uses: 12-apps/ci/.github/actions/lane-verdict@v2
+        with:
+          mode: identity
+          lane: unit
       - name: Compute the affected test plan
         id: affected
         if: ${{ inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
@@ -596,13 +614,20 @@ jobs:
         if: ${{ inputs.skip-green != '' && inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
         shell: bash
         env:
-          LANE_NODE: ${{ inputs.node-version }}
+          LANE_NODE: ${{ steps.verdict-node.outputs.node-version }}
+          EXECUTION_ID: ${{ steps.execution.outputs.execution-identity }}
+          LANE_VARS: ${{ toJSON(vars) }}
           LANE_PRE: ${{ inputs.pre-test-command }}
           LANE_CMD: ${{ inputs.unit-test-command }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          key="$(printf '%s\0%s\0%s' "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" | sha256sum | cut -c1-16)"
+          if [ -z "$EXECUTION_ID" ] || [ -z "$LANE_NODE" ]; then
+            echo "::warning::execution identity unavailable — no green manifest will be reused."
+            echo "value=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          key="$(printf '%s\0' ci-green-v2 "$EXECUTION_ID" "$LANE_VARS" "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" | sha256sum | cut -c1-16)"
           echo "value=${key}" >> "$GITHUB_OUTPUT"
           echo "unit green manifest key prefix: green-unit-${key}-pr${PR_NUMBER:-?}-"
       # The exact key carries this run's id and can never hit; the PREFIX hits
@@ -628,7 +653,9 @@ jobs:
           always-run: ${{ inputs.skip-green-always-run }}
           max-shards: ${{ inputs.unit-shards }}
       - name: Upload the filtered plan
-        if: ${{ steps.skip-green-key.outputs.value != '' }}
+        # Also publish the unfiltered plan when identity/key generation stood
+        # down. The affected action deferred upload whenever skip-green is on.
+        if: ${{ inputs.skip-green != '' && inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
         uses: actions/upload-artifact@v4
         with:
           name: affected-plan-unit
@@ -672,6 +699,11 @@ jobs:
         shell: bash
         env:
           FP_CMD: ${{ inputs.unit-fingerprint-command }}
+          BASE_SHA: ${{ steps.base.outputs.base-sha }}
+          MERGE_BASE: ${{ steps.base.outputs.merge-base }}
+          STACK_BASE_SHA: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.sha || '' }}
+          PLAN_CMD: ${{ inputs.unit-plan-command }}
+          PLAN_CONFIG: ${{ inputs.affected-plan-config }}
           # Folded into the KEY rather than the hash. These decide what the lane
           # RUNS and they live in a workflow file, which a sane "can this change
           # a test outcome?" rule ignores — so without them, editing
@@ -682,31 +714,33 @@ jobs:
           # however the set was sliced — so a plan that sizes 2 today must still
           # be answerable by a run that sized 4 yesterday. Including the count
           # would make the skip miss on precisely the pushes it exists for.
-          LANE_NODE: ${{ inputs.node-version }}
+          LANE_NODE: ${{ steps.verdict-node.outputs.node-version }}
+          EXECUTION_ID: ${{ steps.execution.outputs.execution-identity }}
+          LANE_VARS: ${{ toJSON(vars) }}
           LANE_PRE: ${{ inputs.pre-test-command }}
-          # The verdict's IDENTITY beyond the tree (2026-09-30 audit, E7/E8):
-          # the base the selection diffed against — the same tree retargeted
-          # at another base selects another set; the engine revision that ran
-          # the lane — a fix here must not inherit a verdict the old logic
-          # earned; and the runner image, which decides what the lane ran on.
-          LANE_BASE: ${{ github.event.pull_request.base.sha }}
-          LANE_ENGINE: ${{ github.job_workflow_sha }}
-          LANE_RUNNER: ${{ runner.os }}-${{ runner.arch }}
-          LANE_SCHEMA: verdict-v2
           LANE_CMD: ${{ inputs.unit-test-command }}
         run: |
           set -o pipefail
           # NOT `set -e`: every failure here must fall through to an empty
           # fingerprint, which disables the lookup and runs the lane. An
           # optimisation that cannot answer must answer "run it".
-          # `pipefail` INSIDE the consumer's shell too: `git ls-tree missing | sha256sum`
-          # prints the digest of EMPTY input and exits 0 without it (E9), and
-          # that digest is refused below by value as well.
-          fp="$(bash -o pipefail -c "$FP_CMD")" || fp=""
+          if [ -z "$EXECUTION_ID" ] || [ -z "$LANE_NODE" ] || [ -z "$BASE_SHA" ] || [ -z "$MERGE_BASE" ]; then
+            echo "::warning::incomplete execution or selection identity — running the lane."
+            echo "value=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          config_hash=""
+          if [ -n "$PLAN_CONFIG" ]; then
+            config_hash="$(sha256sum -- "$PLAN_CONFIG")" || {
+              echo "value=" >> "$GITHUB_OUTPUT"
+              exit 0
+            }
+          fi
+          fp="$(bash -e -o pipefail -c "$FP_CMD")" || fp=""
           fp="$(printf '%s' "$fp" | tr -d '[:space:]')"
           case "$fp" in
             d41d8cd98f00b204e9800998ecf8427e|da39a3ee5e6b4b0d3255bfef95601890afd80709|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e)
-              echo "::warning::unit-fingerprint-command hashed EMPTY input — its producer failed; running the lane."
+              echo "::warning::unit-fingerprint-command hashed EMPTY input — refusing unverifiable evidence; running the lane."
               fp="";;
           esac
           if ! printf '%s' "$fp" | grep -Eq '^[0-9a-f]{32,128}$'; then
@@ -714,9 +748,9 @@ jobs:
             echo "value=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          lane="$(printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s' \
-            "$LANE_SCHEMA" "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" "$FP_CMD" \
-            "$LANE_BASE" "$LANE_ENGINE" "$LANE_RUNNER" \
+          lane="$(printf '%s\0' ci-lane-v2 \
+            "$EXECUTION_ID" "$LANE_VARS" "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" "$FP_CMD" \
+            "$BASE_SHA" "$MERGE_BASE" "$STACK_BASE_SHA" "$PLAN_CMD" "$PLAN_CONFIG" "$config_hash" \
             | sha256sum | cut -c1-16)"
           echo "value=${lane}-${fp}" >> "$GITHUB_OUTPUT"
           echo "unit lane verdict key: ${lane}-${fp}"
@@ -782,7 +816,7 @@ jobs:
             # non-integer — leaves the static count in force, because the
             # damage is asymmetric: a lane that runs too wide costs minutes, a
             # lane that runs too narrow reports a verdict it never earned.
-            if ASKED_RAW="$(bash -c "$PLAN_CMD")"; then
+            if ASKED_RAW="$(bash -e -o pipefail -c "$PLAN_CMD")"; then
               ASKED="$(printf '%s' "$ASKED_RAW" | tail -n 1 | tr -d '[:space:]')"
               if [[ "$ASKED" =~ ^[0-9]+$ ]]; then
                 if [ "$ASKED" -gt "$SHARDS" ]; then ASKED="$SHARDS"; fi
@@ -873,104 +907,18 @@ jobs:
         with:
           fetch-depth: 0
 
-      # ── Has this exact tree already passed? (opt-in, see the input) ────────
-      # Deliberately the FIRST thing after the checkout, ahead of pnpm, Node and
-      # the install: skipping the suite while still paying ~90s to prepare for it
-      # would give back a fraction of what the repeat costs. The consumer's
-      # command is dependency-free by contract and runs on the runner's system
-      # Node, which is what detect-changes.yml already does before its own
-      # setup-node.
-      - name: Fingerprint the test-relevant tree
-        id: fingerprint
-        # PR-only. The push run is the post-merge safety net; it skips nothing,
-        # by definition, and must never consult a recorded verdict.
-        #
-        # Also disabled when the junit guard is armed on a SHARDED lane. The
-        # verdict is recorded per shard, but the guard's claim is lane-level
-        # ("the MERGED total ran at least one test", asserted by unit-signal
-        # after the matrix) — so a shard's record can never carry it: a run
-        # whose signal job failed would still have recorded every green shard,
-        # and the next identical tree would skip straight past the guard on
-        # those records. Two sound mechanisms, unsound composed; the guard is
-        # the safety property, so it wins and the skip stands down.
-        if: >-
-          ${{ inputs.unit-fingerprint-command != ''
-              && github.event_name == 'pull_request'
-              && (needs.unit-plan.outputs.count == 1 || inputs.unit-junit-reports == '') }}
-        shell: bash
-        env:
-          FP_CMD: ${{ inputs.unit-fingerprint-command }}
-          # Folded into the KEY rather than the hash. These decide what the lane
-          # RUNS and they live in a workflow file, which a sane "can this change
-          # a test outcome?" rule ignores — so without them, editing
-          # unit-test-command would inherit the previous command's verdict.
-          LANE_NODE: ${{ inputs.node-version }}
-          LANE_PRE: ${{ inputs.pre-test-command }}
-          LANE_UNIT: ${{ inputs.unit-test-command }}
-          # The shard is part of the lane's identity: each shard runs a
-          # different slice of the same tree, so a verdict recorded by shard 1
-          # must never answer for shard 2 — and a recorded 1-of-1 verdict must
-          # not survive a change in the shard count, which reslices every leg.
-          LANE_SHARD: ${{ matrix.shard }}/${{ needs.unit-plan.outputs.count }}
-        run: |
-          set -o pipefail
-          # NOT `set -e`: every failure here must fall through to an empty
-          # fingerprint, which disables the lookup and runs the tests. The whole
-          # mechanism is an optimisation, and an optimisation that cannot answer
-          # must answer "run it".
-          fp="$(bash -c "$FP_CMD")" || fp=""
-          fp="$(printf '%s' "$fp" | tr -d '[:space:]')"
-          if ! printf '%s' "$fp" | grep -Eq '^[0-9a-f]{32,128}$'; then
-            echo "::warning::unit-fingerprint-command produced no usable hash — running the lane."
-            echo "value=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          lane="$(printf '%s\0%s\0%s\0%s\0%s' \
-            "$LANE_NODE" "$LANE_PRE" "$LANE_UNIT" "$FP_CMD" "$LANE_SHARD" \
-            | sha256sum | cut -c1-16)"
-          echo "value=${lane}-${fp}" >> "$GITHUB_OUTPUT"
-          echo "unit verdict key: ${lane}-${fp}"
-
-      # `lookup-only` — the entry's EXISTENCE is the whole message, so nothing is
-      # downloaded. No `restore-keys`: a prefix match would answer for a
-      # DIFFERENT tree, which is the one mistake this must not make.
-      - name: Look up a recorded verdict for this tree
-        id: verdict
-        if: ${{ steps.fingerprint.outputs.value != '' }}
-        uses: actions/cache/restore@v4
-        with:
-          path: .unit-verdict
-          key: unit-verdict-${{ steps.fingerprint.outputs.value }}
-          lookup-only: true
-
-      - name: Report the reused verdict
-        if: ${{ steps.verdict.outputs.cache-hit == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "This tree is byte-identical, in every path that can affect a test,"
-          echo "to one an earlier PASSING run of this lane already covered."
-          echo "Nothing to recompute — change any counted file and the lane runs again."
-          {
-            echo "### Unit Tests — reused an earlier verdict"
-            echo
-            echo "No counted file differs from a tree this lane has already passed on,"
-            echo "so the suite was not re-run."
-          } >> "$GITHUB_STEP_SUMMARY"
-
+      # Reuse is decided by unit-plan and recorded only after the matrix and
+      # signal pass. A legacy per-shard marker must not bypass that proof.
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
-        if: ${{ steps.verdict.outputs.cache-hit != 'true' }}
         with:
           run_install: false
 
       - uses: actions/setup-node@v4
-        if: ${{ steps.verdict.outputs.cache-hit != 'true' }}
         with:
-          node-version: ${{ inputs.node-version }}
+          node-version: ${{ needs.unit-plan.outputs.node-version || inputs.node-version }}
           cache: ${{ !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
 
       - name: Install dependencies
-        if: ${{ steps.verdict.outputs.cache-hit != 'true' }}
         shell: bash
         run: |
           set -o pipefail
@@ -981,13 +929,13 @@ jobs:
       # template-expanded into the run block (Actions hardening guidance).
       # Same pattern for every command input in this workflow.
       - name: Pre-test setup
-        if: ${{ inputs.pre-test-command != '' && steps.verdict.outputs.cache-hit != 'true' }}
+        if: ${{ inputs.pre-test-command != '' }}
         shell: bash
         env:
           PRE_CMD: ${{ inputs.pre-test-command }}
         run: |
           set -o pipefail
-          bash -c "$PRE_CMD" 2>&1 | tee pre-test.log
+          bash -e -o pipefail -c "$PRE_CMD" 2>&1 | tee pre-test.log
 
       # RESTORE ONLY — the save is a separate, conditional step below.
       #
@@ -1009,7 +957,6 @@ jobs:
       # newest entry the default branch wrote, and turbo's own content hashes
       # decide what inside it is reusable. What a PR no longer does is WRITE.
       - name: Restore turbo cache
-        if: ${{ steps.verdict.outputs.cache-hit != 'true' }}
         uses: actions/cache/restore@v4
         with:
           path: .turbo
@@ -1027,7 +974,7 @@ jobs:
       # a PR), else the default branch's (its push safety-net runs cover every
       # test file, and base-branch caches are restorable from PRs).
       - name: Restore vitest results cache (test prioritization)
-        if: ${{ inputs.vitest-cache-paths != '' && steps.verdict.outputs.cache-hit != 'true' }}
+        if: ${{ inputs.vitest-cache-paths != '' }}
         uses: actions/cache/restore@v4
         with:
           path: ${{ inputs.vitest-cache-paths }}
@@ -1053,10 +1000,10 @@ jobs:
       # the caller's command.
       - name: Fetch the base for affected selection
         id: base
-        if: ${{ github.event_name == 'pull_request' && steps.verdict.outputs.cache-hit != 'true' }}
+        if: ${{ github.event_name == 'pull_request' }}
         uses: 12-apps/ci/.github/actions/fetch-base@v2
         with:
-          base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
+          base-ref: ${{ needs.unit-plan.outputs.base-sha || ((inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '') }}
           fallback-branch: ${{ inputs.default-branch }}
 
       # The lane runs the plan the PLAN JOB produced — it does not re-select.
@@ -1064,7 +1011,7 @@ jobs:
       # can silently disagree with the plan that sized its matrix, and nothing
       # in the run compares the two.
       - name: Download the affected test plan
-        if: ${{ inputs.affected-plan-config != '' && github.event_name == 'pull_request' && steps.verdict.outputs.cache-hit != 'true' }}
+        if: ${{ inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
         uses: actions/download-artifact@v4
         with:
           name: affected-plan-unit
@@ -1072,7 +1019,6 @@ jobs:
 
       - name: Run unit tests
         id: unit
-        if: ${{ steps.verdict.outputs.cache-hit != 'true' }}
         shell: bash
         # PR: incremental command against the fetched base tip (FETCH_HEAD).
         # Push: the full suite — a diff against the branch's own tip would be
@@ -1118,9 +1064,9 @@ jobs:
             elif [ -n "$BASE_SHA" ]; then
               export TURBO_SCM_BASE="$BASE_SHA" TURBO_SCM_HEAD=HEAD
             fi
-            bash -c "${UNIT_CMD}${SHARD_ARG}" 2>&1 | tee unit.log
+            bash -e -o pipefail -c "${UNIT_CMD}${SHARD_ARG}" 2>&1 | tee unit.log
           else
-            bash -c "${UNIT_FULL_CMD}${SHARD_ARG}" 2>&1 | tee unit.log
+            bash -e -o pipefail -c "${UNIT_FULL_CMD}${SHARD_ARG}" 2>&1 | tee unit.log
           fi
 
       # Write only off a pull request — see the note on the restore step above.
@@ -1128,7 +1074,7 @@ jobs:
       # racing one immutable entry means three of them throw their warm state
       # away and warn. The prefix restore still shares whatever any leg wrote.
       - name: Save turbo cache
-        if: ${{ github.event_name != 'pull_request' && steps.verdict.outputs.cache-hit != 'true' }}
+        if: ${{ github.event_name != 'pull_request' }}
         uses: actions/cache/save@v4
         with:
           path: .turbo
@@ -1201,43 +1147,7 @@ jobs:
           path: ${{ inputs.vitest-cache-paths }}
           key: vitest-results-${{ github.ref }}-s${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
 
-      # ── Record the verdict, and ONLY a passing one ─────────────────────────
-      # `steps.unit.outcome == 'success'` is the entire safety argument, so it is
-      # asserted directly on the step that ran the tests rather than inferred
-      # from the job. A failed run leaves no record. Neither does a CANCELLED
-      # one, which is the case that actually bites: the recommended caller sets
-      # `cancel-in-progress: true` for PRs, so pushing twice in a minute kills
-      # the first run mid-suite — and a mechanism keyed on "did anything change
-      # since that push?" would cheerfully skip on its behalf.
-      #
-      # A hit skips `Run unit tests`, leaving its outcome 'skipped', so a reused
-      # verdict never re-records itself and the key is written exactly once.
-      - name: Record this tree as passing
-        id: record
-        if: ${{ steps.unit.outcome == 'success' && steps.fingerprint.outputs.value != '' }}
-        shell: bash
-        # Through env rather than interpolated into the run block, per the
-        # convention stated on `Pre-test setup` above — this value is validated
-        # hex, but the rule is what keeps that from having to be re-checked.
-        env:
-          VERDICT_KEY: unit-verdict-${{ steps.fingerprint.outputs.value }}
-        run: |
-          set -euo pipefail
-          mkdir -p .unit-verdict
-          # Content is diagnostic only — the KEY carries the meaning, and
-          # `lookup-only` means no reader ever downloads this.
-          {
-            echo "commit=$GITHUB_SHA"
-            echo "run=$GITHUB_RUN_ID attempt=$GITHUB_RUN_ATTEMPT"
-            echo "key=$VERDICT_KEY"
-          } > .unit-verdict/passed
 
-      - name: Save the recorded verdict
-        if: ${{ steps.record.outcome == 'success' }}
-        uses: actions/cache/save@v4
-        with:
-          path: .unit-verdict
-          key: unit-verdict-${{ steps.fingerprint.outputs.value }}
 
   # The zero-test-signal guard for a SHARDED unit lane: one job after the
   # matrix, over every shard's shipped reports, so no slice is ever inspected
@@ -1384,8 +1294,55 @@ jobs:
           fetch-depth: 0
 
 
+      # Resolve the real Node patch before reusing a runtime-dependent pass.
+      # pnpm and its dependency cache still wait for a verdict miss.
+      - name: Resolve Node for the verdict
+        id: verdict-node
+        if: ${{ inputs.build-fingerprint-command != '' && github.event_name == 'pull_request' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      # Resolve selection BEFORE lookup, then execute against that same SHA.
+      - name: Fetch the base for turbo --affected
+        id: base
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/fetch-base@v2
+        with:
+          base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
+          fallback-branch: ${{ inputs.default-branch }}
+
+      - name: Pin the affected selection context
+        id: selection
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        env:
+          STACK_BASE: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.sha || '' }}
+          BASE_SHA: ${{ steps.base.outputs.base-sha }}
+        run: |
+          set -euo pipefail
+          base="${STACK_BASE:-$BASE_SHA}"
+          # An unresolved base is never reusable evidence. The work step below
+          # runs the FULL lane, and no verdict is looked up or recorded.
+          if [ -z "$base" ] || ! base="$(git rev-parse --verify "$base^{commit}")"; then
+            echo "::warning::No immutable selection base; running without a verdict."
+            exit 0
+          fi
+          if ! merge_base="$(git merge-base "$base" HEAD)"; then
+            echo "::warning::No selection merge base; running without a verdict."
+            exit 0
+          fi
+          {
+            echo "base-sha=$base"
+            echo "merge-base=$merge_base"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "TURBO_SCM_BASE=$base"
+            echo "TURBO_SCM_HEAD=HEAD"
+          } >> "$GITHUB_ENV"
+
       # ── Skip a lane this exact tree already passed (opt-in) ────────────────
-      # First, before any install: the consumer's `build-fingerprint-command` hashes every
+      # After resolving runtime/selection, before any install: the consumer's `build-fingerprint-command` hashes every
       # tracked path that can change this lane's outcome, the action keys it to
       # how the lane RUNS (below), and a verdict recorded under that key means
       # every step after this one is skipped — the job is green on the earlier
@@ -1395,18 +1352,19 @@ jobs:
       # safety net and skips nothing.
       - name: Look up a recorded lane verdict
         id: lane-verdict
-        if: ${{ inputs.build-fingerprint-command != '' && github.event_name == 'pull_request' }}
+        if: ${{ inputs.build-fingerprint-command != '' && github.event_name == 'pull_request' && steps.selection.outputs.base-sha != '' }}
         uses: 12-apps/ci/.github/actions/lane-verdict@v2
         with:
           lane: build
           fingerprint-command: ${{ inputs.build-fingerprint-command }}
           key-material: |
             node=${{ inputs.node-version }}
+            vars=${{ toJSON(vars) }}
+            selection=turbo-affected-v1
+            base=${{ steps.selection.outputs.base-sha }}
+            merge-base=${{ steps.selection.outputs.merge-base }}
             pre=${{ inputs.pre-build-command }}
             pnpm turbo run build --affected
-            base=${{ github.event.pull_request.base.sha }}
-            engine=${{ github.job_workflow_sha }}
-            runner=${{ runner.os }}-${{ runner.arch }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         with:
@@ -1415,7 +1373,7 @@ jobs:
       - uses: actions/setup-node@v4
         if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         with:
-          node-version: ${{ inputs.node-version }}
+          node-version: ${{ steps.verdict-node.outputs.node-version || inputs.node-version }}
           cache: ${{ !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
 
       - name: Install dependencies
@@ -1432,7 +1390,7 @@ jobs:
           PRE_CMD: ${{ inputs.pre-build-command }}
         run: |
           set -o pipefail
-          bash -c "$PRE_CMD" 2>&1 | tee pre-build.log
+          bash -e -o pipefail -c "$PRE_CMD" 2>&1 | tee pre-build.log
 
       # RESTORE ONLY — the save is a separate, conditional step below.
       #
@@ -1462,51 +1420,17 @@ jobs:
           restore-keys: |
             turbo-build-
 
-      # This lane used to fetch a base only for a STACKED pull request and let
-      # every other one rely on turbo deriving the base from GITHUB_BASE_REF.
-      # Turbo resolves that by NAME, and a pull request checkout has no local
-      # `main` branch, so the ordinary case printed "Failed to resolve base ref"
-      # and then "assuming all files have changed" — a full build of every
-      # package, reported as an affected one. Both cases now fetch a real base
-      # and pin turbo to a SHA that exists locally.
-      - name: Fetch the base for turbo --affected
-        id: base
-        if: ${{ (github.event_name == 'pull_request') && steps.lane-verdict.outputs.hit != 'true' }}
-        uses: 12-apps/ci/.github/actions/fetch-base@v2
-        with:
-          # Mid-stack, GITHUB_BASE_REF is only the layer below, so --affected
-          # would skip everything the lower layers touched.
-          base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
-          fallback-branch: ${{ inputs.default-branch }}
-
-      - name: Point turbo --affected at the base
-        if: ${{ (github.event_name == 'pull_request') && steps.lane-verdict.outputs.hit != 'true' }}
-        shell: bash
-        env:
-          STACK_BASE_SHA: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.sha || '' }}
-          BASE_SHA: ${{ steps.base.outputs.base-sha }}
-        run: |
-          set -euo pipefail
-          # Unrelated histories leave both empty: export nothing and let turbo
-          # fall back to building everything, which is the safe direction.
-          base="${STACK_BASE_SHA:-$BASE_SHA}"
-          if [ -n "$base" ]; then
-            {
-              echo "TURBO_SCM_BASE=$base"
-              echo "TURBO_SCM_HEAD=HEAD"
-            } >> "$GITHUB_ENV"
-            echo "build --affected diffs against $base"
-          fi
-
       - name: Build
         if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         shell: bash
+        env:
+          SELECTION_BASE: ${{ steps.selection.outputs.base-sha }}
         # PR: --affected builds only the touched packages (plus dependents via
         # turbo's graph; upstream deps still build as prerequisites). Push:
         # everything.
         run: |
           set -o pipefail
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "$SELECTION_BASE" ]; then
             pnpm turbo run build --affected 2>&1 | tee build.log
           else
             pnpm turbo run build 2>&1 | tee build.log
@@ -1561,6 +1485,8 @@ jobs:
       # two things that can disagree, and a recorder writing a DIFFERENT key
       # from the one the next run looks up is a skip that silently never happens.
       fingerprint: ${{ steps.fingerprint.outputs.value }}
+      node-version: ${{ steps.verdict-node.outputs.node-version }}
+      base-sha: ${{ steps.base.outputs.base-sha }}
       # See unit-plan.
       skip-green-key: ${{ steps.skip-green-key.outputs.value }}
     steps:
@@ -1580,11 +1506,27 @@ jobs:
       # the plan and the run resolve the SAME base — a plan sized against a
       # different one would be sizing a diff the lane never runs.
       - name: Fetch the base for affected selection
-        if: ${{ (inputs.integration-plan-command != '' || inputs.affected-plan-config != '') && github.event_name == 'pull_request' }}
+        id: base
+        if: ${{ (inputs.integration-plan-command != '' || inputs.affected-plan-config != '' || inputs.integration-fingerprint-command != '') && github.event_name == 'pull_request' }}
         uses: 12-apps/ci/.github/actions/fetch-base@v2
         with:
           base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
           fallback-branch: ${{ inputs.default-branch }}
+      # Resolve the actual toolchain before a verdict can claim equivalence.
+      # No dependency install or pnpm cache is needed in the plan job.
+      - name: Resolve Node for reusable verdicts
+        id: verdict-node
+        if: ${{ github.event_name == 'pull_request' && (inputs.integration-fingerprint-command != '' || (inputs.skip-green != '' && inputs.affected-plan-config != '')) }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Identify the CI implementation and runtime
+        id: execution
+        if: ${{ steps.verdict-node.outcome == 'success' }}
+        uses: 12-apps/ci/.github/actions/lane-verdict@v2
+        with:
+          mode: identity
+          lane: integration
       - name: Compute the affected test plan
         id: affected
         if: ${{ inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
@@ -1606,13 +1548,20 @@ jobs:
         if: ${{ inputs.skip-green != '' && inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
         shell: bash
         env:
-          LANE_NODE: ${{ inputs.node-version }}
+          LANE_NODE: ${{ steps.verdict-node.outputs.node-version }}
+          EXECUTION_ID: ${{ steps.execution.outputs.execution-identity }}
+          LANE_VARS: ${{ toJSON(vars) }}
           LANE_PRE: ${{ inputs.pre-integration-command }}
           LANE_CMD: ${{ inputs.integration-command }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          key="$(printf '%s\0%s\0%s' "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" | sha256sum | cut -c1-16)"
+          if [ -z "$EXECUTION_ID" ] || [ -z "$LANE_NODE" ]; then
+            echo "::warning::execution identity unavailable — no green manifest will be reused."
+            echo "value=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          key="$(printf '%s\0' ci-green-v2 "$EXECUTION_ID" "$LANE_VARS" "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" | sha256sum | cut -c1-16)"
           echo "value=${key}" >> "$GITHUB_OUTPUT"
           echo "integration green manifest key prefix: green-integration-${key}-pr${PR_NUMBER:-?}-"
       - name: Restore the green manifest
@@ -1636,7 +1585,9 @@ jobs:
           always-run: ${{ inputs.skip-green-always-run }}
           max-shards: ${{ inputs.integration-shards }}
       - name: Upload the filtered plan
-        if: ${{ steps.skip-green-key.outputs.value != '' }}
+        # Also publish the unfiltered plan when identity/key generation stood
+        # down. The affected action deferred upload whenever skip-green is on.
+        if: ${{ inputs.skip-green != '' && inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
         uses: actions/upload-artifact@v4
         with:
           name: affected-plan-integration
@@ -1680,6 +1631,11 @@ jobs:
         shell: bash
         env:
           FP_CMD: ${{ inputs.integration-fingerprint-command }}
+          BASE_SHA: ${{ steps.base.outputs.base-sha }}
+          MERGE_BASE: ${{ steps.base.outputs.merge-base }}
+          STACK_BASE_SHA: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.sha || '' }}
+          PLAN_CMD: ${{ inputs.integration-plan-command }}
+          PLAN_CONFIG: ${{ inputs.affected-plan-config }}
           # Folded into the KEY rather than the hash. These decide what the lane
           # RUNS and they live in a workflow file, which a sane "can this change
           # a test outcome?" rule ignores — so without them, editing
@@ -1690,31 +1646,33 @@ jobs:
           # however the set was sliced — so a plan that sizes 2 today must still
           # be answerable by a run that sized 4 yesterday. Including the count
           # would make the skip miss on precisely the pushes it exists for.
-          LANE_NODE: ${{ inputs.node-version }}
+          LANE_NODE: ${{ steps.verdict-node.outputs.node-version }}
+          EXECUTION_ID: ${{ steps.execution.outputs.execution-identity }}
+          LANE_VARS: ${{ toJSON(vars) }}
           LANE_PRE: ${{ inputs.pre-integration-command }}
-          # The verdict's IDENTITY beyond the tree (2026-09-30 audit, E7/E8):
-          # the base the selection diffed against — the same tree retargeted
-          # at another base selects another set; the engine revision that ran
-          # the lane — a fix here must not inherit a verdict the old logic
-          # earned; and the runner image, which decides what the lane ran on.
-          LANE_BASE: ${{ github.event.pull_request.base.sha }}
-          LANE_ENGINE: ${{ github.job_workflow_sha }}
-          LANE_RUNNER: ${{ runner.os }}-${{ runner.arch }}
-          LANE_SCHEMA: verdict-v2
           LANE_CMD: ${{ inputs.integration-command }}
         run: |
           set -o pipefail
           # NOT `set -e`: every failure here must fall through to an empty
           # fingerprint, which disables the lookup and runs the lane. An
           # optimisation that cannot answer must answer "run it".
-          # `pipefail` INSIDE the consumer's shell too: `git ls-tree missing | sha256sum`
-          # prints the digest of EMPTY input and exits 0 without it (E9), and
-          # that digest is refused below by value as well.
-          fp="$(bash -o pipefail -c "$FP_CMD")" || fp=""
+          if [ -z "$EXECUTION_ID" ] || [ -z "$LANE_NODE" ] || [ -z "$BASE_SHA" ] || [ -z "$MERGE_BASE" ]; then
+            echo "::warning::incomplete execution or selection identity — running the lane."
+            echo "value=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          config_hash=""
+          if [ -n "$PLAN_CONFIG" ]; then
+            config_hash="$(sha256sum -- "$PLAN_CONFIG")" || {
+              echo "value=" >> "$GITHUB_OUTPUT"
+              exit 0
+            }
+          fi
+          fp="$(bash -e -o pipefail -c "$FP_CMD")" || fp=""
           fp="$(printf '%s' "$fp" | tr -d '[:space:]')"
           case "$fp" in
             d41d8cd98f00b204e9800998ecf8427e|da39a3ee5e6b4b0d3255bfef95601890afd80709|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e)
-              echo "::warning::integration-fingerprint-command hashed EMPTY input — its producer failed; running the lane."
+              echo "::warning::integration-fingerprint-command hashed EMPTY input — refusing unverifiable evidence; running the lane."
               fp="";;
           esac
           if ! printf '%s' "$fp" | grep -Eq '^[0-9a-f]{32,128}$'; then
@@ -1722,9 +1680,9 @@ jobs:
             echo "value=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          lane="$(printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s' \
-            "$LANE_SCHEMA" "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" "$FP_CMD" \
-            "$LANE_BASE" "$LANE_ENGINE" "$LANE_RUNNER" \
+          lane="$(printf '%s\0' ci-lane-v2 \
+            "$EXECUTION_ID" "$LANE_VARS" "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" "$FP_CMD" \
+            "$BASE_SHA" "$MERGE_BASE" "$STACK_BASE_SHA" "$PLAN_CMD" "$PLAN_CONFIG" "$config_hash" \
             | sha256sum | cut -c1-16)"
           echo "value=${lane}-${fp}" >> "$GITHUB_OUTPUT"
           echo "integration lane verdict key: ${lane}-${fp}"
@@ -1786,7 +1744,7 @@ jobs:
             if [ "$COUNT" -gt "$SHARDS" ]; then COUNT="$SHARDS"; fi
           elif [ -n "$PLAN_CMD" ]; then
             # Fail open — see unit-plan for why the asymmetry decides this.
-            if ASKED_RAW="$(bash -c "$PLAN_CMD")"; then
+            if ASKED_RAW="$(bash -e -o pipefail -c "$PLAN_CMD")"; then
               ASKED="$(printf '%s' "$ASKED_RAW" | tail -n 1 | tr -d '[:space:]')"
               if [[ "$ASKED" =~ ^[0-9]+$ ]]; then
                 if [ "$ASKED" -gt "$SHARDS" ]; then ASKED="$SHARDS"; fi
@@ -1858,7 +1816,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ inputs.node-version }}
+          node-version: ${{ needs.integration-plan.outputs.node-version || inputs.node-version }}
           cache: ${{ !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
 
       - name: Install dependencies
@@ -1883,7 +1841,7 @@ jobs:
           PRE_CMD: ${{ inputs.pre-integration-command }}
         run: |
           set -o pipefail
-          bash -c "$PRE_CMD" 2>&1 | tee pre-integration.log
+          bash -e -o pipefail -c "$PRE_CMD" 2>&1 | tee pre-integration.log
 
       # Failed-first ordering for what is usually the longest lane (see
       # unit-tests). Distinct key space from the unit caches.
@@ -1914,7 +1872,7 @@ jobs:
         if: ${{ github.event_name == 'pull_request' }}
         uses: 12-apps/ci/.github/actions/fetch-base@v2
         with:
-          base-ref: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '' }}
+          base-ref: ${{ needs.integration-plan.outputs.base-sha || ((inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.ref || '') }}
           fallback-branch: ${{ inputs.default-branch }}
 
       # The lane runs the plan the PLAN JOB produced — it does not re-select.
@@ -1922,7 +1880,7 @@ jobs:
       # can silently disagree with the plan that sized its matrix, and nothing
       # in the run compares the two.
       - name: Download the affected test plan
-        if: ${{ inputs.affected-plan-config != '' && github.event_name == 'pull_request' && steps.verdict.outputs.cache-hit != 'true' }}
+        if: ${{ inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
         uses: actions/download-artifact@v4
         with:
           name: affected-plan-integration
@@ -1954,9 +1912,9 @@ jobs:
             echo "▶️  shard ${SHARD_INDEX}/${SHARD_TOTAL}"
           fi
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            bash -c "${INT_CMD}${SHARD_ARG}" 2>&1 | tee integration.log
+            bash -e -o pipefail -c "${INT_CMD}${SHARD_ARG}" 2>&1 | tee integration.log
           else
-            bash -c "${INT_FULL_CMD}${SHARD_ARG}" 2>&1 | tee integration.log
+            bash -e -o pipefail -c "${INT_FULL_CMD}${SHARD_ARG}" 2>&1 | tee integration.log
           fi
 
       # Zero-test-signal guard — see the unit lane's copy for why it is gated on

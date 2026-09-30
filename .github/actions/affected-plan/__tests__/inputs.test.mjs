@@ -261,8 +261,8 @@ test("F3b: a helper the setup file imports moves every hash, though no test impo
   const after = hashes(dir);
   assert.notEqual(after.inputs["src/a.test.ts"], before.inputs["src/a.test.ts"], "the setup runs the helper before every case");
   assert.notEqual(after.inputs["src/b.test.ts"], before.inputs["src/b.test.ts"]);
-  // The global itself is still listed as the global; the closure rides inside the hash.
-  assert.deepEqual(after.globalFiles, ["src/setup.ts"]);
+  // Report the complete global dependency closure that the hashes include.
+  assert.deepEqual(after.globalFiles, ["src/query-client.ts", "src/setup.ts"]);
 });
 
 test("F3b: a module global the graph does not hold, or whose closure is blind, withholds EVERY hash", () => {

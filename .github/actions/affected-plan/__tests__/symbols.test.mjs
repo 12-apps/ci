@@ -34,14 +34,13 @@ test("a comment is not a behaviour change", () => {
   assert.equal(affectedExports(base, head).size, 0, "documenting a boundary must be free");
 });
 
-test("a symbol MOVED with an identical body is unchanged", () => {
-  // The single most common refactor. Treating a relocation as "everything
-  // changed" makes the selector useless exactly when the diff is largest.
+test("a matching symbol in another file does not prove a safe relocation", () => {
+  // The name/body do not capture the new file's imports or lexical context.
   const base = "export function wireQuery() {\n  return 1;\n}\n";
   const movedInto = "export function wireQuery() {\n  return 1;\n}\n";
   const seenElsewhere = exportedSymbols(base).symbols; // hashes from the file it left
   const affected = affectedExports(null, movedInto, seenElsewhere);
-  assert.equal(affected.size, 0, "same name, same body, different file — nothing to re-run");
+  assert.ok(affected.has("wireQuery"), "a new module context must reach its callers");
 });
 
 test("a removed export is affected", () => {
@@ -58,14 +57,21 @@ test("module-level code widens to the whole file", () => {
   assert.ok(has(affectedExports(base, head), "*"));
 });
 
-test("an import line rewired by a PROVEN move does not widen", () => {
-  // Relocating a helper rewrites the import line of the file it left behind.
-  // Widening on that would undo the move-awareness above — so long as the
-  // diff itself proves the move: `helper` carries the same body on both sides.
+test("a changed import target widens even when exported bodies are identical", () => {
+  // Binding the same name from a different module can change its value or
+  // throw during initialization; unchanged callers are not a proof of safety.
+  const base = "import { helper } from './old';\nexport const a = 1;\n";
+  const head = "import { helper } from './new';\nexport const a = 1;\n";
+  assert.ok(affectedExports(base, head).has("*"));
+});
+
+test("same-named body equality cannot prove import rewiring harmless", () => {
+  // Module context and initialization are observable even when a same-named
+  // export elsewhere in the diff has identical body bytes.
   const base = "import { helper } from './old';\nexport const a = 1;\n";
   const head = "import { helper } from './new';\nexport const a = 1;\n";
   const same = new Map([["helper", "h1"]]);
-  assert.equal(affectedExports(base, head, same, same).size, 0);
+  assert.ok(affectedExports(base, head, same, same).has("*"));
 });
 
 test("E3: an import rewired to a module the diff does not vouch for widens", () => {
@@ -91,18 +97,18 @@ test("E3: a default, namespace or side-effect import change always widens", () =
   }
 });
 
-test("E3: reordering or reformatting imports is not a change", () => {
+test("E3: runtime import reordering can change module evaluation", () => {
   const base = "import { a } from './a';\nimport { b } from './b';\nexport const k = 1;\n";
   const head = "import { b } from './b';\nimport { a } from './a';\nexport const k = 1;\n";
-  assert.equal(affectedExports(base, head).size, 0);
+  assert.ok(affectedExports(base, head).has("*"));
 });
 
-test("E3: a re-export whose source moved is a move only when the body is proven the same", () => {
+test("E3: a re-export target change is not excused by name/body equality", () => {
   const base = "export { x } from './a';\n";
   const head = "export { x } from './b';\n";
   assert.ok(has(affectedExports(base, head), "*"), "nothing vouches for './b'.x");
   const same = new Map([["x", "x1"]]);
-  assert.equal(affectedExports(base, head, same, same).size, 0, "the diff carries x with one body on both sides");
+  assert.ok(affectedExports(base, head, same, same).has("*"), "same body does not prove equal module context");
   assert.ok(has(affectedExports("export * from './a';\n", "export * from './b';\n"), "*"), "a star re-export is never provable");
 });
 
@@ -117,17 +123,17 @@ test("E4: whitespace INSIDE a string literal is a change", () => {
   assert.ok(has(affectedExports(tpl, "export const t = `a b`;\n"), "t"));
 });
 
-test("E5: a changed initializer that runs code widens to every export", () => {
-  // `JSON.parse('oops')` throws for every importer, including the one that
-  // imports only `value`.
+test("E5: changed eager initializers remain tainted for module-effect propagation", () => {
+  // Symbol taint is propagated as a module effect by select.mjs. Executable
+  // transitive/barrel/alias counterexamples live in selection-safety.test.mjs.
   const base = "export const setup = JSON.parse('1');\nexport const value = 1;\n";
   const head = "export const setup = JSON.parse('oops');\nexport const value = 1;\n";
-  assert.ok(has(affectedExports(base, head), "*"));
+  assert.ok(has(affectedExports(base, head), "setup"));
   // Adding or removing such an export is the same load-time change.
-  assert.ok(has(affectedExports("export const value = 1;\n", head), "*"));
-  assert.ok(has(affectedExports(head, "export const value = 1;\n"), "*"));
+  assert.ok(has(affectedExports("export const value = 1;\n", head), "setup"));
+  assert.ok(has(affectedExports(head, "export const value = 1;\n"), "setup"));
   for (const init of ["new Map()", "await load()", "`${env.X}`", "[1, 2].map((x) => x)"]) {
-    assert.ok(has(affectedExports("export const s = 1;\nexport const value = 1;\n", `export const s = ${init};\nexport const value = 1;\n`), "*"), init);
+    assert.ok(has(affectedExports("export const s = 1;\nexport const value = 1;\n", `export const s = ${init};\nexport const value = 1;\n`), "s"), init);
   }
 });
 

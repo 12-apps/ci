@@ -157,7 +157,7 @@ test("E1: a lane the config does not declare is `full` with a positive matrix to
   assert.notEqual(emitted.shards, "[]");
 });
 
-test("F3a: a change to a lane-global input alone plans the FULL suite", () => {
+test("F3a: a change to a lane-global input alone selects every known lane test", () => {
   // `src/setup.ts` is what the runner loads before every test (setupFiles).
   // Nothing imports it, so a walk of the import graph selects nothing for it;
   // the consumer declared it a global precisely because every verdict can
@@ -170,9 +170,10 @@ test("F3a: a change to a lane-global input alone plans the FULL suite", () => {
   writeFileSync(join(root, ".affected-plan.json"), JSON.stringify(config));
   const { code, document, emitted } = plan(root, base);
   assert.equal(code, 0);
-  assert.equal(document.mode, "full", document.why);
-  assert.match(document.why, /lane-global input changed/);
-  assert.equal(emitted["shard-total"], "4");
+  assert.equal(document.mode, "narrowed", document.why);
+  assert.deepEqual(document.tests, ["src/a.test.ts"]);
+  assert.match(document.why, /runner global inputs/);
+  assert.equal(emitted["shard-total"], "1");
   // A global that IS routed keeps its route's narrower answer.
   const routed = { ...config, routes: [{ match: String.raw`^src/setup\.ts$`, entry: ["src/a.ts"] }] };
   writeFileSync(join(root, ".affected-plan.json"), JSON.stringify(routed));
@@ -259,17 +260,18 @@ test("F3b: a module global outside the lane's roots is graphed, so the lane keep
   assert.equal(first.document.mode, "narrowed", first.document.why);
   assert.ok(first.document.inputs["src/a.test.ts"], `hashed: ${JSON.stringify(first.document.inputs)} ${first.err}`);
   // A change to the helper the runner imports selects no test by import — and
-  // it runs before every one of them, so the plan is FULL (F3a, one hop out).
+  // it runs before every one of them, so every known test is selected.
   const git = (...args) => spawnSync("git", args, { cwd: root, stdio: "ignore" });
   writeFileSync(join(root, "tools/helper.ts"), "export const helper = () => 2;\n");
   git("add", "tools/helper.ts"); // not -A: the first plan's outputs sit in the tree
   git("commit", "-qm", "helper");
   const second = plan(root, base);
-  assert.equal(second.document.mode, "full", second.document.why);
+  assert.equal(second.document.mode, "narrowed", second.document.why);
+  assert.deepEqual(second.document.tests, ["src/a.test.ts"]);
   assert.match(second.document.why, /tools\/helper\.ts/);
 });
 
-test("E6: a file with an import the parser cannot name is blind — unless `opaqueImports` vouches for it", () => {
+test("E6: an unchecked opaqueImports declaration cannot authorize blind reuse", () => {
   const files = {
     "src/registry.ts": "export const load = (f) => import(f);\n",
     "src/a.ts": 'import { load } from "./registry";\nexport const a = load;\n',
@@ -288,5 +290,6 @@ test("E6: a file with an import the parser cannot name is blind — unless `opaq
   const vouched = { ...blindConfig, opaqueImports: [{ match: String.raw`^src/registry\.ts$`, why: "a route carries every file it loads" }] };
   writeFileSync(join(root, ".affected-plan.json"), JSON.stringify(vouched));
   const ok = plan(root, base);
-  assert.deepEqual(ok.document.tests, ["src/b.test.ts"]);
+  assert.deepEqual(ok.document.tests, ["src/a.test.ts", "src/b.test.ts"]);
+  assert.equal(ok.document.inputs["src/a.test.ts"], null);
 });

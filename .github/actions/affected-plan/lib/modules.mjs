@@ -3,11 +3,10 @@
  *
  * Two decisions here decide whether the selection above it is sound.
  *
- * **Type-only imports are not edges.** `import type { X } from "./y"` is erased
- * by the transform before a bundler or vitest ever builds a module graph, so a
- * change to `y` cannot reach the importer through it. Counting it would widen
- * every selection with edges that do not exist at runtime. The parser therefore
- * classifies each statement and the graph drops the type-only ones.
+ * **Whole-statement type imports are not edges.** `import type { X } from
+ * "./y"` is erased. Inline type bindings, however, can leave a runtime import
+ * of the module even when every binding is erased (Node's TypeScript transform
+ * does this). Such statements retain a conservative side-effect edge.
  *
  * **An unresolvable specifier is not silently dropped.** A bare specifier that
  * is not a known workspace package is external (`react`, a published package)
@@ -18,6 +17,8 @@
  */
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, normalize, relative, resolve as pathResolve } from "node:path";
+
+import { globArguments, resolveGlob } from "./globs.mjs";
 
 /** Extensions tried, in order, when a specifier names no file extension. */
 export const EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"];
@@ -63,26 +64,12 @@ const SKIP_DIRS = new Set([
 const FROM_STATEMENT = /(?:^|[\n;])[ \t]*(import|export)\b([^;]*?)\bfrom\s*["']([^"']+)["']/g;
 /** `import "./side-effect"` — no clause, always a value edge. */
 const BARE_IMPORT = /(?:^|[\n;])[ \t]*import\s*["']([^"']+)["']/g;
-/**
- * `import("./x")` and `require("./x")` — dynamic, always a value edge. The
- * space before the parenthesis is legal JavaScript (`import ("./x")`), and a
- * regex that did not allow it dropped the edge SILENTLY — no `unresolved`, no
- * blind file, a closure that looked complete (E6 of the 2026-09-30 audit).
- */
-const DYNAMIC_IMPORT = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
-const REQUIRE_CALL = /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g;
-/**
- * A dependency the parser cannot NAME: `import(source)` or `require(expr)`
- * with anything but a string literal, and Vite's `import.meta.glob(...)`,
- * which binds every file a pattern matches at build time. None of these can
- * be resolved to a path here, so the file has no bounded closure. Recognising
- * only part of the syntax is not proof of no dependency: each is reported as
- * an opaque import, which `buildGraph` records as unresolved — the file is
- * then blind, which widens it and refuses it a skip hash. A METHOD named
- * `import` or `require` (`jiti.import(path)`, `entitlements.require(id)`) is
- * not the keyword, so a preceding `.` (or identifier character) excludes it.
- */
-const OPAQUE_IMPORT = /(?<![.\w$])(?:import|require)\s*\((?!\s*["'])|(?<![.\w$])import\.meta\.glob(?:Eager)?\s*\(/g;
+/** `import("./x")` and `require("./x")` — dynamic, always a value edge. */
+const GLOB_ACCESS = /(?<![\w$.])import\s*\.\s*meta\s*\.\s*glob(?:Eager)?\b/g;
+const DYNAMIC_CALL = /(?<![\w$.])\b(import|require)\s*\(/g;
+// Anything beyond a single plain string argument is opaque to this parser.
+// In particular, computed paths MUST produce a blind dependency, not vanish.
+const LITERAL_ARGUMENT = /^\s*(["'])([^"'\\\r\n]*)\1\s*\)/;
 
 /**
  * One scan, two views of the same source.
@@ -93,7 +80,8 @@ const OPAQUE_IMPORT = /(?<![.\w$])(?:import|require)\s*\((?!\s*["'])|(?<![.\w$])
  * `/* *​/` sequence inside a template literal is not a comment either.
  *
  * `masked` is `code` with every string literal's CONTENT blanked to spaces,
- * the quotes themselves left in place. It exists because import syntax is not
+ * the quotes themselves left in place. Template `${…}` expressions remain
+ * code; only their surrounding text is masked. It exists because import syntax is not
  * only written as code — it is also written ABOUT, inside string literals, by
  * any test that asserts on the shape of another file's source:
  *
@@ -121,7 +109,7 @@ export function scan(source) {
   let i = 0;
   const n = source.length;
   let quote = null; // ' " ` when inside a string
-  let templateDepth = 0;
+  const templateDepth = []; // brace depth inside each open `${…}` expression
   let lastSig = "";
   let lastWord = "";
 
@@ -130,6 +118,16 @@ export function scan(source) {
     const next = source[i + 1];
 
     if (quote) {
+      if (quote === "`" && c === "$" && next === "{") {
+        out += "${";
+        hidden += "${";
+        templateDepth.push(0);
+        quote = null;
+        lastSig = "{";
+        lastWord = "";
+        i += 2;
+        continue;
+      }
       out += c;
       // A newline inside a template literal is a real newline: blank it to a
       // space and every line number after it would shift.
@@ -151,7 +149,6 @@ export function scan(source) {
 
     if (c === '"' || c === "'" || c === "`") {
       quote = c;
-      if (c === "`") templateDepth += 1;
       out += c;
       hidden += c;
       i += 1;
@@ -186,6 +183,19 @@ export function scan(source) {
       continue;
     }
 
+    // Braces in strings, comments and regex literals never reach this branch.
+    // Nested templates push their own expression depth, so closing an inner
+    // `${…}` resumes its text without losing the outer expression's braces.
+    if (templateDepth.length > 0) {
+      if (c === "{") templateDepth[templateDepth.length - 1] += 1;
+      else if (c === "}") {
+        if (templateDepth[templateDepth.length - 1] === 0) {
+          templateDepth.pop();
+          quote = "`";
+        } else templateDepth[templateDepth.length - 1] -= 1;
+      }
+    }
+
     out += c;
     hidden += c;
     if (!/\s/.test(c)) {
@@ -193,7 +203,6 @@ export function scan(source) {
       lastSig = c;
     }
     i += 1;
-    void templateDepth;
   }
   return { code: out, masked: hidden };
 }
@@ -252,25 +261,11 @@ export const stripComments = (source) => scan(source).code;
 const lineAt = (source, index) => source.slice(0, index).split("\n").length;
 
 /**
- * Is this `import`/`export` clause type-only?
- *
- * Two spellings erase: the statement form `import type { A } from …`, and the
- * inline form where EVERY named binding carries `type`. A mixed clause
- * (`import { type A, b }`) keeps a value edge, because `b` survives the
- * transform. A default or namespace binding alongside braces is always a value.
+ * Only a whole-statement `import type`/`export type` is certainly erased.
+ * Inline-only clauses can retain module evaluation after their bindings go.
  */
 export function isTypeOnlyClause(clause) {
-  const text = clause.trim();
-  if (/^type\b/.test(text)) return true;
-  const braces = text.match(/\{([\s\S]*)\}/);
-  if (!braces) return false;
-  const beforeBrace = text.slice(0, text.indexOf("{")).replace(/,/g, "").trim();
-  if (beforeBrace) return false; // default/namespace binding is a value
-  const names = braces[1]
-    .split(",")
-    .map((n) => n.trim())
-    .filter(Boolean);
-  return names.length > 0 && names.every((n) => /^type\s/.test(n));
+  return /^type(?:\s+(?=[A-Za-z_$])|\s*(?=[{*]))/.test(clause.trim());
 }
 
 /**
@@ -288,20 +283,21 @@ export function bindingsOf(clause) {
   const beforeBrace = braces ? text.slice(0, text.indexOf("{")) : text;
   const hasDefault = /[A-Za-z0-9_$]/.test(beforeBrace.replace(/^(import|export)\s*/, "").replace(/,/g, "").trim());
   if (!braces) return { names: [], wildcard: hasDefault };
-  const names = braces[1]
+  const bindings = braces[1]
     .split(",")
     .map((n) => n.trim())
-    .filter((n) => n && !/^type\s/.test(n))
-    .map((n) => n.split(/\s+as\s+/)[0].trim());
-  return { names, wildcard: hasDefault };
+    .filter((n) => n && !/^type\s+(?!as(?:\s|$))/.test(n))
+    .map((n) => {
+      const [name, local = name] = n.split(/\s+as\s+/).map((part) => part.trim());
+      return [name, local];
+    });
+  return { names: bindings.map(([name]) => name), bindings, wildcard: hasDefault || bindings.length === 0 };
 }
 
 /**
  * Every import statement in one file's source.
  *
- * @returns {{spec:string, typeOnly:boolean, wildcard:boolean, names:string[], line:number, text:string, opaque?:boolean}[]}
- *   `opaque` marks a dependency that exists but cannot be named (see
- *   OPAQUE_IMPORT); its `spec` is a description, never a path.
+ * @returns {{spec:string, typeOnly:boolean, wildcard:boolean, names:string[], line:number, text:string}[]}
  */
 export function parseImports(rawSource) {
   // Comments are stripped FIRST. A docblock that explains a dynamic
@@ -315,8 +311,8 @@ export function parseImports(rawSource) {
   const push = (spec, clause, index, forceValue = false) => {
     const line = lineAt(source, index);
     const typeOnly = forceValue ? false : isTypeOnlyClause(clause);
-    const { names, wildcard } = forceValue ? { names: [], wildcard: true } : bindingsOf(clause);
-    out.push({ spec, typeOnly, wildcard, names, line, text: (lines[line - 1] ?? "").trim() });
+    const { names, wildcard, bindings = [] } = forceValue ? { names: [], wildcard: true } : bindingsOf(clause);
+    out.push({ spec, typeOnly, wildcard, names, bindings, clause, line, position: index, text: (lines[line - 1] ?? "").trim() });
   };
   /**
    * Match `re` where it is CODE, and read the specifier from the code.
@@ -333,15 +329,33 @@ export function parseImports(rawSource) {
     for (const m of masked.matchAll(re)) real.add(m.index);
     return [...source.matchAll(re)].filter((m) => real.has(m.index));
   };
-  for (const m of inCode(FROM_STATEMENT)) push(m[3], m[2], m.index + m[0].indexOf(m[1]));
-  for (const m of inCode(BARE_IMPORT)) push(m[1], "", m.index, true);
-  for (const m of inCode(DYNAMIC_IMPORT)) push(m[1], "", m.index, true);
-  for (const m of inCode(REQUIRE_CALL)) push(m[1], "", m.index, true);
-  for (const m of inCode(OPAQUE_IMPORT)) {
-    const line = lineAt(source, m.index);
-    out.push({ spec: `<opaque ${m[0].trim()}…)>`, typeOnly: false, wildcard: true, names: [], line, text: (lines[line - 1] ?? "").trim(), opaque: true });
+  for (const m of inCode(FROM_STATEMENT)) {
+    push(m[3], m[2], m.index + m[0].indexOf(m[1]));
+    const record = out[out.length - 1];
+    record.statement = m[0].slice(m[0].indexOf(m[1]));
+    record.start = m.index + m[0].indexOf(m[1]);
+    record.end = record.start + record.statement.length;
   }
-  return out;
+  for (const m of inCode(BARE_IMPORT)) {
+    const start = m.index + m[0].indexOf("import");
+    push(m[1], "", start, true);
+    const record = out[out.length - 1];
+    record.statement = m[0].slice(m[0].indexOf("import"));
+    record.start = start;
+    record.end = start + record.statement.length;
+  }
+  for (const m of inCode(DYNAMIC_CALL)) {
+    const literal = LITERAL_ARGUMENT.exec(source.slice(m.index + m[0].length));
+    push(literal ? literal[2] : `<computed ${m[1]}>`, "", m.index, true);
+    out[out.length - 1].dynamic = true;
+    if (!literal) out[out.length - 1].unbounded = true;
+  }
+  for (const m of inCode(GLOB_ACCESS)) {
+    const glob = m[0].endsWith("glob") ? globArguments(source.slice(m.index + m[0].length)) : null;
+    push("<import.meta.glob>", "", m.index, true);
+    Object.assign(out[out.length - 1], { dynamic: true, glob: glob ?? true, unbounded: !glob });
+  }
+  return out.sort((a, b) => a.position - b.position).map(({ position, ...record }) => record);
 }
 
 /** Resolve a repo-relative path that may omit its extension or name a folder. */
@@ -510,23 +524,23 @@ export function listSourceFiles(repoRoot, roots) {
  * Build the import graph.
  *
  * @returns {{edges:Map<string,object[]>, unresolved:{file:string,spec:string,line:number}[]}}
- *   `unresolved` lists relative specifiers that did not resolve. A non-empty
- *   list means the graph is incomplete and the caller must widen.
+ *   `unresolved` lists unreadable files, computed imports and internal
+ *   specifiers that did not resolve. The caller must widen those owners.
+ *   Resolved source targets are scanned recursively outside the initial roots;
+ *   data and asset targets stay terminal dependencies.
  */
 export function buildGraph(repoRoot, files, options = {}) {
   const edges = new Map();
   const unresolved = [];
-  const opaqueOk = typeof options.opaqueOk === "function" ? options.opaqueOk : () => false;
-  // A worklist, not a single pass: a resolved target OUTSIDE the listed files
-  // (a root's module importing a helper from a directory no root names) used
-  // to enter the graph as a leaf with no edges of its own, so the closure
-  // stopped one hop short and nobody was told (the P2 beside E6 of the
-  // 2026-09-30 audit). Every resolved target is parsed in turn, so `roots`
-  // decide where the walk STARTS, never where a dependency chain ends.
-  const queue = [...files];
-  const seen = new Set(files);
-  while (queue.length > 0) {
-    const file = queue.shift();
+  const globs = [];
+  // Roots discover entry points; they are not an assertion that dependencies
+  // stop at their boundaries. Follow resolved source files to a fixed point.
+  const pending = [...new Set(files)];
+  const seen = new Set();
+  for (let index = 0; index < pending.length; index += 1) {
+    const file = pending[index];
+    if (seen.has(file)) continue;
+    seen.add(file);
     let source;
     try {
       source = readFileSync(join(repoRoot, file), "utf8");
@@ -535,14 +549,33 @@ export function buildGraph(repoRoot, files, options = {}) {
       continue;
     }
     const out = [];
+    if (!EXTENSIONS.includes(file.slice(file.lastIndexOf(".")))) {
+      edges.set(file, out); // data/config/asset input: a terminal dependency
+      continue;
+    }
     for (const imp of parseImports(source)) {
       if (imp.typeOnly) continue;
-      // An import the parser saw but cannot name (E6): a hole in the graph by
-      // definition, so it is unresolved — never tolerated as an asset — unless
-      // the caller vouches for THIS file (a route already carries what the
-      // dynamic import reaches; see `opaqueImports` in the plan config).
-      if (imp.opaque) {
-        if (!opaqueOk(file)) unresolved.push({ file, spec: imp.spec, line: imp.line });
+      if (imp.unbounded) {
+        unresolved.push({ file, spec: imp.spec, line: imp.line, ...(imp.glob ? { glob: true } : {}) });
+        continue;
+      }
+      if (imp.glob) {
+        const resolved = resolveGlob(repoRoot, file, imp.glob);
+        if (!resolved) unresolved.push({ file, spec: imp.spec, line: imp.line, glob: true });
+        else {
+          globs.push({ file, ...imp, matches: resolved.matches });
+          // Without a built-in byte query, only source modules and JSON have
+          // modeled dependency semantics here. A CSS/Vue/custom transform can
+          // read further files, so its importer must remain unskippable.
+          if (!imp.glob.terminal && resolved.files.some((target) =>
+            !EXTENSIONS.includes(target.slice(target.lastIndexOf("."))) && !target.endsWith(".json"))) {
+            unresolved.push({ file, spec: imp.spec, line: imp.line, glob: true });
+          }
+          for (const target of resolved.files) {
+            out.push({ ...imp, target, terminal: imp.glob.terminal });
+            if (!imp.glob.terminal && EXTENSIONS.includes(target.slice(target.lastIndexOf("."))) && !seen.has(target)) pending.push(target);
+          }
+        }
         continue;
       }
       const aliases = typeof options.aliasesFor === "function" ? options.aliasesFor(file) : (options.aliases ?? []);
@@ -552,9 +585,11 @@ export function buildGraph(repoRoot, files, options = {}) {
       });
       if (target) {
         out.push({ ...imp, target });
-        if (!seen.has(target) && EXTENSIONS.includes(target.slice(target.lastIndexOf(".")))) {
-          seen.add(target);
-          queue.push(target);
+        const insideRepo = target !== ".." && !target.startsWith("../") && !target.startsWith("/");
+        if (!insideRepo) {
+          unresolved.push({ file, spec: imp.spec, line: imp.line });
+        } else if (!asset && EXTENSIONS.includes(target.slice(target.lastIndexOf(".")))) {
+          if (!seen.has(target)) pending.push(target);
         }
       }
       // An unresolved ASSET is tolerated (generated, virtual, plugin-served);
@@ -564,7 +599,7 @@ export function buildGraph(repoRoot, files, options = {}) {
     }
     edges.set(file, out);
   }
-  return { edges, unresolved };
+  return { edges, unresolved, globs };
 }
 
 export { pathResolve };

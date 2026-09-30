@@ -4,7 +4,7 @@
  *
  * Shape (one file per lane, kept in the Actions cache under a per-PR prefix):
  *
- *   { version: "green-manifest-v1", lane: "unit",
+ *   { version: "green-manifest-v2", lane: "unit", inputs: "test-inputs-v2",
  *     entries: { "<test path>": { hash, sha, run } } }
  *
  * `hash` is the test's input hash from the plan (affected-plan lib/inputs.mjs):

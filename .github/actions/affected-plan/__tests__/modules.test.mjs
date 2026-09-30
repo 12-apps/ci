@@ -83,9 +83,9 @@ test("a query suffix selects a transform, not a different module", () => {
   assert.equal(resolveSpecifier(root, "./index.html?raw", "app/x.ts", {}).file, "app/index.html");
 });
 
-test("type-only imports are not edges, mixed clauses are", () => {
+test("whole-statement types erase but inline-only clauses retain module evaluation", () => {
   assert.equal(isTypeOnlyClause(" type { A } "), true);
-  assert.equal(isTypeOnlyClause(" { type A, type B } "), true);
+  assert.equal(isTypeOnlyClause(" { type A, type B } "), false);
   assert.equal(isTypeOnlyClause(" { type A, b } "), false, "`b` survives the transform");
   assert.equal(isTypeOnlyClause(" Thing, { type A } "), false, "a default binding is a value");
 });
@@ -94,6 +94,7 @@ test("bindings name what an importer can observe; wildcards take everything", ()
   assert.deepEqual(bindingsOf(" { a, b as c } ").names, ["a", "b"]);
   assert.equal(bindingsOf(" * as ns ").wildcard, true);
   assert.equal(bindingsOf(" Thing ").wildcard, true, "a default import is opaque here");
+  assert.equal(bindingsOf(" { type A } ").wildcard, true, "erased inline bindings leave a side-effect edge");
 });
 
 test("an import inside a comment is prose, not a dependency", () => {
@@ -152,12 +153,12 @@ test("E6: an import the parser cannot name is UNRESOLVED, never a complete-looki
     "const m = await import(source);",
     "const m = await import(`./locale/${lang}`);",
     "const m = require(path.join(__dirname, name));",
-    'const all = import.meta.glob("../art/*.svg", { eager: true, query: "?raw" });',
+    'const all = import.meta.glob("../art/*.svg", { eager: true, base: "../elsewhere" });',
   ]) {
     const root = fixture({ "a/b.ts": `${line}\n` });
     const { unresolved } = buildGraph(root, ["a/b.ts"], { packages: new Map() });
     assert.equal(unresolved.length, 1, line);
-    assert.match(unresolved[0].spec, /^<opaque /, line);
+    assert.match(unresolved[0].spec, /^<(?:computed |import\.meta\.glob)/, line);
     assert.equal(unresolved[0].line, 1);
   }
   // Prose and string literals still do not count.
@@ -180,10 +181,10 @@ test("buildGraph follows a resolved target OUTSIDE the listed files, so the clos
   assert.ok(edges.has("lib/c.ts"), "…and so was ITS target");
 });
 
-test("E6: a file the caller vouches for keeps its opaque import off the unresolved list", () => {
+test("E6: an unchecked opaque-import waiver cannot hide an unresolved dependency", () => {
   const root = fixture({ "src/registry.ts": "const m = await import(entry.file);\n", "src/other.ts": "const m = await import(entry.file);\n" });
   const { unresolved } = buildGraph(root, ["src/registry.ts", "src/other.ts"], { packages: new Map(), opaqueOk: (f) => f === "src/registry.ts" });
-  assert.deepEqual(unresolved.map((u) => u.file), ["src/other.ts"]);
+  assert.deepEqual(unresolved.map((u) => u.file), ["src/registry.ts", "src/other.ts"]);
 });
 
 test("a published package is external, not a hole in the graph", () => {
@@ -233,4 +234,11 @@ test("a regex whose reading leaves the line consistent wins over a division", ()
   // would sit inside a string.
   const src = "Given(/^\"(.+)\" is on the fridge's shelf$/, go); // c\n";
   assert.equal(stripComments(src), "Given(/^\"(.+)\" is on the fridge's shelf$/, go); \n");
+});
+
+
+test("import records preserve source order across bare and named statements", () => {
+  const records = parseImports('import "./first";\nimport { value as local } from "./second";\n');
+  assert.deepEqual(records.map((record) => record.spec), ["./first", "./second"]);
+  assert.deepEqual(records[1].bindings, [["value", "local"]]);
 });

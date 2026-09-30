@@ -7,10 +7,10 @@ description: >-
   On any repo with a shared entry module that question selects most of the
   suite for almost any diff, because the entry is loaded by nearly everything —
   whether or not the code those tests execute is different afterwards. This
-  asks "is the code reachable from this test different?" instead: it hashes
-  each exported symbol's body, keyed by NAME across the whole diff so a pure
-  relocation is not mistaken for a change, and follows an importer only when it
-  imports a symbol that actually moved.
+  asks "is the code reachable from this test different?": unchanged same-file
+  deferred exports can narrow, while import rewrites and eager module effects
+  propagate through runtime importers. Equal names/bodies in another file do
+  not prove equivalence.
 
   The plan is a FILE, not a count. A plan job that answers only "how many
   shards?" and a lane that re-derives its own selection are two implementations
@@ -18,9 +18,9 @@ description: >-
   lane run `.tests` from it, and there is exactly one selection per run —
   reviewable before it executes and auditable afterwards.
 
-  Fails safe in every direction: an unreadable config, an unresolvable import,
-  an unparseable declaration or an unresolvable import all report
-  `mode=full` so the caller runs everything. The failure this must never
+  Fails safe in every direction: an unreadable config or unknown inventory reports
+  `mode=full` with positive shards. Unresolved imports and unparseable
+  declarations widen their owners and dependent tests. The failure this must never
   produce is a green lane that skipped the test which would have caught the
   bug.
 

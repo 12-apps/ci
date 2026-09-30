@@ -65,6 +65,8 @@ const BYPASS_LABEL = process.env.BYPASS_LABEL || 'ci:allow-zero-tests';
  * cannot double-count either.
  */
 export function parseJUnitTotals(xml) {
+  // Report comments and captured output can contain XML-looking prose.
+  xml = xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>/g, ' ');
   const rootMatch = xml.match(/<testsuites\b[^>]*\btests=["'](\d+)["']/i);
   if (rootMatch && rootMatch[1] !== undefined) {
     return { tests: Number.parseInt(rootMatch[1], 10), source: 'testsuites' };
@@ -93,6 +95,55 @@ export function parseJUnitTotals(xml) {
   return null;
 }
 
+/** Count executed cases, not the skipped cases included in JUnit's `tests`. */
+export function parseJUnitExecution(xml) {
+  const clean = xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>/g, ' ');
+  const totals = parseJUnitTotals(clean);
+  if (!totals) return null;
+  const cases = [...clean.matchAll(/<testcase\b[^>]*?\/>|<testcase\b[^>]*>[\s\S]*?<\/testcase\s*>/gi)];
+  const openings = [...clean.matchAll(/<testcase\b/gi)].length;
+  if (cases.length !== openings) return null; // truncated report
+  const skippedCases = cases.filter(([body]) => /<(?:skipped|disabled)\b/i.test(body)).length;
+  let executed = cases.length ? cases.length - skippedCases : totals.tests;
+
+  const excluded = summaryExclusions(clean);
+  if (excluded === null) return null;
+  if (!Number.isSafeInteger(totals.tests) || excluded > totals.tests) return null;
+  executed = Math.min(executed, totals.tests - excluded);
+  return { ...totals, executed };
+}
+
+/**
+ * A root `tests` total does not erase its children's skip evidence. Nested
+ * suite summaries overlap, so take the maximum of a parent's declared count
+ * and its children's sum instead of counting the same skipped case twice.
+ */
+function summaryExclusions(xml) {
+  const stack = [{ name: '', declared: 0, children: 0 }];
+  const close = () => {
+    const current = stack.pop();
+    stack.at(-1).children += Math.max(current.declared, current.children);
+  };
+  for (const [tag, closing, rawName] of xml.matchAll(/<(\/?)(testsuites?)\b[^>]*>/gi)) {
+    const name = rawName.toLowerCase();
+    if (closing) {
+      if (stack.length === 1 || stack.at(-1).name !== name) return null;
+      close();
+      continue;
+    }
+    let declared = 0;
+    for (const attribute of ['skipped', 'disabled']) {
+      const value = tag.match(new RegExp(`\\s${attribute}\\s*=["']([^"']*)["']`, 'i'))?.[1];
+      if (value === undefined) continue;
+      if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) return null;
+      declared += Number(value);
+    }
+    stack.push({ name, declared, children: 0 });
+    if (/\/\s*>$/.test(tag)) close();
+  }
+  return stack.length === 1 ? stack[0].children : null;
+}
+
 /** Every *.xml under `target`, or `[target]` when it is a file. Missing → []. */
 export function collectReports(target) {
   if (!existsSync(target)) return [];
@@ -116,15 +167,15 @@ function fail(title, body) {
 function totalTests(reports) {
   let total = 0;
   for (const report of reports) {
-    const totals = parseJUnitTotals(readFileSync(report, 'utf-8'));
+    const totals = parseJUnitExecution(readFileSync(report, 'utf-8'));
     if (totals === null) {
       fail(
         `${LANE} JUnit report unparseable`,
-        `Found no totals and no \`<testcase>\` elements in ${report}. The junit ` +
-          'reporter format may have changed; inspect the file and update parseJUnitTotals.',
+        `No trustworthy executed-test count in ${report}. The junit ` +
+          'report may be incomplete or its totals invalid; inspect the report.',
       );
     }
-    total += totals.tests;
+    total += totals.executed;
   }
   return total;
 }
@@ -133,7 +184,7 @@ function reportZeroSignal(count) {
   process.stderr.write(
     [
       `::error title=${LANE} lane executed zero tests::${count} JUnit report(s) ` +
-        'totalled 0 test cases. Affected-test selection resolved no specs for this diff.',
+        'totalled 0 executed test cases (skipped/disabled cases are not execution).',
       '',
       'This usually means one of:',
       '  1. The change is not covered by this lane. Add or extend a test that exercises it.',
