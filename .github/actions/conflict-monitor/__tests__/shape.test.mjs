@@ -3,7 +3,8 @@ import { after, test } from "node:test";
 
 import { analyzeMerge, prOfSubject } from "../lib/analyze.mjs";
 import { parseConfig } from "../lib/config.mjs";
-import { conflictKinds, diff3Hunks, hunkShape } from "../lib/shape.mjs";
+import { parseMergeTreeZ } from "../lib/git.mjs";
+import { diff3Hunks, hunkShape } from "../lib/shape.mjs";
 import { lines, makeRepo } from "./fixture.mjs";
 
 // The shape is what the whole report is sorted by — "avoidable" or "two
@@ -104,27 +105,27 @@ test("diff3Hunks needs all four markers in order, so a stray ======= is not a hu
   assert.deepEqual(diff3Hunks(blob), [{ ours: ["a"], base: ["k"], theirs: ["b"] }]);
 });
 
-test("conflictKinds reads only the messages about the path asked for", () => {
-  const msgs = "CONFLICT (content): Merge conflict in a.txt\nCONFLICT (add/add): Merge conflict in b[x].txt\n";
-  assert.deepEqual([...conflictKinds(msgs, "a.txt")], ["content"]);
-  assert.deepEqual([...conflictKinds(msgs, "b[x].txt")], ["add/add"]);
-});
-
 test("prOfSubject takes the LAST (#N): a squash subject may quote another PR first", () => {
   assert.equal(prOfSubject("fix: revert (#10) properly (#12)"), 12);
   assert.equal(prOfSubject("chore: no number"), null);
 });
 
-test("a path that is a suffix of another path does not borrow its kind", () => {
-  const msgs = [
-    "CONFLICT (add/add): Merge conflict in new.txt",
-    "CONFLICT (content): Merge conflict in docs/new.txt",
-    "CONFLICT (modify/delete): package.json deleted in HEAD and modified in feat.  Version feat of package.json left in tree.",
-    "CONFLICT (content): Merge conflict in apps/package.json",
-  ].join("\n");
-  assert.deepEqual([...conflictKinds(msgs, "new.txt")], ["add/add"]);
-  assert.deepEqual([...conflictKinds(msgs, "docs/new.txt")], ["content"]);
-  assert.deepEqual([...conflictKinds(msgs, "package.json")], ["modify/delete"]);
+test("each kind is attached to its own path by git, so a suffix path cannot borrow it", () => {
+  const Z = "\0";
+  const out = ["a".repeat(40), "new.txt", "docs/new.txt", "", "1", "new.txt", "CONFLICT (add/add)", "CONFLICT (add/add): Merge conflict in new.txt\n",
+    "1", "docs/new.txt", "CONFLICT (contents)", "CONFLICT (content): Merge conflict in docs/new.txt\n",
+    "1", "docs/new.txt", "Auto-merging", "Auto-merging docs/new.txt\n", ""].join(Z);
+  const { tree, files, kinds } = parseMergeTreeZ(out);
+  assert.equal(tree, "a".repeat(40));
+  assert.deepEqual(files, ["new.txt", "docs/new.txt"]);
+  assert.deepEqual([...kinds.get("new.txt")], ["add/add"]);
+  assert.deepEqual([...kinds.get("docs/new.txt")], ["content"]);
+});
+
+test("a path holding a quote or a backslash comes back as itself", () => {
+  const { records } = diverge({ 'q"x.txt': lines("a"), "b\\s.txt": lines("a") }, { 'q"x.txt': lines("f"), "b\\s.txt": lines("f") }, { 'q"x.txt': lines("m"), "b\\s.txt": lines("m") });
+  assert.deepEqual(records.map((r) => [r.file, r.shape]).sort(), [["b\\s.txt", "edit/edit"], ['q"x.txt', "edit/edit"]]);
+  assert.ok(records.every((r) => r.culprits.length === 1), "the culprit log found the raw paths");
 });
 
 test("a CRLF file's hunks are read, and nested 9-character markers are content", () => {

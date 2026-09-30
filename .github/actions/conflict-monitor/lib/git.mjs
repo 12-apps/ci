@@ -52,30 +52,58 @@ export function countRange(include, exclude, cwd) {
  * hunk can be read back without a second merge.
  */
 const OID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+const KIND = /^CONFLICT \(([^)]+)\):/;
+
+/**
+ * Parse `merge-tree --write-tree --name-only -z` output.
+ *
+ * `-z` is what keeps a path intact: without it git C-quotes any path holding
+ * a `"`, a `\` or a non-ASCII byte, and the quoted form matches nothing later
+ * (the blob, the log, the bucket globs). It also hands back each message WITH
+ * the paths it is about, so a conflict's kind is attached to its path by git
+ * itself rather than found by searching message text for the path.
+ *
+ *   <tree> NUL <path> NUL … NUL NUL
+ *   ( <count> NUL <path> × count <type> NUL <message> NUL )*
+ *
+ * The kind is read from the MESSAGE's `CONFLICT (<kind>):` — the type field
+ * spells content conflicts `contents`, the message `content`.
+ */
+export function parseMergeTreeZ(out) {
+  const parts = out.split("\0");
+  const tree = (parts[0] ?? "").trim();
+  let i = 1;
+  const files = [];
+  while (i < parts.length && parts[i] !== "") files.push(parts[i++]);
+  i += 1;
+  const kinds = new Map();
+  while (i < parts.length) {
+    if (parts[i] === "") break;
+    const n = Number(parts[i]);
+    if (!Number.isInteger(n) || n < 0) throw new Error(`merge-tree -z: unexpected message header "${parts[i]}"`);
+    const paths = parts.slice(i + 1, i + 1 + n);
+    const message = parts[i + 2 + n] ?? "";
+    const kind = KIND.exec(message)?.[1];
+    if (kind) for (const p of paths) (kinds.get(p) ?? kinds.set(p, new Set()).get(p)).add(kind);
+    i += n + 3;
+  }
+  return { tree, files, kinds };
+}
 
 export function mergeTree(ours, theirs, cwd) {
-  // `core.quotePath=false`: a non-ASCII path is printed as itself, not as a
-  // C-quoted `"caf\303\251.md"` that no later lookup (the blob, the log, the
-  // bucket globs) would recognise.
   const { out, status } = git(
-    ["-c", "merge.conflictStyle=diff3", "-c", "core.quotePath=false", "merge-tree", "--write-tree", "--name-only", ours, theirs],
+    ["-c", "merge.conflictStyle=diff3", "merge-tree", "--write-tree", "--name-only", "-z", ours, theirs],
     { cwd, ok: [0, 1] },
   );
-  const [head, ...rest] = out.split("\n");
-  const tree = head.trim();
+  const { tree, files, kinds } = parseMergeTreeZ(out);
   // Exit 1 is ALSO what git returns for "not something we can merge", with
   // no tree at all. Read as a conflict with no files, that would reach the
   // probe as "clean" and mark a real conflict resolved — so a status-1 answer
   // without a tree, or without a conflicted path, is an error.
   if (!OID.test(tree)) throw new Error(`git merge-tree ${ours} ${theirs} printed no tree (exit ${status})`);
-  if (status === 0) return { conflicted: false, tree, files: [], messages: "" };
-  // `--name-only` output: tree oid, the conflicted paths, a blank line, then
-  // the informational messages.
-  const blank = rest.indexOf("");
-  const files = (blank === -1 ? rest : rest.slice(0, blank)).filter(Boolean);
-  const messages = blank === -1 ? "" : rest.slice(blank + 1).join("\n");
+  if (status === 0) return { conflicted: false, tree, files: [], kinds: new Map() };
   if (!files.length) throw new Error(`git merge-tree ${ours} ${theirs} reported a conflict and no conflicted path`);
-  return { conflicted: true, tree, files: [...new Set(files)], messages };
+  return { conflicted: true, tree, files: [...new Set(files)], kinds };
 }
 
 export function blobAt(tree, path, cwd) {

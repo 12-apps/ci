@@ -21,18 +21,6 @@
  * name instead of being folded into a bucket that would hide it.
  */
 
-const ESCAPE = /[.*+?^${}()|[\]\\]/g;
-
-/** Every `CONFLICT (<kind>)` git printed about `path`. */
-export function conflictKinds(messages, path) {
-  // The path must stand as a whole word of the message: preceded by a space
-  // and followed by a space, a sentence's punctuation or the end of the line.
-  // Unbounded, `new.txt` would also read the kind of `docs/new.txt`.
-  const p = path.replace(ESCAPE, "\\$&");
-  const re = new RegExp(`CONFLICT \\(([^)]+)\\): (?:[^\\n]* )?${p}(?=[ ,;:)]|\\.?\\r?$)`, "gm");
-  return new Set([...messages.matchAll(re)].map((m) => m[1]));
-}
-
 /**
  * diff3 hunks of a conflicted blob: `{ ours, base, theirs }`, each an array of
  * lines. Only complete marker groups count; a file whose own content contains
@@ -69,15 +57,16 @@ export function hunkShape({ ours, base, theirs }) {
 const sameLines = (a, b) => a.length === b.length && a.every((l, i) => l === b[i]);
 
 /**
- * The shape of one conflicted file. `blob` is the file as the merge wrote it
- * (with diff3 markers); it is only read for a `content` conflict.
+ * The shape of one conflicted file. `kinds` is the set of conflict kinds git
+ * attached to the path (lib/git.mjs parses them out of `merge-tree -z`);
+ * `blob` is the file as the merge wrote it, with diff3 markers, read only for
+ * a `content` conflict.
  *
  * One edit/edit hunk makes the file edit/edit: a single hunk where both sides
  * rewrote the same lines is enough to need a human, whatever the other hunks
  * look like.
  */
-export function fileShape(messages, path, blob) {
-  const kinds = conflictKinds(messages, path);
+export function fileShape(kinds, blob) {
   if (!kinds.has("content")) return kinds.size ? [...kinds].sort().join(",") : "unknown";
   const shapes = diff3Hunks(blob).map(hunkShape);
   if (shapes.includes("edit/edit")) return "edit/edit";

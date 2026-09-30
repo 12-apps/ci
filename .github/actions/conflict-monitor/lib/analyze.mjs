@@ -46,7 +46,7 @@ export function analyzeMerge({ mainSide, branchSide, config, baseTip, cwd, withC
   const exists = (p) => pathExists(baseTip, p, cwd);
   return merge.files.map((file) => ({
     file,
-    shape: fileShape(merge.messages, file, blobAt(merge.tree, file, cwd)),
+    shape: fileShape(merge.kinds.get(file) ?? new Set(), blobAt(merge.tree, file, cwd)),
     bucket: bucketOf(file, config, exists),
     culprits: withCulprits ? culprits(mainSide, branchSide, file, cwd) : [],
   }));
