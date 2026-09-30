@@ -161,3 +161,14 @@ controls, zero skipped, and actionlint passed. The reviewer confirmed all nine
 monorepo-test job runner choices, both self-test steps and the original parser
 logic are preserved; only the already-reviewed non-PR zero-test advice differs
 in the parser file. No reconciliation regression was found.
+
+**Combined hosted proof (2026-09-30):** reconciled source head
+`cce2568229fd0c13fddbb6c7e63c55bddf8d2e1c` passed all nine recorded checks,
+including CodeQL and runner image smoke, in
+[Self Tests 36746315517](https://github.com/12-apps/ci/actions/runs/36746315517).
+The intentionally empty matrix job was skipped.
+[Action script tests 109993289028](https://github.com/12-apps/ci/actions/runs/36746315517/job/109993289028)
+actually logged **24/24 guard**, **17/17 runner override** and **31/31 full-suite
+wiring** checks, all with zero skipped, proving both changes coexist in the
+hosted tree. This documentation-only addendum must pass its own final-head
+checks before merge; the compatibility prerequisite still applies.
