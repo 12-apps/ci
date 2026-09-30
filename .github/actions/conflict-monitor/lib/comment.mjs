@@ -13,6 +13,8 @@
  */
 import { createHash } from "node:crypto";
 
+import { LIMITS, MERGED, RESOLVED as OVERLAP_RESOLVED, UNCHECKED, compact, fold, hiddenLines, partnersOf, stateFor, visible } from "./overlap-state.mjs";
+
 export const MARKER = "<!-- 12-apps/ci conflict-monitor -->";
 const STATE = /<!-- conflict-monitor:state (\S+) -->/;
 export const RESOLVED = "resolved";
@@ -110,4 +112,82 @@ export function decide(records, existing, ctx) {
   }
   if (existing && current !== RESOLVED) return { action: "update", body: renderResolved(ctx) };
   return { action: "none" };
+}
+
+const OVERLAP_HINT = {
+  "same lines": "both PRs changed the same lines",
+  "same spot": "both PRs added lines at the same spot",
+  "both add": "both PRs create this file",
+  "deletes or moves": "one PR deletes or moves a file the other edits",
+};
+const listOf = (items, word) => (items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} ${word} ${items[items.length - 1]}`);
+/** Every merged partner on one line: the list is bounded by LIMITS.partners, the lines would not be. */
+const mergedLine = (partners) =>
+  partners.length ? [`* ${listOf(partners.map((n) => `#${n}`), "and")} merged. If this PR now conflicts, the conflict comment lists the files.`] : [];
+
+/**
+ * One table row of the overlap comment. The path is already `shownPath`'s
+ * (lib/overlap-state.mjs: no line break or control character survives it, so
+ * nothing can end the row or the code span); the kind goes through `visible`
+ * as well, because this renderer never trusts that its input was validated.
+ * E0's own rows (renderConflict) are not changed by any of this.
+ */
+export const overlapRow = (partner, path, kind) => `| #${partner} | ${codeOf(visible(path))} | ${esc(visible(kind))} |`;
+
+function overlapBody(view, seen, { base, baseSha }) {
+  const state = stateFor(view);
+  const head = hiddenLines(view, seen);
+  const checked = `Checked against \`${base}\` at \`${baseSha.slice(0, 7)}\`.`;
+  if (state === OVERLAP_RESOLVED) return [...head, "### No open PR overlaps this one any more", "", checked].join("\n");
+  const merged = mergedLine(partnersOf(view.groups.filter((g) => g.merged)));
+  if (state === MERGED) return [...head, "### Every PR that overlapped this one has merged", "", checked, "", ...merged].join("\n");
+  const open = view.groups.filter((g) => !g.merged);
+  const table = [];
+  for (const g of open) {
+    table.push(...g.rows.map((r) => overlapRow(g.partner, r.path, r.kind)));
+    if (g.total > g.rows.length) table.push(`| #${g.partner} | ${g.total - g.rows.length} more file(s) | |`);
+  }
+  const restOpen = view.rest?.open ?? 0;
+  if (restOpen) table.push(`| ${restOpen} more PR(s) | | |`);
+  const hints = [...new Set(open.flatMap((g) => g.rows.map((r) => r.kind)))].filter((k) => OVERLAP_HINT[k]).map((k) => `**${k}**: ${OVERLAP_HINT[k]}.`);
+  const partners = [...partnersOf(open).map((n) => `#${n}`), ...(restOpen ? [`one of ${restOpen} more`] : [])];
+  return [
+    ...head,
+    "### Another open PR overlaps this one",
+    "",
+    `${checked} Whichever of the two merges second will conflict on these files:`,
+    "",
+    "| PR | file | overlap |",
+    "|---|---|---|",
+    ...table,
+    "",
+    ...(hints.length ? [hints.join(" "), ""] : []),
+    ...(merged.length ? [...merged, ""] : []),
+    `No action needed. If ${listOf(partners, "or")} merges first, the conflict comment will list what to resolve.`,
+  ].join("\n");
+}
+
+/**
+ * The overlap comment (lib/overlap-state.mjs keeps its memory). Partners are
+ * `#N` only — a title is attacker-chosen on a fork — and there is no
+ * @mention: `#N` cross-references the partner's timeline, which is the point.
+ * It asks for nothing. The only line of advice says so.
+ *
+ * The body is bounded: the groups are folded and compacted (LIMITS) before a
+ * character is written, and should the result still pass LIMITS.body, it is
+ * written again with no file rows at all — counts only, which cannot.
+ */
+export function renderOverlap(plan, ctx) {
+  if (plan.unchecked) {
+    return [
+      ...hiddenLines({ groups: [], rest: null }, [], UNCHECKED),
+      "### This PR is no longer checked for overlaps",
+      "",
+      `Its base is not \`${ctx.base}\`, or its head branch is one the configuration ignores, so it is not paired with any PR.`,
+    ].join("\n");
+  }
+  const view = compact(fold(plan.groups), overlapRow);
+  const body = overlapBody(view, plan.seen, ctx);
+  if (body.length <= LIMITS.body) return body;
+  return overlapBody({ groups: view.groups.map((g) => ({ ...g, rows: [] })), rest: view.rest }, plan.seen, ctx);
 }

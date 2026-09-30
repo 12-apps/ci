@@ -135,7 +135,8 @@ jobs:
       # precedence, a base whose history was rewritten, a stacked branch, and
       # the ONE-comment rule against a stubbed GitHub. The shape reader is the
       # part that would fail silently — a message format it stopped parsing
-      # files every conflict under `code: other`, and nothing turns red.
+      # files every conflict under `code: other`, and nothing turns red. The
+      # overlap mode's pairs, kinds and comment state table run here too.
       - name: conflict-monitor
         shell: bash
         run: node --test .github/actions/conflict-monitor/__tests__/*.test.mjs

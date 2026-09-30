@@ -2184,6 +2184,169 @@ which is not proof they touched the conflicting lines.
 
 ---
 
+# Consuming the Conflict monitor's overlap warning
+
+The probe says a PR conflicts AFTER the base has moved. The overlap mode says
+it one step earlier, to two open PRs at once: "#Y and this PR change the same
+lines of `path`, and whichever merges second will conflict". It merges every
+pair of open PRs against each other with `git merge-tree`, the way the real
+merge would go, so a warning is a predicted conflict, not a guess from file
+names.
+
+* **Who is told:** both PRs of a pair. Each carries ONE overlap comment,
+  beside the probe's conflict comment and never inside it, listing every
+  partner, path and kind: `same lines`, `same spot` (both append at one
+  place), `both add`, `deletes or moves`, or git's own kind verbatim
+  (`distinct types`, `unknown` for a binary file).
+* **What it asks for:** nothing. It is information; its one line of advice
+  reads "No action needed. If #Y merges first, the conflict comment will list
+  what to resolve."
+* **When it writes:** only when the set of (partner, path, kind) changes. A
+  partner the comment has never named gets a FRESH comment (the old one is
+  deleted after the new one is posted), because an edit notifies nobody. A
+  partner that merged becomes a "#Y merged" row. When nothing is left, the
+  comment turns to "No open PR overlaps this one any more". A PR that stops
+  being paired, because its base was retargeted or its head is newly ignored,
+  has its comment turned once to "no longer checked". This is given up in one
+  case: two PRs that overlap only each other and stop being paired in the
+  same run keep their last comment. The same is true of a PR that only an
+  untrusted (forged or corrupted) comment names as a partner, because the
+  sweep follows trusted comments only.
+* **What it leaves out:** a pair that only shares a file and merges cleanly
+  (job summary and log line only); a path or bucket you ignore; a PR whose
+  head branch you ignore; a stack, meaning a PR whose base is another PR's
+  branch, or a head that holds another open PR's commits; and a file the PR
+  ALREADY conflicts on with the base, which is the probe's.
+
+## A. Caller workflow: a third job in `.github/workflows/conflict-monitor.yml`
+
+```yaml
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, closed]
+  schedule:
+    - cron: '17 11 * * 1'
+  workflow_dispatch: {}
+
+jobs:
+  probe:
+    # Unchanged, except that it now keeps to `synchronize` among the PR events.
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+       github.event.action == 'synchronize' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.actor != 'dependabot[bot]')
+    # …as in "Consuming the Conflict monitor"
+
+  overlap:
+    if: >-
+      github.event_name == 'push' || github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.actor != 'dependabot[bot]')
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: 12-apps/ci/.github/workflows/conflict-overlap.yml@v2
+```
+
+`conflict-overlap.yml` takes `config`, `base`, `dry-run` and `node-version`,
+with the probe's defaults. It writes OTHER PRs' comments, so it runs in one
+repository-wide concurrency group (`conflict-overlap-<repo>`), never cancelled
+mid-run. A newer run replacing a pending one shows as a **cancelled** check.
+That is expected and not a failure, because every run recomputes every pair.
+
+Every run is a full recompute, so the next run of any kind bounds how stale a
+comment can be. `closed` is on the list because a close without a merge moves
+nothing on the base. Like the probe, it checks out the BASE and executes
+nothing from a PR.
+
+## B. The `overlap` key in `.github/conflict-monitor.json`
+
+Nothing happens until the key exists: the job exits 0 having read and written
+nothing. So the PR that adds the key is green on arrival, since its own run
+reads the BASE's config.
+
+```json
+{
+  "buckets": [ … ],
+  "overlap": {
+    "comment": true,
+    "ignoreBuckets": ["route table", "ADR index", "ledgers"],
+    "ignorePaths": ["pnpm-lock.yaml", "**/*.generated.ts"],
+    "ignoreHeads": ["renovate/", "chore/post-merge-regen-"]
+  }
+}
+```
+
+| key | default | |
+|---|---|---|
+| `comment` | `true` | `false` is the kill switch: the job summary and the log line only, no comment written |
+| `ignoreBuckets` | `[]` | names of buckets declared in `buckets`, matched as they classify (first rule wins, `absent` honoured). Name the files a job regenerates; a bucket two PRs really do edit by hand is a real overlap |
+| `ignorePaths` | `[]` | globs, as in `buckets` |
+| `ignoreHeads` | `[]` | head-branch PREFIXES whose PRs are never paired (dependency bots, a regeneration PR) |
+
+The probe and the report never read the block. A bad one, such as an unknown
+key or a bucket that is not declared, fails the overlap job naming the reason,
+and leaves the other two modes on the same file untouched.
+
+## C. What it records, and what it costs
+
+Each run writes the pairs to the job summary, and prints ONE machine-readable
+line to the log, which you can read back through `GET /actions/jobs/{id}/logs`:
+
+```
+overlap-pairs {"base":"<sha>","open":8,"reads":19,"rateUsed":212,"rateLimit":1000,"r2":[[2281,2283,["docs/x.md"]]],"r1":[[2274,2281]],"skipped":[],"failedPairs":[]}
+```
+
+`r2` holds the predicted conflicts, which are commented; `r1` holds the pairs
+that share a file and merge cleanly.
+
+A run reads:
+
+* one PR-list page per 100 open PRs, whatever their base;
+* each paired PR's files and comments;
+* the comments of an open PR it does not pair, but only when a paired PR's
+  comment still names it as a partner. That happens once, in the run where
+  the PR stops being paired;
+* one `GET /pulls/{n}` for a partner a comment still shows as open that has
+  left the open list, at most 25 per run. Each answer settles that partner:
+  it becomes a merged row, which is final and never read again, or it is
+  dropped. Only a partner whose read fails is asked again. The order rotates
+  by run, so partners that keep failing cannot hold the others back. When the
+  bound is hit, the rest keep their rows until a later run, and the log says
+  so. In the steady state, a run makes no lookups at all.
+
+It writes once per create or edit, and twice per re-post. The `GITHUB_TOKEN`
+budget is shared by every workflow in the repository, so `rateUsed` is worth
+watching.
+
+A comment stays under GitHub's 65,536-character limit however large the
+overlap is:
+
+* it shows at most 100 file rows, all from open partners and within a
+  character budget, and counts the rest (`| #Y | 312 more file(s) |`);
+* it tracks up to 200 partners, each with a count and a hash of all its rows.
+  Past 200 partners on ONE PR, the rest are folded into a single count, which
+  is accepted. Folded partners are not carried through a run that cannot read
+  them, and are dropped rather than shown as merged;
+* paths are cut at 256 characters, and control characters, a newline among
+  them, are shown as visible symbols;
+* the digest covers every row, shown or not, so a change among the hidden rows
+  still updates the comment.
+
+A PR whose head, files or comments cannot be read is skipped, and its partners
+keep what their comments already said about it. A failed write fails the run.
+
+The overlap comment is found by its marker AND the `github-actions[bot]`
+login, and the state it carries is validated before use. A comment anybody
+else writes, marker or not, is neither edited nor trusted.
+
+---
+
 # Consuming Post-merge regeneration
 
 Everything a repository can derive once a pull request has merged is derived

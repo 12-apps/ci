@@ -1,0 +1,105 @@
+name: Conflict overlap (reusable)
+
+# Tell two open PRs, before either merges, that whichever merges second will
+# conflict — on both PRs. The mechanism is .github/actions/conflict-monitor
+# (`mode: overlap`; overlap.mjs and lib/overlap*.mjs argue the rules); this file
+# is the checkout, the grant and the concurrency around it. Its siblings are
+# conflict-probe.yml (the PR already conflicts with the base) and
+# conflict-report.yml (the history).
+#
+# WHY A THIRD FILE, NOT A FLAG ON THE PROBE: this mode writes OTHER PRs'
+# comments, so it must run under ONE repository-wide concurrency group; the
+# probe's group is per PR. And it does nothing until the caller's config has
+# an `overlap` key — the consumer PR that adds the key is green on arrival,
+# because this workflow checks out the BASE, whose config has no key yet.
+#
+# A consuming repo adds (see CONSUMING.md, "Consuming the Conflict monitor's
+# overlap warning"):
+#
+#   on:
+#     push:
+#       branches: [main]
+#     pull_request:
+#       types: [opened, reopened, synchronize, ready_for_review, closed]
+#     workflow_dispatch: {}
+#   permissions:
+#     contents: read
+#   jobs:
+#     overlap:
+#       if: >-
+#         github.event_name == 'push' || github.event_name == 'workflow_dispatch' ||
+#         (github.event_name == 'pull_request' &&
+#          github.event.pull_request.head.repo.full_name == github.repository &&
+#          github.actor != 'dependabot[bot]')
+#       permissions:
+#         contents: read
+#         pull-requests: write
+#       uses: 12-apps/ci/.github/workflows/conflict-overlap.yml@v2
+#
+# Every run is a full recompute over every open PR, whatever event started it,
+# so the next run of any kind bounds how stale a comment can be. A `closed`
+# event is on the list because a close without a merge moves nothing on the
+# base, and the partner's comment should still say so. A fork's or
+# Dependabot's `pull_request` token is read-only; the next push to the base
+# writes their comments instead.
+
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: "Path to the caller's group config; its `overlap` key turns the mode on."
+        type: string
+        required: false
+        default: '.github/conflict-monitor.json'
+      base:
+        description: 'Base branch. Empty: the repository default branch.'
+        type: string
+        required: false
+        default: ''
+      dry-run:
+        description: 'Log what would be written; write nothing.'
+        type: boolean
+        required: false
+        default: false
+      node-version:
+        description: 'Node version the scripts run on.'
+        type: string
+        required: false
+        default: '24'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  overlap:
+    name: Overlapping open PRs
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    # ONE group per repository, never cancelled mid-write: this job edits the
+    # comments of every open PR, and two runs interleaving would each miss the
+    # other's comment. GitHub keeps one running and one PENDING run and a newer
+    # run replaces the pending one — harmless, because every run recomputes
+    # everything. A replaced run shows as a cancelled check; that is expected.
+    concurrency:
+      group: conflict-overlap-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The pairs are merged against the base's whole line; the BASE is
+          # checked out, never a PR head — nothing from a PR's tree runs.
+          fetch-depth: 0
+          ref: ${{ inputs.base || github.event.repository.default_branch }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - uses: 12-apps/ci/.github/actions/conflict-monitor@v2
+        with:
+          mode: overlap
+          config: ${{ inputs.config }}
+          base: ${{ inputs.base }}
+          dry-run: ${{ inputs.dry-run }}

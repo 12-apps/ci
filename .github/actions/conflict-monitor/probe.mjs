@@ -32,7 +32,7 @@ import { git, revParse } from "./lib/git.mjs";
 import { githubClient } from "./lib/github.mjs";
 
 const log = (msg) => console.log(`[conflict-monitor] ${msg}`);
-const LOCAL_REF = (n) => `refs/conflict-monitor/pr/${n}`;
+export const LOCAL_REF = (n) => `refs/conflict-monitor/pr/${n}`;
 
 /** Fetch every PR head into a local ref, in batches; returns the numbers that failed. */
 export function fetchHeads(numbers, { cwd, remote = "origin", batch = 50 } = {}) {
