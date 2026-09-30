@@ -46,6 +46,7 @@ the hash (or a non-hermetic test for the always-run list) to fix first.
 | no manifest, unreadable manifest, another lane's manifest | nothing skipped |
 | plan without `inputs` (lane did not opt in), plan not `narrowed` | nothing skipped |
 | test with `null` inputs (unresolved import in its closure) | runs |
+| test whose closure reaches a file git does not track (a workspace package's built `dist/` present at plan time wins over its `src/` — plan on a CLEAN checkout, before any install or build) | runs; the plan log says `N with a closure file git does not track` |
 | test on the always-run list, or the list cannot be read | runs (all run, if the list is unreadable) |
 | lane result is anything but `success` | nothing recorded |
 | push / dispatch runs | the workflow never calls this: the full suite skips nothing |
