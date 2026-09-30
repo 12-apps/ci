@@ -79,6 +79,13 @@ outputs:
   would-skip:
     description: '`filter`: tests that would have been dropped (shadow).'
     value: ${{ steps.filter.outputs.would-skip }}
+  filtered:
+    description: >-
+      `filter`: `true` when the plan document was REWRITTEN (enforce dropped
+      at least one test), so the caller sizes its matrix from `shard-total`
+      rather than from the unfiltered plan; anything else means the plan on
+      disk is the one `affected-plan` wrote.
+    value: ${{ steps.filter.outputs.filtered }}
   recorded:
     description: '`record`: `true` when a manifest was written.'
     value: ${{ steps.record.outputs.recorded }}

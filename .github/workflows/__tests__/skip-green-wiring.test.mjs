@@ -115,3 +115,26 @@ for (const lane of LANES) {
     assert.match(verdict, new RegExp(`- name: Save the lane verdict\\n\\s+if: \\$\\{\\{ needs\\.${lane}-plan\\.outputs\\.fingerprint != '' \\}\\}`));
   });
 }
+
+// Every output a workflow reads off a composite action must be one the action
+// DECLARES. An undeclared one is not an error anywhere: the expression reads
+// as empty, and a bash `if` on it silently takes the other branch. Measured on
+// future-pay run 36672278601: `skip-green` wrote `filtered=true` to
+// GITHUB_OUTPUT, the action had no `filtered:` under `outputs:`, and the plan
+// job saw `SKIP_GREEN_FILTERED:` empty — an enforce that dropped a test still
+// sized its matrix from the unfiltered count.
+const WORKFLOWS = fileURLToPath(new URL("../", import.meta.url));
+const read = (file) => readFileSync(path.join(WORKFLOWS, file), "utf8");
+for (const [action, stepId] of [["skip-green", "skipgreen"], ["lane-verdict", "lane-verdict"]]) {
+  test(`every steps.${stepId}.outputs.* the workflows read is declared by the ${action} action`, () => {
+    const actionYml = readFileSync(path.join(WORKFLOWS, `../actions/${action}/action.yml`), "utf8");
+    const declared = new Set([...actionYml.slice(actionYml.indexOf("\noutputs:"), actionYml.indexOf("\nruns:")).matchAll(/^  ([a-z][a-z-]*):\s*$/gm)].map((m) => m[1]));
+    const used = new Set();
+    for (const file of ["monorepo-tests.yml", "monorepo-static.yml", "package-gates.yml"]) {
+      for (const m of read(file).matchAll(new RegExp(`steps\\.${stepId}\\.outputs\\.([a-z][a-z-]*)`, "g"))) used.add(m[1]);
+    }
+    assert.ok(used.size > 0, `no workflow reads ${stepId} outputs — the sweep is aimed wrong`);
+    assert.deepEqual([...used].filter((o) => !declared.has(o)), [], `read by a workflow, declared by no action output — reads as EMPTY at run time`);
+  });
+}
+
