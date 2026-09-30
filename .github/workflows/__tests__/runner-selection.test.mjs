@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
 import { jobsOf, workflowFiles } from "./job-timeouts.test.mjs";
+import { declaredInputs } from "./declared-inputs.test.mjs";
 
 // Every job a REUSABLE workflow defines takes its runner from the caller.
 //
@@ -22,9 +23,14 @@ import { jobsOf, workflowFiles } from "./job-timeouts.test.mjs";
 // `CI_RUNNER` — with no `with:` to thread through a dozen call sites, and one
 // variable to delete to fall back if that fleet goes down.
 //
+// Workflows declaring the optional `runner` input also accept a per-call choice
+// BEFORE that fallback, so a public caller can require GitHub-hosted execution
+// even when CI_RUNNER is inherited. An omitted input preserves the old routing.
+//
 // Raw-text scan, dependency-free, like the rest of this folder.
 
 const SELECTED = "${{ vars.CI_RUNNER || 'ubuntu-latest' }}";
+const OVERRIDDEN = "${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}";
 
 /**
  * Jobs that must stay on GitHub's image, each with the reason. A new entry
@@ -55,7 +61,7 @@ const jobs = workflowFiles()
   .flatMap(([file, source]) =>
     jobsOf(source)
       .filter((job) => job.definesRunner)
-      .map((job) => ({ file, name: job.name, line: job.line, runsOn: runnerOf(source, job.name) })),
+      .map((job) => ({ file, name: job.name, line: job.line, runsOn: runnerOf(source, job.name), expected: declaredInputs(source)?.includes("runner") ? OVERRIDDEN : SELECTED })),
   );
 
 test("the sweep sees the reusable workflows' jobs", () => {
@@ -68,10 +74,10 @@ test("the sweep sees the reusable workflows' jobs", () => {
   );
 });
 
-test("every reusable job runs where the caller's CI_RUNNER says", () => {
+test("every reusable job honors its caller runner input or CI_RUNNER fallback", () => {
   const wrong = jobs
     .filter((j) => !PINNED.has(`${j.file}:${j.name}`))
-    .filter((j) => j.runsOn !== SELECTED)
+    .filter((j) => j.runsOn !== j.expected)
     .map((j) => `${j.file}:${j.line} ${j.name} runs-on: ${j.runsOn}`);
 
   assert.deepEqual(
@@ -79,6 +85,7 @@ test("every reusable job runs where the caller's CI_RUNNER says", () => {
     [],
     "a consumer cannot override runs-on on a `uses:` job, so a label written here\n" +
       `is one no caller can move off a billed runner. Use exactly\n  runs-on: ${SELECTED}\n` +
+      `or, only when the workflow declares runner:\n  runs-on: ${OVERRIDDEN}\n` +
       "or add the job to PINNED with the reason it needs GitHub's image:\n  " +
       wrong.join("\n  "),
   );
@@ -88,7 +95,7 @@ test("a pinned job is pinned for a reason that still exists", () => {
   // A stale entry would silently exempt whatever job next takes that name.
   const stale = [...PINNED.keys()].filter((key) => {
     const job = jobs.find((j) => `${j.file}:${j.name}` === key);
-    return !job || job.runsOn === SELECTED;
+    return !job || job.runsOn === job.expected;
   });
   assert.deepEqual(stale, [], `PINNED lists jobs that no longer need it: ${stale.join(", ")}`);
 });
