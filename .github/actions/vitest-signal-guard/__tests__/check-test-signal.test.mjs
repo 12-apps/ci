@@ -232,3 +232,37 @@ test('CLI fails an all-skipped report and passes a report with one executed case
   assert.equal(ran.status, 0, ran.stderr);
   assert.match(ran.stdout, /executed 1 test case/);
 });
+
+test('a `>` inside a quoted attribute never swallows the next testcase', () => {
+  // node:test escapes `<` in an attribute but not `>`, so `[^>]*` stopped inside
+  // `name="…&lt;name>…"` and a lazy match ran on into the next case: a real
+  // report read 566 cases against 1569 openings and was refused as truncated.
+  const xml = '<testsuites><testsuite name="a > b" tests="2">' +
+    '<testcase name="every `--filter &lt;name>` names a member" time="0.1"/>' +
+    "<testcase name='x > y' time=\"0.1\"><skipped/></testcase>" +
+    '<testcase name="plain" time="0.1"/></testsuite></testsuites>';
+  const parsed = parseJUnitExecution(xml);
+  assert.ok(parsed, 'not refused as truncated');
+  assert.equal(parsed.tests, 2);
+  assert.equal(parsed.executed, 2);
+});
+
+test('a REAL node:test junit report with `<` and `>` in test names is read, not refused', () => {
+  const root = scratch({
+    'names.test.mjs':
+      "import { test } from 'node:test';\n" +
+      "test('every `pnpm --filter <name>` names a member', () => {});\n" +
+      "test('M_head > C is refused', () => {});\n" +
+      "test('a <b> c', { skip: true }, () => {});\n",
+  });
+  const report = join(root, 'report.xml');
+  const run = spawnSync(process.execPath, ['--test', '--test-reporter=junit', `--test-reporter-destination=${report}`, join(root, 'names.test.mjs')], {
+    encoding: 'utf8',
+    // Inherited, it makes the child report to THIS runner instead of writing its own file.
+    env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== 'NODE_TEST_CONTEXT')),
+  });
+  assert.equal(run.status, 0, run.stderr);
+  const parsed = parseJUnitExecution(readFileSync(report, 'utf8'));
+  assert.ok(parsed, 'a legible node:test report is never "untrustworthy"');
+  assert.equal(parsed.executed, 2);
+});

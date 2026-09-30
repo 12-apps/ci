@@ -36,6 +36,23 @@ const LANE = process.env.LANE_LABEL || 'test';
 const BYPASS_LABEL = process.env.BYPASS_LABEL || 'ci:allow-zero-tests';
 
 /**
+ * The inside of an XML start tag, quote-aware: a run of anything but `>`, where
+ * a quoted attribute value counts as ONE unit and may itself contain `>`.
+ *
+ * `[^>]*` is not enough. node:test's junit reporter escapes `<` in an attribute
+ * value but leaves `>` alone — legal XML — so a test named ``every `--filter
+ * <name>` …`` is written `name="every `--filter &lt;name>` …"`. `[^>]*` stops at
+ * that `>`, the element's own `/>` is never seen, and a lazy match runs on into
+ * the NEXT `<testcase>`: one real report counted 566 cases against 1569
+ * openings and was refused as truncated (future-pay#2281, run 36730382113).
+ */
+const TAG = String.raw`(?:[^>"']|"[^"]*"|'[^']*')*`;
+const TESTSUITES_TOTAL = new RegExp(String.raw`<testsuites\b${TAG}?\btests=["'](\d+)["']`, 'i');
+const TESTSUITE_TOTAL = new RegExp(String.raw`<testsuite\b${TAG}?\btests=["'](\d+)["']`, 'gi');
+const TESTCASE = new RegExp(String.raw`<testcase\b${TAG}?\/>|<testcase\b${TAG}>[\s\S]*?<\/testcase\s*>`, 'gi');
+const SUITE_TAG = new RegExp(String.raw`<(\/?)(testsuites?)\b${TAG}>`, 'gi');
+
+/**
  * The number of test cases a JUnit XML report accounts for.
  *
  * Three shapes, tried in order, because the summary attribute is a convention
@@ -67,15 +84,14 @@ const BYPASS_LABEL = process.env.BYPASS_LABEL || 'ci:allow-zero-tests';
 export function parseJUnitTotals(xml) {
   // Report comments and captured output can contain XML-looking prose.
   xml = xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>/g, ' ');
-  const rootMatch = xml.match(/<testsuites\b[^>]*\btests=["'](\d+)["']/i);
+  const rootMatch = xml.match(TESTSUITES_TOTAL);
   if (rootMatch && rootMatch[1] !== undefined) {
     return { tests: Number.parseInt(rootMatch[1], 10), source: 'testsuites' };
   }
 
   let summed = 0;
   let matched = false;
-  const suiteRe = /<testsuite\b[^>]*\btests=["'](\d+)["']/gi;
-  for (const match of xml.matchAll(suiteRe)) {
+  for (const match of xml.matchAll(TESTSUITE_TOTAL)) {
     const value = match[1];
     if (value === undefined) continue;
     summed += Number.parseInt(value, 10);
@@ -100,7 +116,7 @@ export function parseJUnitExecution(xml) {
   const clean = xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>/g, ' ');
   const totals = parseJUnitTotals(clean);
   if (!totals) return null;
-  const cases = [...clean.matchAll(/<testcase\b[^>]*?\/>|<testcase\b[^>]*>[\s\S]*?<\/testcase\s*>/gi)];
+  const cases = [...clean.matchAll(TESTCASE)];
   const openings = [...clean.matchAll(/<testcase\b/gi)].length;
   if (cases.length !== openings) return null; // truncated report
   const skippedCases = cases.filter(([body]) => /<(?:skipped|disabled)\b/i.test(body)).length;
@@ -124,7 +140,7 @@ function summaryExclusions(xml) {
     const current = stack.pop();
     stack.at(-1).children += Math.max(current.declared, current.children);
   };
-  for (const [tag, closing, rawName] of xml.matchAll(/<(\/?)(testsuites?)\b[^>]*>/gi)) {
+  for (const [tag, closing, rawName] of xml.matchAll(SUITE_TAG)) {
     const name = rawName.toLowerCase();
     if (closing) {
       if (stack.length === 1 || stack.at(-1).name !== name) return null;
