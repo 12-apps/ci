@@ -433,6 +433,32 @@ jobs:
       #
       # Placed AFTER prebuild deliberately — `android/` is generated, so the
       # Gradle files the key hashes do not exist until it has run.
+      #
+      # The key is computed by hand rather than with hashFiles(): prebuild
+      # writes `versionCode <run number>` into android/app/build.gradle, so
+      # hashing the generated files as they are gave every run a new key, and
+      # every push to the default branch re-saved the ~1.3GB entry anyway
+      # (motoboy run 36738667935, 2026-09-30: restored one key, saved another,
+      # same package.json; two prebuilds that differ only in GITHUB_RUN_NUMBER
+      # differ in that one line). That line is dropped before hashing; every
+      # other line of the Gradle files still moves the key.
+      - name: Key the Gradle caches
+        id: gradle-key
+        working-directory: ${{ inputs.app-path }}
+        run: |
+          set -euo pipefail
+          hash=$(
+            { echo package.json; echo android/gradle/wrapper/gradle-wrapper.properties; find android -type f -name '*.gradle'; } \
+              | LC_ALL=C sort -u \
+              | while IFS= read -r f; do
+                  [[ -f "$f" ]] || continue
+                  printf '== %s\n' "$f"
+                  sed -E '/^[[:space:]]*versionCode[[:space:]]+[0-9]+[[:space:]]*$/d' "$f"
+                done \
+              | sha256sum | cut -d' ' -f1
+          )
+          echo "hash=${hash}" >> "$GITHUB_OUTPUT"
+
       - name: Restore the Gradle caches
         id: gradle-cache
         uses: actions/cache/restore@v4
@@ -451,11 +477,7 @@ jobs:
           # them: "Cache not found" on every run). The app's native modules
           # are named in its package.json; a lockfile-only bump restores the
           # nearest entry and Gradle fetches what is missing, as it does now.
-          key: >-
-            ${{ inputs.app }}-gradle-${{ runner.os }}-${{ hashFiles(
-            format('{0}/package.json', inputs.app-path),
-            format('{0}/android/gradle/wrapper/gradle-wrapper.properties', inputs.app-path),
-            format('{0}/android/**/*.gradle', inputs.app-path)) }}
+          key: ${{ inputs.app }}-gradle-${{ runner.os }}-${{ steps.gradle-key.outputs.hash }}
           restore-keys: |
             ${{ inputs.app }}-gradle-${{ runner.os }}-
 
