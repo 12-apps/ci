@@ -251,14 +251,22 @@ if ! aws iam get-role --role-name "$role" >/dev/null 2>&1; then
 fi
 # The queue the webhooks keep (queue.mjs): one item per waiting job, expired
 # by TTL if a delivery never takes it off. On-demand billing: cents a month.
+# Created only when DynamoDB says it does not exist. Any other failure to read
+# it (the weekly refresh's role may not describe tables) leaves it as it is:
+# on 2026-09-30 an AccessDenied read as "missing" sent that role to CreateTable
+# and stopped the refresh after the image had passed its smoke check.
 queue_table="ci-runner-queue-${label}"
-if ! aws dynamodb describe-table --table-name "$queue_table" >/dev/null 2>&1; then
-  aws dynamodb create-table --table-name "$queue_table" --billing-mode PAY_PER_REQUEST \
-    --attribute-definitions AttributeName=id,AttributeType=S --key-schema AttributeName=id,KeyType=HASH \
-    --tags Key=Project,Value=ci-runner >/dev/null
-  aws dynamodb wait table-exists --table-name "$queue_table"
-  aws dynamodb update-time-to-live --table-name "$queue_table" \
-    --time-to-live-specification Enabled=true,AttributeName=expires >/dev/null
+if ! queue_err=$(aws dynamodb describe-table --table-name "$queue_table" 2>&1 >/dev/null); then
+  if [[ "$queue_err" == *ResourceNotFoundException* ]]; then
+    aws dynamodb create-table --table-name "$queue_table" --billing-mode PAY_PER_REQUEST \
+      --attribute-definitions AttributeName=id,AttributeType=S --key-schema AttributeName=id,KeyType=HASH \
+      --tags Key=Project,Value=ci-runner >/dev/null
+    aws dynamodb wait table-exists --table-name "$queue_table"
+    aws dynamodb update-time-to-live --table-name "$queue_table" \
+      --time-to-live-specification Enabled=true,AttributeName=expires >/dev/null
+  else
+    echo "deploy: WARNING: could not read the queue table ${queue_table}; leaving it as it is (${queue_err##*: })" >&2
+  fi
 fi
 policy=$(jq -n --arg lts "$template_arns" --arg hostrole "$host_role" --arg label "$label" \
   --arg param "arn:aws:ssm:${region}:${account}:parameter${param}" \

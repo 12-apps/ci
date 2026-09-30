@@ -1,5 +1,7 @@
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -30,4 +32,50 @@ test("the zip deploy.sh builds holds every module the handler imports", () => {
   assert.ok(zipped, "deploy.sh zips the modules with one zipfile line");
   assert.deepEqual([...copied[1].matchAll(/\$here\/([\w-]+\.mjs)/g)].map((m) => m[1]).sort(), modules);
   assert.deepEqual(zipped[1].split(/\s+/).sort(), modules);
+});
+
+// The queue table block, run for real against a fake `aws`: it creates the
+// table only when DynamoDB says it is missing. On 2026-09-30 an AccessDenied on
+// describe-table (the weekly refresh's role) read as "missing", and the
+// CreateTable that followed stopped the refresh after its smoke check passed.
+function queueBlock(describe) {
+  const start = deploy.indexOf("# Created only when DynamoDB says it does not exist.");
+  const end = deploy.indexOf("\npolicy=$(", start);
+  assert.ok(start !== -1 && end !== -1, "the queue-table block is where the test expects it");
+  const dir = mkdtempSync(join(tmpdir(), "deploy-queue-"));
+  const calls = join(dir, "calls.log");
+  const script = `set -euo pipefail
+aws() {
+  echo "$*" >> "${calls}"
+  case "$*" in
+    *describe-table*) ${describe} ;;
+    *) return 0 ;;
+  esac
+}
+label=future-pay-ci
+${deploy.slice(start, end)}
+echo done`;
+  const res = spawnSync("bash", ["-c", script], { encoding: "utf8" });
+  const log = existsSync(calls) ? readFileSync(calls, "utf8") : "";
+  return { status: res.status, stdout: res.stdout, stderr: res.stderr, created: /create-table/.test(log) };
+}
+
+test("an existing queue table is left alone", () => {
+  const r = queueBlock("return 0");
+  assert.equal(r.status, 0);
+  assert.equal(r.created, false);
+});
+
+test("a missing queue table is created", () => {
+  const r = queueBlock('echo "An error occurred (ResourceNotFoundException) when calling the DescribeTable operation: Requested resource not found" >&2; return 254');
+  assert.equal(r.status, 0);
+  assert.equal(r.created, true);
+});
+
+test("a queue table the role cannot read is not created, and the deploy goes on", () => {
+  const r = queueBlock('echo "An error occurred (AccessDeniedException) when calling the DescribeTable operation: not authorized" >&2; return 254');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.created, false);
+  assert.match(r.stderr, /could not read the queue table ci-runner-queue-future-pay-ci/);
+  assert.match(r.stdout, /done/);
 });

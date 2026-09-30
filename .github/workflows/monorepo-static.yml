@@ -28,6 +28,9 @@ name: Monorepo Static
 #     only what the package's turbo.json declares — wrong outputs mean a hit
 #     that restores nothing)
 
+# Pass `with: { runner: ubuntu-latest }` to require GitHub-hosted jobs.
+# Omit `runner` to preserve the existing CI_RUNNER fallback.
+
 on:
   workflow_call:
     secrets:
@@ -40,6 +43,14 @@ on:
           .npmrc reads ${NODE_AUTH_TOKEN}.
         required: false
     inputs:
+      runner:
+        description: >-
+          Runner label for every job. A nonempty caller value overrides
+          CI_RUNNER; empty preserves CI_RUNNER or ubuntu-latest. Public
+          callers can pin ubuntu-latest even when a fleet label is inherited.
+        type: string
+        required: false
+        default: ''
       node-version:
         description: 'Node version for all jobs.'
         type: string
@@ -381,7 +392,7 @@ jobs:
       contents: read
       pull-requests: read
     name: Detect Changes
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 10
@@ -656,7 +667,7 @@ jobs:
   # a lane that front-runs it with a subset has nothing to add there.
   retry-gate:
     name: Retry Gate
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     # Deliberately tighter than the lanes downstream — see the input's docs.
@@ -720,7 +731,7 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: ${{ inputs.lint-timeout-minutes }}
@@ -908,7 +919,7 @@ jobs:
 
   type-check:
     name: Type Check
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: ${{ inputs.type-check-timeout-minutes }}
@@ -1096,7 +1107,7 @@ jobs:
 
   actionlint:
     name: Actionlint
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 10
