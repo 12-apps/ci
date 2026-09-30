@@ -39,7 +39,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
 /** Bump when the construction below changes shape — see ci-test-fingerprint's FORMAT_VERSION. */
-export const INPUTS_VERSION = "test-inputs-v1";
+export const INPUTS_VERSION = "test-inputs-v2";
 
 /**
  * `path -> "<mode> <sha>"` for every tracked blob and gitlink at `ref`.
@@ -88,36 +88,67 @@ export function closureOf(file, edges, blindFiles) {
   return { files: seen, blind };
 }
 
+/** Resolve persistent routes against this tree, never just the current diff. */
+function routedFiles(routes, tree) {
+  const byEntry = new Map();
+  for (const route of routes) {
+    if (!Array.isArray(route?.entries)) continue;
+    const files = Array.isArray(route.files)
+      ? route.files
+      : route.match instanceof RegExp ? [...tree.keys()].filter((p) => route.match.test(p)) : [];
+    for (const entry of route.entries) {
+      // Symbol-qualified selection entries still denote a file dependency.
+      // Hashing is deliberately file-granular, even when selection is finer.
+      const file = entry.split("#")[0];
+      if (!byEntry.has(file)) byEntry.set(file, new Set());
+      for (const input of files) byEntry.get(file).add(input);
+    }
+  }
+  return byEntry;
+}
+
+/** Imports and routed reads compose, including reads made by a global setup. */
+function inputClosure(seeds, edges, blindFiles, routed) {
+  const files = new Set(seeds);
+  const stack = [...files];
+  let blind = false;
+  while (stack.length > 0) {
+    const file = stack.pop();
+    blind ||= blindFiles.has(file);
+    const dependencies = [
+      ...(edges.get(file) ?? []).map((record) => record.target),
+      ...(routed.get(file) ?? []),
+    ];
+    for (const dependency of dependencies) if (!files.has(dependency)) {
+      files.add(dependency);
+      stack.push(dependency);
+    }
+  }
+  return { files, blind };
+}
+
+/** The dependency-closed global set, shared by selection and input hashing. */
+export function globalInputs({ edges, blind = [], globals = [], routes = [], tree }) {
+  const roots = [...tree.keys()].filter((p) => globals.some((re) => re.test(p)));
+  return inputClosure(roots, edges, new Set(blind), routedFiles(routes, tree));
+}
+
 /**
  * One hash per test, or `null` where no bounded hash exists.
  *
- * @param {object} options
- * @param {string[]} options.tests          repo-relative test files (the plan's list)
- * @param {Map<string, object[]>} options.edges   `buildGraph` edges the selection walked
- * @param {string[]} [options.blind]        files whose imports did not resolve
- * @param {RegExp[]} [options.globals]      the lane's global inputs, matched against tracked paths
- * @param {{ match: RegExp, entries: string[] }[]} [options.routes]  the plan's static
- *   routes: a committed file no module imports, routed to the file(s) that
- *   carry its effect — typically the suite that reads it with `readFileSync`.
- *   The closure cannot see such a file, so every tracked path a route matches
- *   joins the inputs of any test whose closure holds one of its entries.
- * @param {Map<string,string>} options.tree `treeIndex()` of the head
- * @returns {{ inputs: Record<string, string|null>, globalFiles: string[], stats: object }}
+ * `routes` may contain static `{ match, entries }` routes or persistent
+ * `{ files, entries }` routes derived from the entire current database tree.
+ * Each route means its entries can read its files without importing them.
+ * Global inputs include their transitive dependencies, not merely the blobs
+ * of the setup/config files named by `globals`.
  */
 export function testInputs({ tests, edges, blind = [], globals = [], routes = [], tree }) {
   const blindFiles = new Set(blind);
-  // Static routes, each resolved once against the tree: the files it matches,
-  // and the entries that make a test care about them.
-  const routed = routes
-    .filter((r) => r?.match instanceof RegExp && Array.isArray(r.entries) && r.entries.length > 0)
-    .map((r) => ({ entries: new Set(r.entries), files: [...tree.keys()].filter((p) => r.match.test(p)) }))
-    .filter((r) => r.files.length > 0);
-  // Global inputs are the same for every test in the lane, so they are lined
-  // up once and folded into each hash. A global that matches no tracked path
-  // contributes nothing — and a consumer that spells one wrong gets a hash
-  // that does not move on it, which is why the consumer's own tests must pin
-  // each global as moving the hash.
-  const globalFiles = [...tree.keys()].filter((p) => globals.some((re) => re.test(p))).sort();
+  const routed = routedFiles(routes, tree);
+  const globalRoots = [...tree.keys()].filter((p) => globals.some((re) => re.test(p)));
+  const globalClosure = inputClosure(globalRoots, edges, blindFiles, routed);
+  const globalFiles = [...globalClosure.files].sort();
+  const globalMissing = globalFiles.some((file) => !tree.has(file));
   const globalLines = globalFiles.map((p) => `${tree.get(p)} ${p}`);
 
   const inputs = {};
@@ -125,23 +156,17 @@ export function testInputs({ tests, edges, blind = [], globals = [], routes = []
   let unbounded = 0;
   let missing = 0;
   for (const test of tests) {
-    const { files, blind: isBlind } = closureOf(test, edges, blindFiles);
-    if (isBlind) {
+    const { files, blind: isBlind } = inputClosure([test], edges, blindFiles, routed);
+    if (isBlind || globalClosure.blind) {
       inputs[test] = null;
       unbounded++;
       continue;
     }
-    // Every closure file must be in the tree: the graph was built from the
-    // checkout, so a file the tree lacks is one the checkout changed under
-    // us, or one git does not track — either way not a stable input.
-    // A route whose entry is in the closure brings the files it matches along:
-    // the suite reads them off disk, so they decide its verdict as surely as an
-    // import would — the graph just cannot see them.
-    const counted = new Set(files);
-    for (const r of routed) if ([...r.entries].some((e) => files.has(e))) for (const f of r.files) counted.add(f);
+    // Every input must be tracked. An untracked or missing dependency is not
+    // a stable input, whether reached from a test or an external setup file.
     const lines = [];
-    let complete = true;
-    for (const file of counted) {
+    let complete = !globalMissing;
+    for (const file of files) {
       const entry = tree.get(file);
       if (!entry) {
         complete = false;
@@ -156,8 +181,8 @@ export function testInputs({ tests, edges, blind = [], globals = [], routes = []
     }
     lines.sort();
     const hash = createHash("sha256");
-    // NUL-joined with the counts hashed in: a path may contain any separator
-    // a naive join would use, and two different sets must never hash alike.
+    // Paths and counts are included: renaming/deleting a read migration must
+    // invalidate its reader even when the surviving SQL bytes are identical.
     hash.update(`${INPUTS_VERSION}\0${lines.length}\0${globalLines.length}\0`);
     for (const line of lines) hash.update(`${line}\0`);
     hash.update("globals\0");

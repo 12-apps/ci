@@ -270,6 +270,10 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/lane-verdict-wiring.test.mjs
 
+      - name: Verdict execution safety
+        shell: bash
+        run: node --test .github/workflows/__tests__/verdict-safety.test.mjs
+
       # Every `inputs.<name>` a reusable workflow reads must be an input it
       # declares. Neither direction is reported by GitHub: inside the engine an
       # undeclared input reads as empty (a feature that cannot be turned on), and

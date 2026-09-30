@@ -624,7 +624,7 @@ being mutually exclusive.
 
 **What makes the skip sound.** The failure direction here is a green lane that
 ran nothing, so the claim a hit makes is deliberately narrow: *this exact
-test-relevant tree has passed this exact lane before*. Three things hold it up,
+test-relevant tree has passed this exact lane before*. These conditions hold it up,
 and the first is the consumer's responsibility:
 
 - **Hash the TREE, not a diff.** On `pull_request` the checkout is the MERGE
@@ -640,21 +640,34 @@ and the first is the consumer's responsibility:
   apart routinely cancel the first run mid-suite. Anything keyed on "nothing
   changed since the last push" would skip on that run's behalf, and the pull
   request would go green having tested neither push.
-- **The lane's own commands are in the KEY.** `node-version`, `pre-test-command`
-  and `unit-test-command` are folded into the cache key beside the hash. They
-  live in a workflow file, which any sane "can this change a test outcome?" rule
-  ignores, so without this, editing `unit-test-command` would inherit the
-  previous command's verdict. The SHARD COUNT is deliberately absent: a
-  lane-level verdict says every test the lane selected for this tree passed,
-  which is true however the set was sliced, so including the count would make
-  the skip miss on precisely the repeat pushes it exists for.
+- **Execution and selection context are in the KEY.** Resolved Node patch,
+  commands (including the integration pre-command), central action/workflow
+  source, caller workflow blobs, repository variables and available runner/image
+  identity all participate. Whole-lane reuse also binds the immutable fetched
+  base/stack selection and plan configuration. A retargeted PR with the same
+  tree is not necessarily the same coverage. Shard count remains excluded from
+  lane-level verdicts: changing the partition does not change the tested set.
+- **Only complete lane evidence is reused.** The legacy unit per-shard cache is
+  removed. Lookup stays before the matrix, and recording waits for the matrix
+  and signal. A skipped/disabled JUnit case does not count as executed signal.
 
 Never active on `push` — the post-merge safety net exists to skip nothing.
 
-The command must be dependency-free: it runs on the runner's system Node, before
-pnpm and before the install, because skipping the suite while still paying to
-prepare for it gives back only a fraction of what the repeat costs. If it fails
-or prints anything that is not a hex digest, the step warns and the lane runs.
+Fingerprint commands remain dependency-free and run before pnpm/install, but
+under the resolved Node version the shards will use. Resolving Node and the base
+adds some cache-hit preparation time; its cost has not yet been measured.
+Command subprocesses use `bash -e -o pipefail`; a failed producer cannot turn
+into a valid constant digest through a successful hashing pipeline. Missing
+execution identity, base or config disables reuse. An unfiltered plan is still
+uploaded if the reuse key cannot be computed.
+
+The new cache era invalidates old verdicts once. The same safe tree/context on a
+later push still reuses. Per-test hashes remain dependency-based, so an
+unrelated push does not erase an unchanged test's proof. Database domain routing
+is retained: migrations invalidate the reader/query/replay inputs that observe
+them, rather than disabling deduplication or selecting every database suite.
+Runtime inputs outside the modeled imports/routes must still be declared by the
+consumer; non-hermetic tests must use its always-run list.
 
 `future-pay`'s implementation (`scripts/ci-test-fingerprint.mjs`, ~40 lines plus
 its reasoning) is copyable; the one thing worth preserving verbatim is that it

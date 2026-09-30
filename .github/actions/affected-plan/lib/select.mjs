@@ -1,30 +1,18 @@
 /**
- * Symbol-level affected-test selection.
+ * Symbol-level affected-test selection with module-evaluation propagation.
  *
- * The propagation rule, stated once because everything else follows from it:
- *
- * > A file is affected when it imports a symbol that changed. Once affected,
- * > ALL of its own exports are treated as changed.
- *
- * The first half is the narrowing that matters — an importer that takes only
- * `packageRoutes` from a module whose `packageRoutes` is byte-identical is not
- * affected, however much else in that module moved. The second half is the
- * deliberate over-approximation that keeps it sound: once a file consumes
- * something that changed, any of its exports may now behave differently, and
- * tracking which would require type-checking the whole program.
- *
- * Every uncertainty widens, never narrows. A file whose declarations could not
- * be bracketed, a relative import that did not resolve, a changed path the
- * caller classified as untraceable — each of those returns the full suite. The
- * failure this design must never produce is a green lane that skipped the test
- * which would have caught the bug; paying for a wide run is the cheap error.
+ * Deferred function changes can follow only the exports that observe them.
+ * Eager initialization can throw or mutate state before ANY imported binding
+ * is used, so those changes must cross every runtime import transitively.
+ * Type-only imports remain excluded; unresolved dependencies widen their owner
+ * and its importers rather than paying for unrelated tests.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { changedDeclarations, reachableExports, withinFile } from "./exports-dataflow.mjs";
-import { buildGraph, listSourceFiles, loadPackages } from "./modules.mjs";
-import { affectedExports, exportedSymbols } from "./symbols.mjs";
+import { boundOf, changedDeclarations, declarationsOf, reachableExports, spread, withinFile } from "./exports-dataflow.mjs";
+import { buildGraph, listSourceFiles, loadPackages, scan } from "./modules.mjs";
+import { affectedExports, exportedSymbols, importsChanged } from "./symbols.mjs";
 
 /** Everything selected, with the reason chain for each test. */
 export const FULL = "full";
@@ -56,7 +44,61 @@ function narrowedExports(source, record, symbols, calls) {
 function taintOf(record, symbols) {
   if (record.wildcard) return "*";
   const names = symbols === "*" ? record.names : record.names.filter((n) => symbols.has(n));
-  return names.length === 0 ? "*" : [...names, ...names.map((n) => `${record.spec}#${n}`)];
+  const locals = (record.bindings ?? []).filter(([name]) => names.includes(name)).map(([, local]) => local);
+  return names.length === 0 ? "*" : [...names, ...locals, ...names.map((n) => `${record.spec}#${n}`)];
+}
+
+/**
+ * A small allowlist of declarations whose evaluation cannot call user code.
+ * Everything else (calls, property reads, classes, enums, destructuring, ...)
+ * may throw or mutate state while the module loads. This is deliberately not
+ * a purity claim about arbitrary expressions.
+ */
+function inertDeclaration(text) {
+  const parsed = scan(text);
+  const code = parsed.masked.trim();
+  if (/^(?:export\s+)?(?:declare\s+)?(?:type|interface)\b/.test(code)) return true;
+  if (/^export\s*\{/.test(code)) return true; // reexport evaluation follows its graph edge
+  if (/^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\b/.test(code)) {
+    const open = code.indexOf("{");
+    if (open === -1) return false;
+    let depth = 0;
+    for (let i = open; i < code.length; i += 1) {
+      if (code[i] === "{") depth += 1;
+      else if (code[i] === "}" && --depth === 0) return /^\s*;?\s*$/.test(code.slice(i + 1));
+    }
+    return false;
+  }
+  const binding = /^(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$][\w$]*(?:\s*:[^=]+)?\s*=\s*/.exec(code);
+  if (!binding) return false;
+  const value = code.slice(binding[0].length).replace(/;\s*$/, "").trim();
+  if (/^(?:true|false|null|[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?n?)$/i.test(value)) return true;
+  // Literal contents are masked, but their quotes remain. Templates are not
+  // included: substitutions execute while constructing the value.
+  if (/^(["'])[ \r\n]*\1$/.test(value)) return true;
+  try {
+    const raw = parsed.code.trim().slice(binding[0].length).replace(/;\s*$/, "").trim();
+    const array = JSON.parse(raw);
+    const literal = (item) => item === null || typeof item !== "object" || (Array.isArray(item) && item.every(literal));
+    if (Array.isArray(array) && array.every(literal)) return true;
+  } catch { /* not a literal-only array: defer no purity assumptions */ }
+  if (!/^(?:async\s+)?(?:[A-Za-z_$][\w$]*|\([^()]*\))\s*(?::[^=]+)?=>/.test(value)) return false;
+  let depth = 0;
+  for (const ch of value) {
+    if ("({[".includes(ch)) depth += 1;
+    else if (")}]".includes(ch)) depth -= 1;
+    else if (depth === 0 && (ch === "," || ch === ";")) return false;
+  }
+  return depth === 0;
+}
+
+/** Can a changed binding alter eager module evaluation, not just an export? */
+function initializationMayObserve(source, tainted, calls) {
+  if (source == null) return true;
+  const declarations = declarationsOf(source, { calls });
+  if (declarations === null) return true;
+  const hot = tainted === "*" ? new Set(declarations.flatMap(boundOf)) : spread(declarations, tainted);
+  return declarations.some((d) => !d.call && boundOf(d).some((name) => hot.has(name)) && !inertDeclaration(d.text));
 }
 
 /**
@@ -176,11 +218,6 @@ export function selectAffected(options) {
   }
 
   // ── which exported symbols actually changed ──────────────────────────────
-  // The base-side hashes are collected across the WHOLE diff first, so a
-  // symbol that moved from one changed file to another is recognised as
-  // unchanged rather than as "deleted here, added there".
-  const baseByName = new Map();
-  const headByName = new Map();
   const headSources = new Map();
   const baseSources = new Map();
 
@@ -204,20 +241,10 @@ export function selectAffected(options) {
   for (const file of direct) {
     const base = readBase(file);
     baseSources.set(file, base);
-    if (base !== null) {
-      const parsed = exportedSymbols(base);
-      // Re-export placeholders are skipped: these maps answer "where does this
-      // name's BODY live", and a forwarding entry has no body of its own.
-      if (parsed.ok)
-        for (const [name, h] of parsed.symbols) if (!String(h).startsWith("reexport:")) baseByName.set(name, h);
-    }
     if (!deleted.includes(file)) {
       try {
         const source = readFileSync(join(repoRoot, file), "utf8");
         headSources.set(file, source);
-        const parsed = exportedSymbols(source);
-        if (parsed.ok)
-          for (const [name, h] of parsed.symbols) if (!String(h).startsWith("reexport:")) headByName.set(name, h);
       } catch {
         headSources.set(file, null);
       }
@@ -226,35 +253,51 @@ export function selectAffected(options) {
 
   /** file -> Set<symbol> | "*" */
   const affected = new Map();
+  // Initialization effects cross EVERY runtime import, even when its named
+  // binding is unused. Keep this separate from ordinary symbol taint, which
+  // can still narrow through an intermediate file's deferred functions.
+  const moduleEffects = new Set();
   const symbolReport = {};
   const routeReport = {};
   for (const file of direct) {
     if (deleted.includes(file)) {
       affected.set(file, "*");
+      moduleEffects.add(file);
       symbolReport[file] = ["*"];
       continue;
     }
     const head = headSources.get(file);
     if (head === null) {
       affected.set(file, "*");
+      moduleEffects.add(file);
       symbolReport[file] = ["*"];
       continue;
     }
-    const names = affectedExports(baseSources.get(file), head, baseByName, headByName);
+    const base = baseSources.get(file);
+    const names = affectedExports(base, head);
     // An export's hash covers its own body, so the exports that merely CALL a
     // changed one are found by following the file's own references. A lane
     // that brackets calls (Gherkin steps) also reads a module-level edit
     // declaration by declaration rather than as "everything in the file".
-    const value = names.has("*")
-      ? ((calls.length > 0 ? changedDeclarations(baseSources.get(file), head, { calls }) : null) ?? "*")
+    let value = names.has("*")
+      ? ((calls.length > 0 && !importsChanged(base, head) ? changedDeclarations(base, head, { calls }) : null) ?? "*")
       : withinFile(head, names, { calls });
+    const exports = exportedSymbols(head).symbols;
+    const removedExport = !names.has("*") && [...names].some((name) => !exports.has(name));
+    if (value === "*" || (value.size > 0 && (
+      removedExport ||
+      initializationMayObserve(head, value, calls) ||
+      (base !== null && initializationMayObserve(base, value, calls))
+    ))) {
+      value = "*";
+      moduleEffects.add(file);
+    }
     affected.set(file, value);
     symbolReport[file] = value === "*" ? ["*"] : [...value].sort();
   }
 
-  // A changed file whose exports are all byte-identical (a pure move, a
-  // comment) contributes nothing at all — but it is still a real change, so it
-  // is reported rather than silently dropped.
+  // Same-file export bodies and module context both remained unchanged (for
+  // example, a comment edit). Report the file even though it seeds no work.
   for (const [file, syms] of affected) if (syms !== "*" && syms.size === 0) affected.delete(file);
 
   // Routed entries are seeded AFTER that pruning: the entry file's own bytes
@@ -280,7 +323,7 @@ export function selectAffected(options) {
       reasons: {},
       symbols: symbolReport,
       stats: { changed: relevant.length, affectedFiles: 0 },
-      why: "no exported symbol changed — every edit was a relocation, a comment, or otherwise not observable",
+      why: "no exported symbol changed — every edit was a comment or left the same-file exports and module context unchanged",
     };
   }
 
@@ -309,6 +352,7 @@ export function selectAffected(options) {
   const blind = [...new Set(unresolved.map((u) => u.file))];
   for (const file of blind) {
     affected.set(file, "*");
+    moduleEffects.add(file);
     symbolReport[file] = ["*"];
   }
 
@@ -329,16 +373,21 @@ export function selectAffected(options) {
     settled.add(current);
     const symbols = affected.get(current);
     for (const { file, record } of importers.get(current) ?? []) {
-      if (!importReaches(record, symbols)) continue;
+      const evaluationEffect = moduleEffects.has(current);
+      if (!evaluationEffect && !importReaches(record, symbols)) continue;
       const previous = affected.get(file);
-      if (previous === "*") continue;
+      const alreadyEffectful = moduleEffects.has(file);
+      if (previous === "*" && (!evaluationEffect || alreadyEffectful)) continue;
 
       // Which of THIS file's exports can see what it just bound? Answering
       // "all of them" is what made hop two lose the precision hop one has, and
       // compounded it over every hop after (see exports-dataflow.mjs). Every
       // uncertainty in there answers `"*"`, so this can only ever narrow a
       // claim the old walk was already making.
-      const next = narrowedExports(headSourceOf(file), record, symbols, calls);
+      const source = headSourceOf(file);
+      const effectful = evaluationEffect || initializationMayObserve(source, taintOf(record, symbols), calls);
+      const next = effectful ? "*" : narrowedExports(source, record, symbols, calls);
+      if (effectful) moduleEffects.add(file);
       // Nothing here can observe it: the chain genuinely ends at this file.
       if (next !== "*" && next.size === 0) continue;
       // Already knew everything this hop carries — re-queueing would not add.
@@ -389,7 +438,7 @@ export function selectAffected(options) {
       changed: relevant.length,
       routed: Object.keys(routeReport).length,
       affectedFiles: affected.size,
-      graphFiles: files.length,
+      graphFiles: edges.size,
       unresolved: unresolved.length,
       blindFiles: blind.length,
       tests: tests.length,

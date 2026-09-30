@@ -184,3 +184,10 @@ test("a regex whose reading leaves the line consistent wins over a division", ()
   const src = "Given(/^\"(.+)\" is on the fridge's shelf$/, go); // c\n";
   assert.equal(stripComments(src), "Given(/^\"(.+)\" is on the fridge's shelf$/, go); \n");
 });
+
+
+test("import records preserve source order across bare and named statements", () => {
+  const records = parseImports('import "./first";\nimport { value as local } from "./second";\n');
+  assert.deepEqual(records.map((record) => record.spec), ["./first", "./second"]);
+  assert.deepEqual(records[1].bindings, [["value", "local"]]);
+});

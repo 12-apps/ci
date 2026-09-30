@@ -10,12 +10,14 @@
  * test that is not.
  */
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 
-import { collectReports, parseJUnitTotals } from '../check-test-signal.mjs';
+import { collectReports, parseJUnitTotals, parseJUnitExecution } from '../check-test-signal.mjs';
+import { fileURLToPath } from 'node:url';
 
 const roots = [];
 after(() => roots.forEach((r) => rmSync(r, { recursive: true, force: true })));
@@ -171,4 +173,45 @@ test('two reports of 3 and 7 sum to 10 across files', () => {
     .map((f) => parseJUnitTotals(readFileSync(f, 'utf-8')).tests)
     .reduce((a, b) => a + b, 0);
   assert.equal(total, 10);
+});
+
+test('JUnit tests includes skips: all-skipped summaries provide zero execution', () => {
+  for (const xml of [
+    '<testsuites tests="3" skipped="3"/>',
+    '<testsuite tests="2" skipped="1" disabled="1"/>',
+    '<testsuites><testsuite tests="1" skipped="1"/></testsuites>',
+    '<testsuites tests="1"><testcase name="skip"><skipped/></testcase></testsuites>',
+    '<testsuites><testcase name="skip"><skipped/></testcase></testsuites>',
+  ]) assert.equal(parseJUnitExecution(xml).executed, 0, xml);
+});
+
+test('real executed cases count once and never count comments or captured XML', () => {
+  const xml = '<testsuites tests="3" skipped="1">' +
+    '<testcase name="pass"/><testcase name="fail"><failure/></testcase>' +
+    '<testcase name="skip"><skipped/></testcase>' +
+    '<!-- <testcase name="comment"/> --><![CDATA[<testcase name="output"/>]]></testsuites>';
+  assert.equal(parseJUnitExecution(xml).executed, 2);
+  assert.equal(parseJUnitExecution('<testsuites><!-- <testcase/> --></testsuites>'), null);
+});
+
+test('invalid exclusions or truncated test cases fail closed', () => {
+  for (const xml of [
+    '<testsuites tests="1" skipped="2"/>',
+    '<testsuite tests="1" skipped="-1"/>',
+    '<testsuite tests="1" disabled="NaN"/>',
+    '<testsuites tests="2"><testcase name="unfinished">',
+  ]) assert.equal(parseJUnitExecution(xml), null, xml);
+});
+
+test('CLI fails an all-skipped report and passes a report with one executed case', () => {
+  const root = scratch({ 'report.xml': '<testsuites tests="1" skipped="1"/>' });
+  const cli = fileURLToPath(new URL('../check-test-signal.mjs', import.meta.url));
+  const run = () => spawnSync(process.execPath, [cli, join(root, 'report.xml')], { encoding: 'utf8' });
+  const skipped = run();
+  assert.equal(skipped.status, 1, skipped.stderr);
+  assert.match(skipped.stderr, /zero tests/);
+  writeFileSync(join(root, 'report.xml'), '<testsuites tests="2" skipped="1"><testcase name="ran"/><testcase name="skip"><skipped/></testcase></testsuites>');
+  const ran = run();
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.match(ran.stdout, /executed 1 test case/);
 });

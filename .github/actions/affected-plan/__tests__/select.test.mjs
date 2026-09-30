@@ -107,7 +107,7 @@ test("effects propagate transitively", () => {
   assert.deepEqual(run({ repoRoot: root, changed: ["src/deep.ts"], readBase }).tests, ["src/top.test.ts"]);
 });
 
-test("a pure move selects nothing", () => {
+test("a move through a reexport is conservatively checked in its new context", () => {
   const body = "export function helper() {\n  return 1;\n}\n";
   const { root, readBase } = scenario({
     head: {
@@ -122,7 +122,8 @@ test("a pure move selects nothing", () => {
     changed: ["src/old-home.ts", "src/new-home.ts"],
     readBase,
   });
-  assert.equal(result.mode, "none", result.why);
+  assert.equal(result.mode, "narrowed", result.why);
+  assert.deepEqual(result.tests, ["src/consumer.test.ts"]);
 });
 
 // ── the widening routes ─────────────────────────────────────────────────────

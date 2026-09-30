@@ -1,5 +1,6 @@
-// A single-job lane verdict is looked up FIRST and recorded LAST — and every
-// step in between is gated on it.
+// A single-job lane verdict follows resolution of its immutable selection and
+// runtime, precedes dependency setup/work, and is recorded LAST. The corrected
+// placement adds a small startup cost; an unresolved context cannot be skipped.
 //
 // Three placements, each of which fails silently when broken:
 //
@@ -51,19 +52,27 @@ for (const { file, job, lane, input } of JOBS) {
     assert.match(block[1], /default: ''/);
   });
 
-  test(`${job}: the lookup is the step right after checkout, before any install`, () => {
+  test(`${job}: lookup follows context resolution but precedes dependency setup and work`, () => {
     const all = steps(body);
     const checkout = all.findIndex((s) => /actions\/checkout@/.test(s.block));
     const lookup = all.findIndex((s) => /id: lane-verdict/.test(s.block));
     assert.notEqual(lookup, -1, `${job} has no lane-verdict lookup`);
-    assert.equal(lookup, checkout + 1, "nothing but the checkout may run before the lookup");
-    const setup = all.findIndex((s) => /pnpm\/action-setup@|actions\/setup-node@/.test(s.block));
-    assert.ok(lookup < setup, "the lookup must precede the toolchain setup");
-    assert.match(all[lookup].block, new RegExp(`if: \\$\\{\\{ inputs\\.${input} != '' && github\\.event_name == 'pull_request' \\}\\}`), "opt-in, and never off a pull request");
+    assert.ok(checkout < lookup);
+    const allowed = /actions\/checkout@|id: verdict-node|id: base\n|id: selection\n|id: ratchet-base\n/;
+    assert.deepEqual(all.slice(0, lookup).filter((s) => !allowed.test(s.block)), [], "only checkout and verifiable context resolution precede lookup");
+    const node = all.findIndex((s) => /id: verdict-node/.test(s.block));
+    assert.ok(checkout < node && node < lookup, "the actual Node patch is resolved before lookup");
+    assert.doesNotMatch(all[node].block, /\n\s+cache:/, "dependency-cache work stays after a miss");
+    const setup = all.findIndex((s) => /pnpm\/action-setup@/.test(s.block));
+    assert.ok(lookup < setup, "the lookup must precede pnpm setup and dependency installation");
+    assert.match(all[lookup].block, new RegExp(`if: \\$\\{\\{ inputs\\.${input} != '' && github\\.event_name == 'pull_request'`), "opt-in, and never off a pull request");
     assert.match(all[lookup].block, /uses: 12-apps\/ci\/\.github\/actions\/lane-verdict@v2/);
     assert.match(all[lookup].block, new RegExp(`lane: ${lane}\\n`));
     assert.match(all[lookup].block, new RegExp(`fingerprint-command: \\$\\{\\{ inputs\\.${input} \\}\\}`));
     assert.match(all[lookup].block, /key-material: \|\n\s+node=\$\{\{ inputs\.node-version \}\}/, "the Node version is part of how the lane runs");
+    assert.match(all.find((s) => /actions\/setup-node@/.test(s.block) && !/id: verdict-node/.test(s.block)).block,
+      /node-version: \$\{\{ steps\.verdict-node\.outputs\.node-version \|\| inputs\.node-version \}\}/,
+      "execution reuses the exact resolved patch rather than resolving a floating version twice");
   });
 
   test(`${job}: every step after the lookup is gated on the verdict, and the record is last`, () => {

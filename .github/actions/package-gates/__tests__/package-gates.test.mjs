@@ -124,4 +124,22 @@ describe('main', () => {
     assert.match(out, /- C/);
     assert.doesNotMatch(out, /- B/);
   });
+
+  it('preserves upstream pipeline failures even when the last command succeeds', () => {
+    const lines = [];
+    assert.equal(main([], { GATES: 'Producer|node -e "process.exit(17)" | cat' }, (l) => lines.push(l)), 1);
+    assert.match(lines.join('\n'), /exit 17/);
+    assert.doesNotMatch(lines.join('\n'), /all gates passed/);
+  });
+
+  it('stops an individual gate on early failure, but still runs later gates', () => {
+    const lines = [];
+    assert.equal(main([], { GATES: 'Early|false; exit 0\nLater|exit 23' }, (l) => lines.push(l)), 1);
+    assert.match(lines.join('\n'), /2 gate\(s\) failed/);
+    assert.match(lines.join('\n'), /exit 23/);
+  });
+
+  it('keeps intentional shell error handling and successful pipelines', () => {
+    assert.equal(main([], { GATES: 'Handled|false || true\nPipeline|printf ok | grep -q ok' }, silent), 0);
+  });
 });

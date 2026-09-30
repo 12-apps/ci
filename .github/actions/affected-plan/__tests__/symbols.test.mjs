@@ -34,14 +34,13 @@ test("a comment is not a behaviour change", () => {
   assert.equal(affectedExports(base, head).size, 0, "documenting a boundary must be free");
 });
 
-test("a symbol MOVED with an identical body is unchanged", () => {
-  // The single most common refactor. Treating a relocation as "everything
-  // changed" makes the selector useless exactly when the diff is largest.
+test("a matching symbol in another file does not prove a safe relocation", () => {
+  // The name/body do not capture the new file's imports or lexical context.
   const base = "export function wireQuery() {\n  return 1;\n}\n";
   const movedInto = "export function wireQuery() {\n  return 1;\n}\n";
   const seenElsewhere = exportedSymbols(base).symbols; // hashes from the file it left
   const affected = affectedExports(null, movedInto, seenElsewhere);
-  assert.equal(affected.size, 0, "same name, same body, different file — nothing to re-run");
+  assert.ok(affected.has("wireQuery"), "a new module context must reach its callers");
 });
 
 test("a removed export is affected", () => {
@@ -58,12 +57,12 @@ test("module-level code widens to the whole file", () => {
   assert.ok(has(affectedExports(base, head), "*"));
 });
 
-test("a module-level IMPORT line alone does not widen", () => {
-  // Relocating a helper rewrites the import line of the file it left behind.
-  // Widening on that would undo the move-awareness above.
+test("a changed import target widens even when exported bodies are identical", () => {
+  // Binding the same name from a different module can change its value or
+  // throw during initialization; unchanged callers are not a proof of safety.
   const base = "import { helper } from './old';\nexport const a = 1;\n";
   const head = "import { helper } from './new';\nexport const a = 1;\n";
-  assert.equal(affectedExports(base, head).size, 0);
+  assert.ok(affectedExports(base, head).has("*"));
 });
 
 test("a new file affects every export it declares", () => {

@@ -22,12 +22,12 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
-import { databaseRoutes } from "./lib/database.mjs";
+import { databaseInputRoutes, databaseRoutes } from "./lib/database.mjs";
 import { explainByChange, explainByTest } from "./lib/explain.mjs";
 import { gherkinFeatures } from "./lib/gherkin.mjs";
-import { INPUTS_VERSION, testInputs, treeIndex } from "./lib/inputs.mjs";
+import { globalInputs, INPUTS_VERSION, testInputs, treeIndex } from "./lib/inputs.mjs";
 import { fileKeys, keyedChange, keyPatterns, wiringOf } from "./lib/keys.mjs";
-import { listSourceFiles, stripComments } from "./lib/modules.mjs";
+import { buildGraph, listSourceFiles, loadPackages, stripComments } from "./lib/modules.mjs";
 import { entriesForMatches } from "./lib/occurrences.mjs";
 import { selectAffected } from "./lib/select.mjs";
 
@@ -42,8 +42,12 @@ const lane = arg("lane", "unit");
 const base = arg("base", "origin/main");
 const configPath = resolve(repoRoot, arg("config", ".affected-plan.json"));
 const outPath = resolve(repoRoot, arg("out", `affected-plan.${lane}.json`));
-const maxShards = Number(arg("max-shards", "4")) || 4;
-const perShard = Number(arg("min-tests-per-shard", "40")) || 40;
+const positiveInteger = (value, fallback) => {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 1 ? Math.floor(number) : fallback;
+};
+const maxShards = positiveInteger(arg("max-shards", "4"), 4);
+const perShard = positiveInteger(arg("min-tests-per-shard", "40"), 40);
 // Per-file attribution in the LOG. The plan artifact always carries `reasons`;
 // this decides whether a reader has to download it to see them. Default ON:
 // the failure this whole action exists to prevent is a selection nobody can
@@ -156,7 +160,7 @@ const resolveCommandRoutes = () => {
     if (hit.length === 0) continue;
     let out = "";
     try {
-      out = execFileSync("bash", ["-c", `${r.command} ${hit.map((f) => JSON.stringify(f)).join(" ")}`], {
+      out = execFileSync("bash", ["-e", "-o", "pipefail", "-c", `${r.command} ${hit.map((f) => JSON.stringify(f)).join(" ")}`], {
         cwd: repoRoot,
         encoding: "utf8",
         env: { ...process.env, AFFECTED_PLAN_BASE: mergeBase, AFFECTED_PLAN_LANE: lane },
@@ -410,6 +414,14 @@ const routeOf = (file) => {
     const route = db.routes.get(file);
     return route ? { entries: route.entries } : [];
   }
+  // A setup/config is loaded by the runner, not by every test. Its complete
+  // dependency set therefore seeds every lane test directly, even outside
+  // sourceRoots. Database paths keep their more precise routing above: a
+  // deliberately wide migration hash must not undo domain-aware selection.
+  if (isGlobalChange(file)) {
+    globalChanges.add(file);
+    return { entries: globalTests };
+  }
   const out = [...(resolveCommandRoutes().get(file) ?? [])];
   for (const r of routes) if (r.entry && r.match?.test(file)) out.push(...r.entry);
   return [...new Set(out)];
@@ -436,7 +448,7 @@ try {
 
 const nameOnly = (filter) => {
   try {
-    return git(["diff", "--name-only", `--diff-filter=${filter}`, mergeBase, "HEAD"]).split("\n").filter(Boolean);
+    return git(["diff", "--no-renames", "--name-only", `--diff-filter=${filter}`, mergeBase, "HEAD"]).split("\n").filter(Boolean);
   } catch {
     return null;
   }
@@ -463,6 +475,43 @@ const readBase = (file) => {
   }
 };
 
+// Resolve globals before selection. Hash-only globals used to leave setup
+// changes with no import path to a test, producing a false empty plan.
+const skipGreen = laneConfig.skipGreen;
+const inputRoutes = routes.filter((r) => r.match && r.entry).map((r) => ({ match: r.match, entries: r.entry }));
+let globals = [];
+let inputTree = null;
+let globalGraph = { edges: new Map(), unresolved: [] };
+let globalState = { files: new Set(), blind: false };
+const globalChanges = new Set();
+const globalTests = [...new Set(listSourceFiles(repoRoot, laneConfig.roots ?? dirs).filter(isTest))].sort();
+if (skipGreen) {
+  try {
+    globals = (skipGreen.globals ?? []).map((source) => new RegExp(source));
+    inputTree = treeIndex(repoRoot);
+    const roots = [...inputTree.keys()].filter((file) => globals.some((re) => re.test(file)));
+    // buildGraph follows source dependencies beyond these roots; data files
+    // are terminal inputs. Never bound this graph with isSource/sourceRoots.
+    globalGraph = buildGraph(repoRoot, roots, { packages: loadPackages(repoRoot, dirs), aliasesFor });
+    globalState = globalInputs({
+      edges: globalGraph.edges,
+      blind: globalGraph.unresolved.map((item) => item.file),
+      globals, routes: inputRoutes, tree: inputTree,
+    });
+  } catch (error) {
+    console.error(`::warning::affected-plan (${lane}): could not resolve global inputs — running the FULL suite (${error.message})`);
+    emit({ mode: "full", tests: [], why: "global inputs could not be resolved", stats: {}, symbols: {}, reasons: {} });
+    process.exit(0);
+  }
+}
+const isGlobalChange = (file) => globalState.blind || globalState.files.has(file) || globals.some((re) => re.test(file));
+// If even the lane's inventory is unavailable, the runner must discover its
+// full suite. Do not turn a global change into an empty classified route.
+if (globalTests.length === 0 && [...changed, ...deleted].some(isGlobalChange)) {
+  emit({ mode: "full", tests: [], why: "global inputs changed and the test inventory is empty", stats: {}, symbols: {}, reasons: {} });
+  process.exit(0);
+}
+
 const result = selectAffected({
   repoRoot,
   changed,
@@ -471,12 +520,22 @@ const result = selectAffected({
   roots: laneConfig.roots ?? dirs,
   workspaceDirs: dirs,
   isTest,
-  isIgnored: (f) => Boolean(ignoreRe?.test(f)) || Boolean(laneIgnoreRe?.test(f)),
+  isIgnored: (f) => !isGlobalChange(f) && (Boolean(ignoreRe?.test(f)) || Boolean(laneIgnoreRe?.test(f))),
   isSource,
   routeOf,
   aliasesFor,
   calls: gherkin?.calls ?? [],
 });
+
+if (globalChanges.size > 0 && result.mode === "narrowed") {
+  const inputs = [...globalChanges].sort();
+  result.why = `${result.tests.length} test file(s) selected by runner global inputs: ${inputs.join(", ")}`;
+  result.stats.globalInputsChanged = inputs.length;
+  for (const test of result.tests) result.reasons[test] = inputs.map((file) => ({
+    importer: test, imports: file, line: 0,
+    statement: globalState.blind ? "runner global dependency is unresolved — every test runs" : "runner global input changed — every test runs",
+  }));
+}
 
 // Gherkin: the features the reached step DEFINITIONS are spoken in
 // (lib/gherkin.mjs). The step files stay in `tests` for a caller that reads
@@ -492,20 +551,23 @@ const gherkinReport =
 // WITHOUT importing them — a lockfile, a setup file, a migration folder — is
 // something only the consumer can declare, and a lane with no declaration
 // gets no hashes rather than hashes that miss its globals.
-const skipGreen = laneConfig.skipGreen;
 let inputsReport = null;
 if (skipGreen && result.mode === "narrowed" && result.graph) {
   try {
-    const globals = (skipGreen.globals ?? []).map((source) => new RegExp(source));
+    const dbInputs = config.database ? databaseInputRoutes({
+      repoRoot, config: config.database, lane,
+      trackedFiles: [...inputTree.keys()],
+      sourceFiles: [...result.graph.edges.keys()], isTest,
+    }) : [];
     inputsReport = testInputs({
       tests: result.tests,
-      edges: result.graph.edges,
-      blind: result.graph.blind,
+      edges: new Map([...result.graph.edges, ...globalGraph.edges]),
+      blind: [...result.graph.blind, ...globalGraph.unresolved.map((item) => item.file)],
       globals,
       // The plan's static routes: a file a suite reads off disk is an input of
       // that suite even though no import reaches it (lib/inputs.mjs).
-      routes: routes.filter((r) => r.match && r.entry).map((r) => ({ match: r.match, entries: r.entry })),
-      tree: treeIndex(repoRoot),
+      routes: [...inputRoutes, ...dbInputs],
+      tree: inputTree,
     });
     console.error(
       `[inputs] ${inputsReport.stats.hashed} test(s) hashed over their import closure + ${inputsReport.stats.globals} global path(s)` +
@@ -546,17 +608,18 @@ if (result.mode === "unclassified") {
 /** Write the plan file, set the action outputs, and print the summary. */
 function emit(plan) {
   const tests = plan.tests ?? [];
-  // Nothing to run means an EMPTY matrix, not one idle shard: the matrix is
-  // expanded before any runner exists, so a `1` here boots a machine to pay a
+  // A full fallback has no enumerated list, but MUST run a positive matrix.
+  // Only a genuinely empty selection means an EMPTY matrix, not one idle
+  // shard: the matrix is expanded before any runner exists, so a `1` here boots a machine to pay a
   // checkout, an install and a setup before exiting 0. The document and the
   // outputs must agree about that — the document is the artifact a reviewer
   // reads afterwards, so a `1` recorded beside `shards=[]` is a record of a
   // run that did not happen.
   const shardTotal =
-    tests.length === 0
-      ? 0
-      : plan.mode === "full"
-        ? maxShards
+    plan.mode === "full"
+      ? maxShards
+      : tests.length === 0
+        ? 0
         : Math.max(1, Math.min(maxShards, Math.ceil(tests.length / perShard)));
   const document = {
     lane: plan.lane ?? lane,

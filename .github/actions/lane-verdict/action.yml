@@ -13,7 +13,7 @@ description: >-
 
 inputs:
   mode:
-    description: '`lookup` (default) or `record`.'
+    description: '`lookup` (default), `record`, or `identity` (central implementation and runtime only).'
     required: false
     default: 'lookup'
   lane:
@@ -28,8 +28,10 @@ inputs:
   key-material:
     description: >-
       lookup: everything that decides how the lane RUNS and is not in the tree
-      the fingerprint hashes — the Node version, the pre-command, the command.
-      Folded into the key, so changing any of it invalidates every verdict.
+      the fingerprint hashes — resolved selection base and merge base, the
+      configured Node version, pre-command and command. Resolve Node BEFORE
+      lookup and use the same selection base when running. Central source,
+      caller workflow blobs and actual Node/runner identity are added automatically.
     required: false
     default: ''
   key:
@@ -38,6 +40,9 @@ inputs:
     default: ''
 
 outputs:
+  execution-identity:
+    description: 'identity mode: central source/runtime hash, or empty on failure (never reuse a verdict then).'
+    value: ${{ steps.identity.outputs.execution-identity }}
   hit:
     description: '`true` when a recorded verdict answers for this tree; anything else means run the lane.'
     value: ${{ steps.report.outputs.hit }}
@@ -48,6 +53,12 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Identify the implementation and runtime
+      id: identity
+      if: ${{ inputs.mode == 'identity' }}
+      shell: bash
+      run: node "$GITHUB_ACTION_PATH/verdict.mjs" identity
+
     - name: Key this lane's verdict
       id: key
       if: ${{ inputs.mode == 'lookup' }}

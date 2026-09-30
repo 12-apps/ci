@@ -64,8 +64,10 @@ const FROM_STATEMENT = /(?:^|[\n;])[ \t]*(import|export)\b([^;]*?)\bfrom\s*["'](
 /** `import "./side-effect"` — no clause, always a value edge. */
 const BARE_IMPORT = /(?:^|[\n;])[ \t]*import\s*["']([^"']+)["']/g;
 /** `import("./x")` and `require("./x")` — dynamic, always a value edge. */
-const DYNAMIC_IMPORT = /\bimport\(\s*["']([^"']+)["']\s*\)/g;
-const REQUIRE_CALL = /\brequire\(\s*["']([^"']+)["']\s*\)/g;
+const DYNAMIC_CALL = /(?<![\w$.])\b(import|require)\s*\(/g;
+// Anything beyond a single plain string argument is opaque to this parser.
+// In particular, computed paths MUST produce a blind dependency, not vanish.
+const LITERAL_ARGUMENT = /^\s*(["'])([^"'\\\r\n]*)\1\s*\)/;
 
 /**
  * One scan, two views of the same source.
@@ -271,12 +273,15 @@ export function bindingsOf(clause) {
   const beforeBrace = braces ? text.slice(0, text.indexOf("{")) : text;
   const hasDefault = /[A-Za-z0-9_$]/.test(beforeBrace.replace(/^(import|export)\s*/, "").replace(/,/g, "").trim());
   if (!braces) return { names: [], wildcard: hasDefault };
-  const names = braces[1]
+  const bindings = braces[1]
     .split(",")
     .map((n) => n.trim())
     .filter((n) => n && !/^type\s/.test(n))
-    .map((n) => n.split(/\s+as\s+/)[0].trim());
-  return { names, wildcard: hasDefault };
+    .map((n) => {
+      const [name, local = name] = n.split(/\s+as\s+/).map((part) => part.trim());
+      return [name, local];
+    });
+  return { names: bindings.map(([name]) => name), bindings, wildcard: hasDefault };
 }
 
 /**
@@ -296,8 +301,8 @@ export function parseImports(rawSource) {
   const push = (spec, clause, index, forceValue = false) => {
     const line = lineAt(source, index);
     const typeOnly = forceValue ? false : isTypeOnlyClause(clause);
-    const { names, wildcard } = forceValue ? { names: [], wildcard: true } : bindingsOf(clause);
-    out.push({ spec, typeOnly, wildcard, names, line, text: (lines[line - 1] ?? "").trim() });
+    const { names, wildcard, bindings = [] } = forceValue ? { names: [], wildcard: true } : bindingsOf(clause);
+    out.push({ spec, typeOnly, wildcard, names, bindings, line, position: index, text: (lines[line - 1] ?? "").trim() });
   };
   /**
    * Match `re` where it is CODE, and read the specifier from the code.
@@ -314,11 +319,21 @@ export function parseImports(rawSource) {
     for (const m of masked.matchAll(re)) real.add(m.index);
     return [...source.matchAll(re)].filter((m) => real.has(m.index));
   };
-  for (const m of inCode(FROM_STATEMENT)) push(m[3], m[2], m.index + m[0].indexOf(m[1]));
-  for (const m of inCode(BARE_IMPORT)) push(m[1], "", m.index, true);
-  for (const m of inCode(DYNAMIC_IMPORT)) push(m[1], "", m.index, true);
-  for (const m of inCode(REQUIRE_CALL)) push(m[1], "", m.index, true);
-  return out;
+  for (const m of inCode(FROM_STATEMENT)) {
+    push(m[3], m[2], m.index + m[0].indexOf(m[1]));
+    out[out.length - 1].statement = m[0].slice(m[0].indexOf(m[1]));
+  }
+  for (const m of inCode(BARE_IMPORT)) {
+    push(m[1], "", m.index, true);
+    out[out.length - 1].statement = m[0].slice(m[0].indexOf("import"));
+  }
+  for (const m of inCode(DYNAMIC_CALL)) {
+    const literal = LITERAL_ARGUMENT.exec(source.slice(m.index + m[0].length));
+    push(literal ? literal[2] : `<computed ${m[1]}>`, "", m.index, true);
+    out[out.length - 1].dynamic = true;
+    if (!literal) out[out.length - 1].unbounded = true;
+  }
+  return out.sort((a, b) => a.position - b.position).map(({ position, ...record }) => record);
 }
 
 /** Resolve a repo-relative path that may omit its extension or name a folder. */
@@ -487,13 +502,22 @@ export function listSourceFiles(repoRoot, roots) {
  * Build the import graph.
  *
  * @returns {{edges:Map<string,object[]>, unresolved:{file:string,spec:string,line:number}[]}}
- *   `unresolved` lists relative specifiers that did not resolve. A non-empty
- *   list means the graph is incomplete and the caller must widen.
+ *   `unresolved` lists unreadable files, computed imports and internal
+ *   specifiers that did not resolve. The caller must widen those owners.
+ *   Resolved source targets are scanned recursively outside the initial roots;
+ *   data and asset targets stay terminal dependencies.
  */
 export function buildGraph(repoRoot, files, options = {}) {
   const edges = new Map();
   const unresolved = [];
-  for (const file of files) {
+  // Roots discover entry points; they are not an assertion that dependencies
+  // stop at their boundaries. Follow resolved source files to a fixed point.
+  const pending = [...new Set(files)];
+  const seen = new Set();
+  for (let index = 0; index < pending.length; index += 1) {
+    const file = pending[index];
+    if (seen.has(file)) continue;
+    seen.add(file);
     let source;
     try {
       source = readFileSync(join(repoRoot, file), "utf8");
@@ -502,14 +526,30 @@ export function buildGraph(repoRoot, files, options = {}) {
       continue;
     }
     const out = [];
+    if (!EXTENSIONS.includes(file.slice(file.lastIndexOf(".")))) {
+      edges.set(file, out); // data/config/asset input: a terminal dependency
+      continue;
+    }
     for (const imp of parseImports(source)) {
       if (imp.typeOnly) continue;
+      if (imp.unbounded) {
+        unresolved.push({ file, spec: imp.spec, line: imp.line });
+        continue;
+      }
       const aliases = typeof options.aliasesFor === "function" ? options.aliasesFor(file) : (options.aliases ?? []);
       const { file: target, external, asset } = resolveSpecifier(repoRoot, imp.spec, file, {
         packages: options.packages,
         aliases,
       });
-      if (target) out.push({ ...imp, target });
+      if (target) {
+        out.push({ ...imp, target });
+        const insideRepo = target !== ".." && !target.startsWith("../") && !target.startsWith("/");
+        if (!insideRepo) {
+          unresolved.push({ file, spec: imp.spec, line: imp.line });
+        } else if (!asset && EXTENSIONS.includes(target.slice(target.lastIndexOf(".")))) {
+          if (!seen.has(target)) pending.push(target);
+        }
+      }
       // An unresolved ASSET is tolerated (generated, virtual, plugin-served);
       // an unresolved JS module means this walker misread the tree, and the
       // caller must widen rather than narrow against a graph with holes.

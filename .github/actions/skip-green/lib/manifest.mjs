@@ -4,7 +4,7 @@
  *
  * Shape (one file per lane, kept in the Actions cache under a per-PR prefix):
  *
- *   { version: "green-manifest-v1", lane: "unit",
+ *   { version: "green-manifest-v2", lane: "unit",
  *     entries: { "<test path>": { hash, sha, run } } }
  *
  * `hash` is the test's input hash from the plan (affected-plan lib/inputs.mjs):
@@ -21,7 +21,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-export const MANIFEST_VERSION = "green-manifest-v1";
+// Older entries predate dependency-complete inputs and execution provenance.
+export const MANIFEST_VERSION = "green-manifest-v2";
 
 /** A 40-hex git sha, a run id — anything else is not an entry we made. */
 const SHA_RE = /^[0-9a-f]{7,40}$/;

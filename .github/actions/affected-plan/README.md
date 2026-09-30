@@ -19,34 +19,30 @@ shared route entry and a component every app shell renders:
 | unit | 462 of 761 files (61%), 3,550 tests, 794s | **125 (16%)** |
 | integration | 65 of 143 files (45%), 776 cases, 503s | **0** |
 
-The 337 unit files that dropped out were not a heuristic guess. Every one of
-them reached the changed module through `packageRoutes`, `wireEndpoint` or
-`wireCall` — all three byte-identical across that diff. The two functions that
-did move (`wireQuery`, `wireBody`) moved *verbatim* into a new file and were
-re-exported under the same names, so nothing downstream could observe anything.
-The whole diff, once the move and the comments are subtracted, was **two comment
-lines** plus one genuinely new export that exactly one file imports.
-
-This action asks the useful question instead:
-
-> is the code **reachable** from this test different?
+Those are historical measurements of the original implementation, not a
+coverage proof. Identical export names and bodies in different files can
+observe different imported bindings or module initialization. The selector now
+reruns callers of import/re-export rewrites rather than assuming relocation is
+behavior-preserving. The cost of that correction needs a new consumer run.
 
 ## How it decides
 
-1. **Hash every exported symbol's body**, comments stripped. A comment cannot
-   change behaviour, so documenting a shared module must not re-run the suite.
-2. **Key those hashes by NAME across the whole diff.** A function moved between
-   files with an identical body is unchanged. Relocation is the most common
-   shape of refactor, and treating it as "everything changed" makes a selector
-   useless exactly when the diff is largest. Re-exports are settled to the body
-   they forward, so `export function x` → `export { x } from "./moved"` is a
-   move, not a change.
-3. **Follow an importer only when it imports a changed symbol.** An importer
-   taking `packageRoutes` from a module whose `packageRoutes` is identical is
-   not affected, however much else in that module moved.
-4. **Once affected, a file's own exports are all treated as changed.** A
-   deliberate over-approximation: tracking which of its exports actually differ
-   would need to type-check the program.
+1. **Compare same-file exported bodies**, preserving literal bytes while
+   stripping comments. A string, template or regular-expression edit is a
+   behavior change even when it only changes whitespace.
+2. **Compare module context too.** Import targets, bindings, re-exports and
+   top-level statements can change behavior without changing a function body.
+   Equality with an export in another file is not evidence of equivalence.
+3. **Narrow deferred functions by the bindings they observe.** Independent
+   unchanged function exports can still avoid unrelated tests.
+4. **Propagate module evaluation effects through every runtime importer.** An
+   eager initializer may throw before the imported binding is used. Unknown
+   initialization and import rewrites therefore widen that module's importers,
+   including barrels and unused imports.
+5. **Follow resolved source dependencies beyond the configured roots.** Roots
+   discover the lane's test inventory; they do not truncate import closures.
+   Computed imports are unbounded. Their owners and dependent tests run, and
+   those closures cannot produce reusable per-test hashes.
 
 Type-only imports are not edges — they are erased before any module graph
 exists, so a change cannot travel through one.
@@ -55,15 +51,15 @@ exists, so a change cannot travel through one.
 
 Both failure directions are green, and they are not symmetric. Running too much
 costs minutes. Running too little reports success on code no test touched, which
-looks exactly like success on code every test touched. So every uncertainty
-widens to `mode=full`:
+looks exactly like success on code every test touched. Uncertainty widens the affected module and its importers, or the full lane
+when its inventory or selection context cannot be established:
 
 | situation | result |
 |---|---|
 | config missing or unreadable | `full` |
 | unknown lane | `full` |
-| the diff cannot be computed | `full` |
-| a relative import does not resolve | `full` — never narrow against a graph with holes |
+| the diff cannot be computed | `full`, with a positive shard count even when the test list is unknown |
+| an import is unresolved/computed | run its owner and dependent tests; never reuse an unbounded closure |
 | a declaration cannot be bracketed | that file reports `*` (all exports) |
 | a changed path matching no rule | **`unclassified` — the action exits 1** |
 
@@ -379,3 +375,24 @@ were reached, and which features they select).
 `affectedSymbols` and `reasons` are what make a narrowed lane reviewable: for
 every selected file there is a chain of real import statements with line
 numbers, and anyone can open those files and check.
+
+## Reusable input coverage
+
+`skipGreen.globals` declares inputs loaded outside test imports, such as runner
+configuration and setup files. The global files **and their transitive
+imports/routed reads** enter every per-test hash. A change to one seeds the
+lane's tests even when no test imports that setup file. A blind global prevents
+reuse. Database-owned paths retain domain-aware selection instead of widening
+all tests merely because the consumer also lists migrations as hash globals.
+
+Static runtime-read routes and database routes are hash dependencies as well as
+selection declarations. Database hash routes are computed from the complete
+current inventory, not just the current pull-request diff, so a later push
+cannot reuse a migration reader's result after the migration is edited, renamed
+or deleted. Unchanged bounded inputs remain reusable. SQL comment-only changes
+retain their narrow behavior; quoted SQL values are not discarded as comments.
+
+The `test-inputs-v2` format and green-manifest v2 retire earlier incomplete
+proofs. Source/runtime identity is separately included in the workflow's key.
+The caller must still declare runtime inputs that imports and database routing
+cannot discover; non-hermetic tests belong in the always-run list.

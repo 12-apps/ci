@@ -3,7 +3,7 @@
 // real run produces: a push event, an unset command, a command that dies, a
 // command that prints prose, a lane run with a different command.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -15,15 +15,17 @@ import { verdictKey } from "../verdict.mjs";
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "verdict.mjs");
 const TMP = mkdtempSync(join(tmpdir(), "lane-verdict-"));
 after(() => rmSync(TMP, { recursive: true, force: true }));
+execFileSync("git", ["init", "-q", TMP]);
+execFileSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture", "--allow-empty"], { cwd: TMP });
 
 const FP = "a".repeat(64);
-const ok = (over = {}) => verdictKey({ lane: "lint", fingerprintCommand: "fp", material: "24\npnpm turbo run lint", event: "pull_request", run: () => `${FP}\n`, ...over });
+const ok = (over = {}) => verdictKey({ lane: "lint", fingerprintCommand: "fp", material: "24\npnpm turbo run lint", event: "pull_request", run: () => `${FP}\n`, identity: () => "b".repeat(64), ...over });
 
-test("a pull request with a hashing command gets `<lane>-lane-<key16>-<fingerprint>`", () => {
+test("a pull request gets a new-schema key, never an old verdict key", () => {
   const { key, fingerprint, why } = ok();
   assert.equal(why, "");
   assert.equal(fingerprint, FP);
-  assert.match(key, new RegExp(`^lint-lane-[0-9a-f]{16}-${FP}$`));
+  assert.match(key, new RegExp(`^lint-lane-ci-verdict-v2-[0-9a-f]{16}-${FP}$`));
 });
 
 test("the key folds in how the lane runs — a different command or Node version is a different key", () => {
@@ -75,7 +77,7 @@ function cli(mode, env) {
 test("CLI key: runs the command through bash and writes key + fingerprint", () => {
   const r = cli("key", { LANE: "build", FP_CMD: `printf '%s\\n' ${FP}`, KEY_MATERIAL: "24", GITHUB_EVENT_NAME: "pull_request" });
   assert.equal(r.code, 0);
-  assert.match(r.emitted.key, new RegExp(`^build-lane-[0-9a-f]{16}-${FP}$`));
+  assert.match(r.emitted.key, new RegExp(`^build-lane-ci-verdict-v2-[0-9a-f]{16}-${FP}$`));
   assert.equal(r.emitted.fingerprint, FP);
 });
 
@@ -84,6 +86,34 @@ test("CLI key: a failing command exits 0 with an EMPTY key — the lane runs, th
   assert.equal(r.code, 0);
   assert.equal(r.emitted.key, "");
   assert.match(r.stdout, /no lookup — fingerprint command failed/);
+});
+
+test("CLI key: failed pipeline producers and early failed commands cannot hash as success", () => {
+  for (const command of [
+    'git ls-tree -r missing-ref | sha256sum | cut -d " " -f 1',
+    `false; printf '%s\\n' ${FP}`,
+    `node -e 'process.exit(17)' | cat; printf '%s\\n' ${FP}`,
+  ]) {
+    const r = cli("key", { LANE: "build", FP_CMD: command, GITHUB_EVENT_NAME: "pull_request" });
+    assert.equal(r.code, 0);
+    assert.equal(r.emitted.key, "", command);
+    assert.match(r.stdout, /fingerprint command failed/);
+  }
+});
+
+test("an unavailable implementation identity disables the verdict instead of guessing", () => {
+  for (const identity of [() => "", () => { throw new Error("unreadable implementation"); }]) {
+    const r = ok({ identity });
+    assert.equal(r.key, "");
+    assert.match(r.why, /execution identity unavailable/);
+  }
+  assert.notEqual(ok({ identity: () => "c".repeat(64) }).key, ok().key);
+});
+
+test("CLI identity mode publishes the source/runtime identity", () => {
+  const r = cli("identity", {});
+  assert.equal(r.code, 0);
+  assert.match(r.emitted["execution-identity"], /^[0-9a-f]{64}$/);
 });
 
 test("CLI key: a push never looks anything up", () => {

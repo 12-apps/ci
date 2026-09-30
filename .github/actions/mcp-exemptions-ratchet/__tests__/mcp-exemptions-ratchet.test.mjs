@@ -31,7 +31,7 @@ const write = (root, f, body) => { mkdirSync(path.dirname(path.join(root, f)), {
  * @param {{ base?: string | null, head?: string | null, touch?: string[], shimFails?: boolean }} o
  *   base/head: the exemptions file's content at each side (null = absent)
  */
-function ratchet({ base = "menu.list\n", head, touch = [], shimFails = false }) {
+function ratchet({ base = "menu.list\n", head, touch = [], shimFails = false, pinned = false, advanceBase = false, invalidBase = false }) {
   const root = mkdtempSync(path.join(tmpdir(), "ratchet-"));
   const origin = path.join(root, "origin.git");
   const work = path.join(root, "work");
@@ -41,12 +41,14 @@ function ratchet({ base = "menu.list\n", head, touch = [], shimFails = false }) 
   write(work, "apps/web/package.json", "{}\n");
   if (base !== null) write(work, FILE, `# MCP tools without a test\n${base}`);
   git(work, "add", "-A"); git(work, "commit", "-qm", "base"); git(work, "push", "-q", "origin", "HEAD:main");
+  const baseSHA = git(work, "rev-parse", "HEAD");
   git(work, "checkout", "-qb", "pr");
   const final = head === undefined ? base : head;
   if (final === null) rmSync(path.join(work, FILE), { force: true });
   else write(work, FILE, `# MCP tools without a test\n${final}`);
   for (const f of touch) write(work, f, `export const touched = ${JSON.stringify(f)}\n`);
   git(work, "add", "-A"); git(work, "commit", "-qm", "pr", "--allow-empty");
+  if (advanceBase) git(work, "push", "-q", "origin", "HEAD:main");
   // The shim maps the tools the file lists NOW to their backing files.
   const bin = path.join(root, "bin");
   mkdirSync(bin);
@@ -57,7 +59,8 @@ function ratchet({ base = "menu.list\n", head, touch = [], shimFails = false }) 
     : `#!/usr/bin/env bash\ncat ${JSON.stringify(path.join(root, "exempt-files.txt"))}\n`);
   chmodSync(path.join(bin, "pnpm"), 0o755);
   const r = spawnSync("bash", ["-e", "-c", script], { cwd: work, encoding: "utf8",
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, BASE_REF: "main", EXEMPTIONS_FILE: FILE, PKG_DIR: "apps/web" } });
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, BASE_REF: "main", BASE_SHA: invalidBase ? "main" : pinned ? baseSHA : "", EXEMPTIONS_FILE: FILE, PKG_DIR: "apps/web" } });
+  rmSync(root, { recursive: true, force: true });
   return { ok: r.status === 0, out: `${r.stdout}${r.stderr}` };
 }
 
@@ -96,4 +99,18 @@ test("a mapping that errors fails rather than being trusted", () => {
   const r = ratchet({ shimFails: true });
   assert.ok(!r.ok);
   assert.match(r.out, /--exempt-files exited 3/);
+});
+
+test("a pinned verdict base cannot change when the target branch advances before the ratchet", () => {
+  const options = { head: "menu.list\norders.get\n", advanceBase: true };
+  assert.ok(ratchet(options).ok, "control: a fresh mutable base sees no additions");
+  const pinned = ratchet({ ...options, pinned: true });
+  assert.ok(!pinned.ok, "the recorded base must still detect the added exemption");
+  assert.match(pinned.out, /may only shrink, never grow/);
+});
+
+test("base-sha accepts only immutable commit identifiers", () => {
+  const r = ratchet({ invalidBase: true });
+  assert.ok(!r.ok);
+  assert.match(r.out, /base-sha must be an immutable commit id/);
 });

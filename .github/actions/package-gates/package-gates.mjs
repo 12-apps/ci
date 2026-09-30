@@ -52,7 +52,10 @@ export function runGates(gates, { cwd = '.', run = defaultRun, log = console.log
 }
 
 function defaultRun(command, cwd) {
-  const result = spawnSync('bash', ['-c', command], { cwd, stdio: 'inherit' });
+  // Match a GitHub bash step: a successful tee/grep must not hide a failed
+  // producer, and an early failed command must not fall through to success.
+  // The JavaScript loop still runs every independent gate after this one fails.
+  const result = spawnSync('bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', command], { cwd, stdio: 'inherit' });
   // A command killed by a signal reports status null; that is a failure, and
   // returning 0 for it would be the silent pass this file exists to avoid.
   if (result.status === null) return result.signal ? 1 : 1;

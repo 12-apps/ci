@@ -57,7 +57,7 @@ import { join } from "node:path";
 
 import { changedBlocks, changedFields, schemaBlocks, schemaModels, delegateOf } from "../../migration-domains/lib/prisma-schema.mjs";
 import { loadRegistry } from "../../migration-domains/lib/registry.mjs";
-import { migrationEffects, readDeclaration, stripSql, walkMigrations } from "../../migration-domains/lib/sql.mjs";
+import { migrationEffects, readDeclaration, walkMigrations } from "../../migration-domains/lib/sql.mjs";
 import { entriesForMatches } from "./occurrences.mjs";
 import { stripComments } from "./modules.mjs";
 
@@ -70,6 +70,66 @@ const OPS = [
 
 const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const camel = (snake) => snake.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
+
+/** SQL comparison must preserve values: stripSql() erases them for parsing. */
+function sqlSignature(sql) {
+  let out = "";
+  let at = 0;
+  // PostgreSQL concatenates adjacent string literals only across a newline.
+  // Keep that distinction even outside the literals themselves.
+  const space = (newline = false) => {
+    if (out.endsWith("\n")) return;
+    if (newline) out = `${out.replace(/ $/, "")}\n`;
+    else if (!out.endsWith(" ")) out += " ";
+  };
+  while (at < sql.length) {
+    if (/\s/.test(sql[at])) { space(/[\r\n]/.test(sql[at])); at++; continue; }
+    if (sql.startsWith("--", at)) {
+      const end = sql.indexOf("\n", at + 2);
+      at = end < 0 ? sql.length : end;
+      space();
+      continue;
+    }
+    if (sql.startsWith("/*", at)) {
+      const start = at;
+      let depth = 1;
+      at += 2;
+      while (at < sql.length && depth > 0) {
+        if (sql.startsWith("/*", at)) { depth++; at += 2; }
+        else if (sql.startsWith("*/", at)) { depth--; at += 2; }
+        else at++;
+      }
+      space(/[\r\n]/.test(sql.slice(start, at)));
+      continue;
+    }
+    const quote = sql[at];
+    if (quote === "'" || quote === '"') {
+      const start = at++;
+      const escaped = quote === "'" && /[eE]/.test(sql[start - 1] ?? "") && !/[\w$]/.test(sql[start - 2] ?? "");
+      while (at < sql.length) {
+        if (escaped && sql[at] === "\\") { at += 2; continue; }
+        if (sql[at] === quote) {
+          if (sql[at + 1] === quote) { at += 2; continue; }
+          at++;
+          break;
+        }
+        at++;
+      }
+      out += sql.slice(start, at);
+      continue;
+    }
+    const dollar = sql.slice(at).match(/^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/)?.[0];
+    if (dollar) {
+      const end = sql.indexOf(dollar, at + dollar.length);
+      const stop = end < 0 ? sql.length : end + dollar.length;
+      out += sql.slice(at, stop);
+      at = stop;
+      continue;
+    }
+    out += sql[at++];
+  }
+  return out.trim();
+}
 
 /**
  * @param {object} options
@@ -85,7 +145,7 @@ const camel = (snake) => snake.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase()
  * @returns {{ handles: (path:string)=>boolean, routes: Map<string,{entries:string[], why:string}>, problems: Map<string,string> }}
  */
 export function databaseRoutes(options) {
-  const { repoRoot, config, lane, changed, deleted, readBase, trackedFiles, sourceFiles, isTest } = options;
+  const { repoRoot, config, lane, changed, deleted, readBase, trackedFiles, sourceFiles, isTest, forInputs = false } = options;
   const migrationRe = new RegExp(config.migrations ?? String.raw`(^|/)prisma/migrations/[^/]+/migration\.sql$`);
   const schemaRe = config.schemaFiles ? new RegExp(config.schemaFiles) : null;
   const mode = config.lanes?.[lane] ?? "effects";
@@ -251,8 +311,7 @@ export function databaseRoutes(options) {
       // Named outright: files that read the WHOLE folder even though they also
       // name a migration or two (a discovery test pinning known entries).
       for (const f of config.migrationReaders ?? []) entries.add(f);
-      const squash = (sql) => stripSql(sql).replace(/\s+/g, " ").trim();
-      const sqlChanged = head === null || base === null || squash(head) !== squash(base);
+      const sqlChanged = head === null || base === null || sqlSignature(head) !== sqlSignature(base);
       if (!sqlChanged) why.push("comments only — the database it builds is unchanged");
       if (sqlChanged && mode === "effects") {
         anyChange = true;
@@ -323,8 +382,34 @@ export function databaseRoutes(options) {
   if (anyChange && always.length > 0)
     for (const [, route] of routes) {
       for (const t of always) if (!route.entries.includes(t)) route.entries.push(t);
-      break;
+      // Selection needs one replay proof per change set. Input hashing must
+      // include EVERY database file that can change that replay verdict.
+      if (!forInputs) break;
     }
 
   return { handles, routes, problems };
+}
+
+/**
+ * Persistent database inputs: what each reader/query/replayer can observe at
+ * HEAD, independently of which files happen to be in this PR's current diff.
+ *
+ * Reuse asks about the next push, so changed-path routes are not a dependency
+ * definition. Compare every tracked database input against absence to recover
+ * its complete current effects. The ordinary router retains ownership of
+ * selection and its domain/column precision; hashes conservatively count the
+ * whole input file for each reached entry.
+ */
+export function databaseInputRoutes(options) {
+  const { routes, problems } = databaseRoutes({
+    ...options,
+    changed: options.trackedFiles,
+    deleted: [],
+    readBase: () => null,
+    forInputs: true,
+  });
+  if (problems.size > 0) {
+    throw new Error(`unbounded database inputs: ${[...problems.keys()].join(", ")}`);
+  }
+  return [...routes].map(([file, route]) => ({ files: [file], entries: route.entries }));
 }

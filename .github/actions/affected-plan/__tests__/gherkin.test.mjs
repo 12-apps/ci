@@ -197,9 +197,9 @@ test("a changed import reaches only the step definitions that use it", () => {
     "steps/data.ts": "export const BUYERS = [2];\nexport const OTHER = 1;\n",
     "steps/buyer.steps.ts": [
       'import { BUYERS, OTHER } from "./data";',
-      "const byName = new Map(BUYERS.map((b) => [b, b]));",
+      "const byName = () => new Map(BUYERS.map((b) => [b, b]));",
       'Given("a buyer", () => OTHER);',
-      'When("she pays", () => byName.get(1));',
+      'When("she pays", () => byName().get(1));',
       'Then("she browses", () => OTHER);',
     ].join("\n"),
   });

@@ -20,6 +20,10 @@ inputs:
     description: 'Branch the PR merges into.'
     required: false
     default: 'main'
+  base-sha:
+    description: 'Optional immutable base tip already fetched by the caller; prevents a verdict/execution base race.'
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -27,6 +31,7 @@ runs:
       shell: bash
       env:
         BASE_REF: ${{ inputs.base-ref }}
+        BASE_SHA: ${{ inputs.base-sha }}
         EXEMPTIONS_FILE: ${{ inputs.exemptions-file }}
         PKG_DIR: ${{ inputs.package-dir }}
       run: |
@@ -46,9 +51,20 @@ runs:
           exit 0
         fi
         # Fail-fast on the diff baseline (never masked): we must have the base.
-        git fetch --no-tags origin "$BASE_REF"
-        merge_base="$(git merge-base "origin/$BASE_REF" HEAD)" || {
-          echo "::error::Could not compute merge-base with origin/$BASE_REF"
+        if [ -n "${BASE_SHA:-}" ]; then
+          # A verdict-bearing caller already fetched this exact commit. Do not
+          # resolve the branch a second time: it may have advanced meanwhile.
+          if ! [[ "$BASE_SHA" =~ ^[0-9a-f]{40,64}$ ]]; then
+            echo "::error::base-sha must be an immutable commit id"
+            exit 1
+          fi
+          base="$(git rev-parse --verify "$BASE_SHA^{commit}")"
+        else
+          git fetch --no-tags origin "$BASE_REF"
+          base=FETCH_HEAD
+        fi
+        merge_base="$(git merge-base "$base" HEAD)" || {
+          echo "::error::Could not compute merge-base with $base"
           exit 1
         }
 
