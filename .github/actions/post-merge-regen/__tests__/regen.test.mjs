@@ -13,14 +13,14 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 
 import { GitHubError, disableAutoMerge, enableAutoMerge } from "../lib/github.mjs";
 import { branchFor, planStart, regenPrs } from "../lib/plan.mjs";
-import { authEnv, redact, runLand } from "../land.mjs";
+import { authEnv, globToRegExp, redact, refusedPaths, runLand } from "../land.mjs";
 import { runPrepare } from "../prepare.mjs";
 
 const REPO = "acme/app";
@@ -268,6 +268,35 @@ describe("land", () => {
     assert.ok(!gh.calls.some((c) => c[0] === "pat"));
   });
 
+  it("refuses a workflow MOVED out of .github/workflows (rename detection would show only the destination)", async () => {
+    const w = world(null);
+    const gen = join(w.origin, "..", "gen2");
+    execFileSync("git", ["clone", "-q", w.origin, gen]);
+    mkdirSync(join(gen, ".github", "workflows"), { recursive: true });
+    writeFileSync(join(gen, ".github", "workflows", "ci.yml"), "on: push\n");
+    sh(gen, "add", "-A");
+    sh(gen, "-c", "user.name=X", "-c", "user.email=x@example.invalid", "commit", "-qm", "add ci");
+    sh(gen, "push", "-q", "origin", "HEAD:main");
+    const tip = sh(w.origin, "rev-parse", "main");
+    sh(gen, "mv", ".github/workflows/ci.yml", "moved.yml");
+    const patch = join(w.origin, "..", "rename.patch");
+    writeFileSync(patch, execFileSync("git", ["diff", "--cached", "--binary"], { cwd: gen }));
+    sh(w.work, "fetch", "-q", "origin");
+    sh(w.work, "checkout", "-q", "--detach", tip);
+    await assert.rejects(runLand(landCfg(w, { tip, patch }), landDeps(w, github())), /may not change .*\.github\/workflows\/ci\.yml/);
+  });
+
+  it("refuses a path outside the caller's allow-list, and lands one inside it", async () => {
+    const outside = world((dir) => writeFileSync(join(dir, "draft.txt"), "numbered\n"));
+    await assert.rejects(runLand(landCfg(outside, { allow: "docs/adr/**" }), landDeps(outside, github())), /may not change draft\.txt/);
+    const inside = world((dir) => {
+      mkdirSync(join(dir, "docs", "adr"), { recursive: true });
+      writeFileSync(join(dir, "docs", "adr", "0001-x.md"), "# 0001\n");
+    });
+    const res = await runLand(landCfg(inside, { allow: "docs/adr/**\n" }), landDeps(inside, github()));
+    assert.equal(res.action, "opened");
+  });
+
   it("refuses a checkout that is not at the tip prepare chose", async () => {
     const w = world((dir) => writeFileSync(join(dir, "draft.txt"), "numbered\n"));
     await assert.rejects(runLand(landCfg(w, { tip: "0".repeat(40) }), landDeps(w, github())), /not at 0{40}/);
@@ -319,3 +348,43 @@ describe("the PAT never appears in a URL or a message", () => {
     assert.equal(redact(`fatal: ghp_secret and ${b64}`, ["ghp_secret"]), "fatal: *** and ***");
   });
 });
+
+describe("path rules", () => {
+  it("globs: ** spans directories, * does not", () => {
+    assert.ok(globToRegExp("docs/adr/**").test("docs/adr/0001-x.md"));
+    assert.ok(globToRegExp("docs/adr/**").test("docs/adr/sub/x.md"));
+    assert.ok(!globToRegExp("docs/*.md").test("docs/adr/x.md"));
+    assert.ok(globToRegExp("docs/*.md").test("docs/INDEX.md"));
+    assert.ok(!globToRegExp("docs/adr/**").test("docs/adrx/y.md"));
+  });
+
+  it("workflows and actions are refused even when the allow-list would let them through", () => {
+    assert.deepEqual(refusedPaths([".github/workflows/a.yml", ".github/actions/x/action.yml", "docs/a.md"], "**"), [".github/workflows/a.yml", ".github/actions/x/action.yml"]);
+    assert.deepEqual(refusedPaths(["anything.txt"], ""), []);
+  });
+});
+
+describe("the reusable workflow's grants match what each job calls", () => {
+  const yml = readFileSync(new URL("../../../workflows/post-merge-regen.yml", import.meta.url), "utf8");
+  const block = (name) => {
+    const start = yml.indexOf(`\n  ${name}:\n`);
+    const rest = yml.slice(start + 1);
+    const next = rest.slice(1).search(/\n  [a-z]+:\n/);
+    return next === -1 ? rest : rest.slice(0, next + 1);
+  };
+
+  it("prepare can merge (its keep path enables auto-merge or merges directly)", () => {
+    assert.match(block("prepare"), /permissions:\n\s+contents: write\n\s+pull-requests: write/);
+  });
+
+  it("generate, where the caller's command runs, is read-only and sees no secret", () => {
+    const b = block("generate");
+    assert.match(b, /permissions:\n\s+contents: read\n/);
+    assert.doesNotMatch(b, /pull-requests:|secrets\./);
+  });
+
+  it("serializes whole runs at the workflow level", () => {
+    assert.match(yml, /\nconcurrency:\n\s+group: post-merge-regen-engine-\$\{\{ github\.repository \}\}\n\s+cancel-in-progress: false/);
+  });
+});
+

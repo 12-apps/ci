@@ -34,8 +34,34 @@ import { branchFor, regenPrs } from "./lib/plan.mjs";
 /** Git never runs a hook or an fsmonitor from the working tree's config here. */
 const HARDENED = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
 
-/** Paths a regeneration may never write: a workflow change needs its own review (and a PAT `workflow` scope). */
-const FORBIDDEN = /^\.github\/workflows\//;
+/**
+ * Paths a regeneration may never write, whatever the caller allows. A change
+ * to a workflow, or to an action a workflow runs, needs its own review, and it
+ * would land here with zero approvals.
+ */
+const FORBIDDEN = /^\.github\/(workflows|actions)\//;
+
+/** `**` spans directories, `*` does not, `?` is one character; anchored at both ends. */
+export function globToRegExp(glob) {
+  let out = "";
+  for (let i = 0; i < glob.length; i += 1) {
+    const ch = glob[i];
+    if (ch === "*" && glob[i + 1] === "*") {
+      out += ".*";
+      i += 1;
+      if (glob[i + 1] === "/") i += 1;
+    } else if (ch === "*") out += "[^/]*";
+    else if (ch === "?") out += "[^/]";
+    else out += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`^${out}$`);
+}
+
+/** The paths of `touched` this regeneration may not write, given the caller's allow-list (empty: no list). */
+export function refusedPaths(touched, allow) {
+  const globs = (allow ?? "").split("\n").map((g) => g.trim()).filter(Boolean).map(globToRegExp);
+  return touched.filter((path) => FORBIDDEN.test(path) || (globs.length > 0 && !globs.some((re) => re.test(path))));
+}
 
 export function authEnv(token) {
   if (!token) return {};
@@ -91,9 +117,11 @@ export async function runLand(cfg, deps) {
 
   if (git("rev-parse", "HEAD") !== tip) throw new Error(`post-merge-regen: the checkout is not at ${tip}`);
   git("apply", "--index", "--binary", patch);
-  const touched = git("diff", "--cached", "--name-only").split("\n").filter(Boolean);
-  const forbidden = touched.filter((path) => FORBIDDEN.test(path));
-  if (forbidden.length) throw new Error(`post-merge-regen: the regeneration may not change ${forbidden.join(", ")}`);
+  // `--no-renames`: with rename detection a file moved OUT of a refused path
+  // shows only its destination, and the deletion of the source would pass.
+  const touched = git("diff", "--cached", "--name-only", "--no-renames").split("\n").filter(Boolean);
+  const refused = refusedPaths(touched, cfg.allow);
+  if (refused.length) throw new Error(`post-merge-regen: the regeneration may not change ${refused.join(", ")}`);
   // `--author` as well as `user.*`: an ambient GIT_AUTHOR_NAME outranks
   // `-c user.name` and would put somebody else's name on the commit.
   git("-c", `user.name=${name}`, "-c", `user.email=${email}`, "commit", "--quiet", "--no-verify", `--author=${name} <${email}>`, "-m", title, ...(body ? ["-m", body] : []));
@@ -131,6 +159,7 @@ async function main() {
     title: env.PR_TITLE,
     body: env.PR_BODY,
     author: env.COMMIT_AUTHOR,
+    allow: env.ALLOW_PATHS ?? "",
     patch: env.REGEN_PATCH && existsSync(env.REGEN_PATCH) ? env.REGEN_PATCH : null,
   };
   for (const key of ["repo", "base", "prefix", "tip", "title"]) {

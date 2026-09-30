@@ -49,6 +49,10 @@ inputs:
     description: '`land`: the PR body and the commit body.'
     required: false
     default: ''
+  allow-paths:
+    description: '`land`: newline-separated globs the regeneration may write. Empty: anything but `.github/workflows/**` and `.github/actions/**`.'
+    required: false
+    default: ''
   commit-author:
     description: '`land`: the commit author, as "Name <email>".'
     required: false
@@ -84,6 +88,7 @@ runs:
         PR_TITLE: ${{ inputs.title }}
         PR_BODY: ${{ inputs.body }}
         COMMIT_AUTHOR: ${{ inputs.commit-author }}
+        ALLOW_PATHS: ${{ inputs.allow-paths }}
       run: |
         case "$MODE" in
           prepare) node "$GITHUB_ACTION_PATH/prepare.mjs" ;;

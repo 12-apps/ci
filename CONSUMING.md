@@ -2182,9 +2182,6 @@ permissions:
 
 jobs:
   regen:
-    concurrency:
-      group: post-merge-regen
-      cancel-in-progress: false
     permissions:
       contents: write
       pull-requests: write
@@ -2192,6 +2189,8 @@ jobs:
     with:
       command: node scripts/post-merge-regen.mjs
       title: 'chore(docs): regenerate after the merge (#123)'
+      allow-paths: |
+        docs/adr/**
     secrets:
       PR_TOKEN: ${{ secrets.SOME_PAT }}
 ```
@@ -2209,9 +2208,14 @@ jobs:
 - **`commit-author`** defaults to github-actions[bot]. If your ruleset holds
   "unattributed" changes, set it to the PAT's user, because the push is made as
   that user.
-- **`concurrency`** on the caller's job serializes all three jobs of a run. A
-  newer pending run replaces an older one, which is harmless because every run
-  reads the live tip.
+- **`allow-paths`** (optional) lists the globs the regeneration may write. A
+  path outside the list turns the run red instead of landing with zero
+  approvals. `.github/workflows/**` and `.github/actions/**` are always
+  refused, and a file renamed out of one counts as a change to it.
+- **Runners** must be ephemeral. Code the command leaves on a reused host
+  would run next to the PAT in `land`.
+- **Concurrency** is the engine's. The reusable workflow serializes whole runs
+  itself, so do not add a group of your own on the calling job.
 - **`workflow_dispatch`** is how you run it sooner. A regen merge starts
   nothing, so without a dispatch the next regeneration waits for the next human
   merge.
