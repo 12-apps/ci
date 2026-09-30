@@ -96,11 +96,22 @@ export function closureOf(file, edges, blindFiles) {
  * @param {Map<string, object[]>} options.edges   `buildGraph` edges the selection walked
  * @param {string[]} [options.blind]        files whose imports did not resolve
  * @param {RegExp[]} [options.globals]      the lane's global inputs, matched against tracked paths
+ * @param {{ match: RegExp, entries: string[] }[]} [options.routes]  the plan's static
+ *   routes: a committed file no module imports, routed to the file(s) that
+ *   carry its effect — typically the suite that reads it with `readFileSync`.
+ *   The closure cannot see such a file, so every tracked path a route matches
+ *   joins the inputs of any test whose closure holds one of its entries.
  * @param {Map<string,string>} options.tree `treeIndex()` of the head
  * @returns {{ inputs: Record<string, string|null>, globalFiles: string[], stats: object }}
  */
-export function testInputs({ tests, edges, blind = [], globals = [], tree }) {
+export function testInputs({ tests, edges, blind = [], globals = [], routes = [], tree }) {
   const blindFiles = new Set(blind);
+  // Static routes, each resolved once against the tree: the files it matches,
+  // and the entries that make a test care about them.
+  const routed = routes
+    .filter((r) => r?.match instanceof RegExp && Array.isArray(r.entries) && r.entries.length > 0)
+    .map((r) => ({ entries: new Set(r.entries), files: [...tree.keys()].filter((p) => r.match.test(p)) }))
+    .filter((r) => r.files.length > 0);
   // Global inputs are the same for every test in the lane, so they are lined
   // up once and folded into each hash. A global that matches no tracked path
   // contributes nothing — and a consumer that spells one wrong gets a hash
@@ -123,9 +134,14 @@ export function testInputs({ tests, edges, blind = [], globals = [], tree }) {
     // Every closure file must be in the tree: the graph was built from the
     // checkout, so a file the tree lacks is one the checkout changed under
     // us, or one git does not track — either way not a stable input.
+    // A route whose entry is in the closure brings the files it matches along:
+    // the suite reads them off disk, so they decide its verdict as surely as an
+    // import would — the graph just cannot see them.
+    const counted = new Set(files);
+    for (const r of routed) if ([...r.entries].some((e) => files.has(e))) for (const f of r.files) counted.add(f);
     const lines = [];
     let complete = true;
-    for (const file of files) {
+    for (const file of counted) {
       const entry = tree.get(file);
       if (!entry) {
         complete = false;
