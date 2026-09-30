@@ -184,10 +184,17 @@ for (const lane of LANES) {
     assert.match(step, /LANE_RUNNER: \$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}/, "E8: the image it ran on");
     assert.match(step, /LANE_SCHEMA: verdict-v2/, "the epoch that retires every key recorded before these joined");
     // …and every one of them is IN the hash, not merely declared.
-    const printf = /printf '((?:%s\\0)+%s)' \\\n((?:\s+"\$[A-Z_]+"(?: \\)?\n?)+)\s*\| sha256sum/.exec(step);
-    assert.ok(printf, `${lane}: the key printf was not found`);
-    const vars = [...printf[2].matchAll(/"\$([A-Z_]+)"/g)].map((m) => m[1]);
-    assert.equal(printf[1].split("\\0").length, vars.length, "one %s per variable");
+    // String slicing, not one regex over the whole step: a nested quantifier
+    // over the continuation lines backtracks exponentially (CodeQL flagged the
+    // first draft), and the shape here is fixed enough to cut by anchors.
+    const from = step.indexOf("lane=\"$(printf '");
+    assert.notEqual(from, -1, `${lane}: the key printf was not found`);
+    const to = step.indexOf("| sha256sum", from);
+    assert.notEqual(to, -1, `${lane}: the key printf is not piped to sha256sum`);
+    const segment = step.slice(from, to);
+    const format = /printf '([^']*)'/.exec(segment)[1];
+    const vars = [...segment.matchAll(/"\$([A-Z_]+)"/g)].map((m) => m[1]);
+    assert.equal(format.split("\\0").length, vars.length, "one %s per variable");
     for (const v of ["LANE_SCHEMA", "LANE_NODE", "LANE_PRE", "LANE_CMD", "FP_CMD", "LANE_BASE", "LANE_ENGINE", "LANE_RUNNER"]) {
       assert.ok(vars.includes(v), `${lane}: ${v} is declared but not hashed`);
     }
