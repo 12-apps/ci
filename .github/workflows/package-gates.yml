@@ -132,6 +132,19 @@ on:
         type: string
         required: false
         default: ''
+      fingerprint-command:
+        description: >-
+          OPT-IN. Shell that prints a hex hash of every tracked path that can
+          change the gates lane's outcome (a consumer script over `git
+          ls-tree`). On a pull request the job looks the hash up FIRST — before
+          any install — keyed to how the lane runs (Node version, every gate line, the pre-command, the package dir), and a verdict an
+          earlier PASSING run of this pull request recorded under that key
+          skips every step: the job is green on that evidence. A run whose
+          job passed records the key last. Never on push. Empty (default)
+          disables it. See `.github/actions/lane-verdict`.
+        type: string
+        required: false
+        default: ''
 
 # Least-privilege, enforced at the source. The effective grant is the
 # INTERSECTION of these and the caller's job permissions, so a consumer that
@@ -164,11 +177,38 @@ jobs:
           # checkout cannot compute; every other caller keeps the fast one.
           fetch-depth: ${{ (inputs.mcp-test-exemptions != '' && github.event_name == 'pull_request') && '0' || '1' }}
 
+
+      # ── Skip a lane this exact tree already passed (opt-in) ────────────────
+      # First, before any install: the consumer's `fingerprint-command` hashes every
+      # tracked path that can change this lane's outcome, the action keys it to
+      # how the lane RUNS (below), and a verdict recorded under that key means
+      # every step after this one is skipped — the job is green on the earlier
+      # run's evidence, and its dependents see `success` as usual. Same
+      # mechanism as the tests lanes' `*-fingerprint-command`, applied to a job
+      # instead of a matrix. Never off a pull request: the push run is the
+      # safety net and skips nothing.
+      - name: Look up a recorded lane verdict
+        id: lane-verdict
+        if: ${{ inputs.fingerprint-command != '' && github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/lane-verdict@v2
+        with:
+          lane: gates
+          fingerprint-command: ${{ inputs.fingerprint-command }}
+          key-material: |
+            node=${{ inputs.node-version }}
+            install=${{ inputs.install }}
+            dir=${{ inputs.package-dir }}
+            pre=${{ inputs.pre-command }}
+            gates=${{ inputs.gates }}
+            mcp=${{ inputs.mcp-test-exemptions }} ${{ inputs.mcp-test-coverage-dir }}
+            scope=${{ inputs.github-packages-scope }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         with:
           run_install: false
 
       - uses: actions/setup-node@v4
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         with:
           node-version: ${{ inputs.node-version }}
           cache: ${{ !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
@@ -177,7 +217,7 @@ jobs:
       # job's own GITHUB_TOKEN (packages: read) — NOT an inherited user secret,
       # so the no-secrets boundary holds. Skipped unless a scope is given.
       - name: Configure GitHub Packages auth
-        if: ${{ inputs.github-packages-scope != '' }}
+        if: ${{ (inputs.github-packages-scope != '') && steps.lane-verdict.outputs.hit != 'true' }}
         shell: bash
         env:
           GH_PKG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -189,14 +229,14 @@ jobs:
           } >> "$HOME/.npmrc"
 
       - name: Install dependencies
-        if: ${{ inputs.install }}
+        if: ${{ (inputs.install) && steps.lane-verdict.outputs.hit != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
 
       - name: Pre-command
-        if: ${{ inputs.pre-command != '' }}
+        if: ${{ (inputs.pre-command != '') && steps.lane-verdict.outputs.hit != 'true' }}
         shell: bash
         working-directory: ${{ inputs.package-dir }}
         run: |
@@ -218,6 +258,7 @@ jobs:
       # form here was the lone exception and it only reads as correct from
       # inside this repo.
       - name: Run gates
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         uses: 12-apps/ci/.github/actions/package-gates@v2
         with:
           gates: ${{ inputs.gates }}
@@ -226,9 +267,22 @@ jobs:
       # After the gates and whatever they concluded, as mcp-test-coverage.yml
       # runs it after its coverage step.
       - name: MCP test-coverage exemptions ratchet
-        if: ${{ !cancelled() && inputs.mcp-test-exemptions != '' && github.event_name == 'pull_request' }}
+        if: ${{ (!cancelled() && inputs.mcp-test-exemptions != '' && github.event_name == 'pull_request') && steps.lane-verdict.outputs.hit != 'true' }}
         uses: 12-apps/ci/.github/actions/mcp-exemptions-ratchet@v2
         with:
           exemptions-file: ${{ inputs.mcp-test-exemptions }}
           package-dir: ${{ inputs.mcp-test-coverage-dir }}
           base-ref: ${{ github.base_ref || 'main' }}
+
+      # The claim is made LAST, by the job that earned it: `success()` means
+      # every step above passed, so the next pull-request run of this exact
+      # tree, under this exact command, may skip them all. A job that failed
+      # records nothing; one whose lookup hit has nothing new to say.
+      - name: Record the lane verdict
+        if: ${{ success() && steps.lane-verdict.outputs.key != '' && steps.lane-verdict.outputs.hit != 'true' }}
+        uses: 12-apps/ci/.github/actions/lane-verdict@v2
+        with:
+          mode: record
+          lane: gates
+          key: ${{ steps.lane-verdict.outputs.key }}
+

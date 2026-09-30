@@ -129,6 +129,19 @@ on:
         type: string
         required: false
         default: ''
+      build-fingerprint-command:
+        description: >-
+          OPT-IN. Shell that prints a hex hash of every tracked path that can
+          change the build lane's outcome (a consumer script over `git
+          ls-tree`). On a pull request the job looks the hash up FIRST — before
+          any install — keyed to how the lane runs (Node version, `pre-build-command`, the build command), and a verdict an
+          earlier PASSING run of this pull request recorded under that key
+          skips every step: the job is green on that evidence. A run whose
+          job passed records the key last. Never on push. Empty (default)
+          disables it. See `.github/actions/lane-verdict`.
+        type: string
+        required: false
+        default: ''
       vitest-cache-paths:
         description: >-
           Newline-separated paths of the packages' vitest results caches
@@ -586,6 +599,7 @@ jobs:
           LANE_NODE: ${{ inputs.node-version }}
           LANE_PRE: ${{ inputs.pre-test-command }}
           LANE_CMD: ${{ inputs.unit-test-command }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           key="$(printf '%s\0%s\0%s' "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" | sha256sum | cut -c1-16)"
@@ -1351,23 +1365,47 @@ jobs:
         with:
           fetch-depth: 0
 
+
+      # ── Skip a lane this exact tree already passed (opt-in) ────────────────
+      # First, before any install: the consumer's `build-fingerprint-command` hashes every
+      # tracked path that can change this lane's outcome, the action keys it to
+      # how the lane RUNS (below), and a verdict recorded under that key means
+      # every step after this one is skipped — the job is green on the earlier
+      # run's evidence, and its dependents see `success` as usual. Same
+      # mechanism as the tests lanes' `*-fingerprint-command`, applied to a job
+      # instead of a matrix. Never off a pull request: the push run is the
+      # safety net and skips nothing.
+      - name: Look up a recorded lane verdict
+        id: lane-verdict
+        if: ${{ inputs.build-fingerprint-command != '' && github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/lane-verdict@v2
+        with:
+          lane: build
+          fingerprint-command: ${{ inputs.build-fingerprint-command }}
+          key-material: |
+            node=${{ inputs.node-version }}
+            pre=${{ inputs.pre-build-command }}
+            pnpm turbo run build --affected
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         with:
           run_install: false
 
       - uses: actions/setup-node@v4
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         with:
           node-version: ${{ inputs.node-version }}
           cache: ${{ !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
 
       - name: Install dependencies
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         shell: bash
         run: |
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
 
       - name: Pre-build setup
-        if: ${{ inputs.pre-build-command != '' }}
+        if: ${{ (inputs.pre-build-command != '') && steps.lane-verdict.outputs.hit != 'true' }}
         shell: bash
         env:
           PRE_CMD: ${{ inputs.pre-build-command }}
@@ -1395,6 +1433,7 @@ jobs:
       # newest entry the default branch wrote, and turbo's own content hashes
       # decide what inside it is reusable. What a PR no longer does is WRITE.
       - name: Restore turbo cache
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         uses: actions/cache/restore@v4
         with:
           path: .turbo
@@ -1411,7 +1450,7 @@ jobs:
       # and pin turbo to a SHA that exists locally.
       - name: Fetch the base for turbo --affected
         id: base
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ (github.event_name == 'pull_request') && steps.lane-verdict.outputs.hit != 'true' }}
         uses: 12-apps/ci/.github/actions/fetch-base@v2
         with:
           # Mid-stack, GITHUB_BASE_REF is only the layer below, so --affected
@@ -1420,7 +1459,7 @@ jobs:
           fallback-branch: ${{ inputs.default-branch }}
 
       - name: Point turbo --affected at the base
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ (github.event_name == 'pull_request') && steps.lane-verdict.outputs.hit != 'true' }}
         shell: bash
         env:
           STACK_BASE_SHA: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.sha || '' }}
@@ -1439,6 +1478,7 @@ jobs:
           fi
 
       - name: Build
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         shell: bash
         # PR: --affected builds only the touched packages (plus dependents via
         # turbo's graph; upstream deps still build as prerequisites). Push:
@@ -1459,7 +1499,7 @@ jobs:
       # No status function: a lane that failed has nothing worth publishing as
       # the branch's warm state.
       - name: Save turbo cache
-        if: ${{ github.event_name != 'pull_request' }}
+        if: ${{ (github.event_name != 'pull_request') && steps.lane-verdict.outputs.hit != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: .turbo
@@ -1470,6 +1510,20 @@ jobs:
   # matrix reads a JSON array, and a job output is the only place a reusable
   # workflow can produce one. It installs nothing, so the cost is a runner
   # start; the matrix it sizes is what waits.
+
+      # The claim is made LAST, by the job that earned it: `success()` means
+      # every step above passed, so the next pull-request run of this exact
+      # tree, under this exact command, may skip them all. A job that failed
+      # records nothing; one whose lookup hit has nothing new to say.
+      - name: Record the lane verdict
+        if: ${{ success() && steps.lane-verdict.outputs.key != '' && steps.lane-verdict.outputs.hit != 'true' }}
+        uses: 12-apps/ci/.github/actions/lane-verdict@v2
+        with:
+          mode: record
+          lane: build
+          key: ${{ steps.lane-verdict.outputs.key }}
+
+
   integration-plan:
     name: Integration Plan
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
@@ -1534,6 +1588,7 @@ jobs:
           LANE_NODE: ${{ inputs.node-version }}
           LANE_PRE: ${{ inputs.pre-integration-command }}
           LANE_CMD: ${{ inputs.integration-command }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           key="$(printf '%s\0%s\0%s' "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" | sha256sum | cut -c1-16)"

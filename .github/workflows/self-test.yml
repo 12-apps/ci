@@ -287,6 +287,22 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/skip-green-wiring.test.mjs
 
+      # lane-verdict decides whether a whole job's install and work RUN. Its
+      # key must refuse a push, a failing command and prose, and must move when
+      # the lane's command or Node version moves; both directions are asserted.
+      - name: lane-verdict
+        shell: bash
+        run: node --test .github/actions/lane-verdict/__tests__/*.test.mjs
+
+      # Where the four single-job verdicts are looked up (right after checkout,
+      # before any install), what they gate (every later step), and where they
+      # are recorded (last, only on success()). Each is a placement whose wrong
+      # answer is a green job that either paid what it skipped or skipped what
+      # it never passed.
+      - name: lane-verdict wiring
+        shell: bash
+        run: node --test .github/workflows/__tests__/lane-verdict-jobs.test.mjs
+
       # The cost report's own script, lifted out of cost-report.yml and run
       # against a fake GitHub. Its failure is a number that looks right: with the
       # jobs on the self-hosted fleet it read "$0.00" for runs that cost real AWS
