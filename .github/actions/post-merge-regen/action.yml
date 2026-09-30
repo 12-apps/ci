@@ -1,23 +1,29 @@
 name: 'Post-merge regeneration'
 description: >-
-  Run the caller's regeneration command on the live tip of the base branch and
-  land what it changed as ONE squash-merged pull request that starts no
-  workflow on the base (so it does not deploy).
+  The two token-holding halves of post-merge regeneration.
+  .github/workflows/post-merge-regen.yml wires them around the job that runs
+  the caller's command.
 
-  Everything a repository can derive after a merge — an index, a number, a
-  tightened budget — is derived HERE instead of in each pull request, where two
-  open PRs deriving the same file conflict. The PR is opened with a PAT so the
-  caller's `pull_request` checks run; auto-merge is enabled with GITHUB_TOKEN,
-  and GitHub starts no workflow run for an event that token causes, so the
-  merge commit neither deploys nor triggers another regeneration.
+  The workflow derives, ONCE and after the merge, everything a repository can
+  derive from a merged tree: an index, a record number, a tightened budget.
+  Without it, every pull request derives these, and two open PRs deriving the
+  same file conflict.
+
+  `prepare` runs with GITHUB_TOKEN only and executes no repository code. It
+  picks the live tip of the base, keeps an open regen PR that already covers
+  that tip, and switches auto-merge off on the rest.
+
+  `land` runs in a fresh checkout of that tip. It applies the patch the command
+  job produced, and pushes the branch and opens the PR with a PAT, so the
+  caller's checks run. It enables auto-merge with GITHUB_TOKEN; GitHub starts
+  no workflow run for an event that token causes, so the merge neither deploys
+  nor triggers another regeneration. Last, it closes the superseded regen PRs.
 
   One branch per run (`<branch-prefix><sha7>`): a ruleset may refuse a
-  non-fast-forward push to any branch, so a reused branch could not be rebuilt
-  from a newer tip. Older regen PRs are closed once the new one is open.
-  Needs a full-history checkout of the base with `persist-credentials: false`.
+  non-fast-forward push to any branch.
 inputs:
-  command:
-    description: 'The shell that regenerates. It runs at the repository root on the base tip, with no token in its environment.'
+  mode:
+    description: '`prepare` or `land`.'
     required: true
   base:
     description: 'The base branch. Empty: the repository default branch.'
@@ -27,35 +33,60 @@ inputs:
     description: "Every regen PR's head starts with this; the run appends the tip's short sha. Reserve it: the job closes any open PR under it."
     required: false
     default: 'chore/post-merge-regen-'
+  tip:
+    description: '`land`: the commit `prepare` chose (its `tip` output). The checkout must be at it.'
+    required: false
+    default: ''
+  patch:
+    description: '`land`: the patch the command job produced. Missing or empty: nothing changed.'
+    required: false
+    default: ''
   title:
-    description: 'The PR title and the commit header. Put whatever your commit rules demand (a ticket reference) here.'
-    required: true
+    description: '`land`: the PR title and the commit header. Put whatever your commit rules demand (a ticket reference) here.'
+    required: false
+    default: ''
   body:
-    description: 'The PR body and the commit body.'
+    description: '`land`: the PR body and the commit body.'
     required: false
     default: ''
   commit-author:
-    description: 'The commit author, as "Name <email>".'
+    description: '`land`: the commit author, as "Name <email>".'
     required: false
     default: 'github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>'
   pr-token:
-    description: 'A PAT with contents and pull-requests write: pushes the branch and opens the PR. Required — a PR opened with GITHUB_TOKEN never gets its checks.'
-    required: true
+    description: '`land`: a PAT with contents and pull-requests write. It pushes the branch and opens the PR. Required, because a PR opened with GITHUB_TOKEN never gets its checks.'
+    required: false
+    default: ''
   github-token:
-    description: 'Enables auto-merge and closes superseded regen PRs (`contents: write`, `pull-requests: write`).'
+    description: 'Lists, keeps and closes regen PRs and switches their auto-merge (`contents: write`, `pull-requests: write`).'
     required: false
     default: ${{ github.token }}
+outputs:
+  action:
+    description: '`prepare`: `keep` (an open PR already covers the tip) or `regen`.'
+    value: ${{ steps.run.outputs.action }}
+  tip:
+    description: '`prepare`: the base tip to regenerate.'
+    value: ${{ steps.run.outputs.tip }}
 runs:
   using: composite
   steps:
-    - shell: bash
+    - id: run
+      shell: bash
       env:
+        MODE: ${{ inputs.mode }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
         PR_TOKEN: ${{ inputs.pr-token }}
         BASE_BRANCH: ${{ inputs.base || github.event.repository.default_branch }}
         BRANCH_PREFIX: ${{ inputs.branch-prefix }}
-        REGEN_COMMAND: ${{ inputs.command }}
+        REGEN_TIP: ${{ inputs.tip }}
+        REGEN_PATCH: ${{ inputs.patch }}
         PR_TITLE: ${{ inputs.title }}
         PR_BODY: ${{ inputs.body }}
         COMMIT_AUTHOR: ${{ inputs.commit-author }}
-      run: node "$GITHUB_ACTION_PATH/regen.mjs"
+      run: |
+        case "$MODE" in
+          prepare) node "$GITHUB_ACTION_PATH/prepare.mjs" ;;
+          land)    node "$GITHUB_ACTION_PATH/land.mjs" ;;
+          *) echo "::error::post-merge-regen: mode must be prepare or land, got '$MODE'"; exit 1 ;;
+        esac

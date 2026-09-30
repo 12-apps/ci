@@ -3,8 +3,8 @@ name: Post-merge regeneration (reusable)
 # Derive after the merge what every pull request used to derive for itself —
 # an index, a record number, a tightened budget — and land it as ONE
 # squash-merged PR that starts no workflow on the base, so it never deploys.
-# The mechanism is .github/actions/post-merge-regen (its action.yml and
-# regen.mjs argue the rules); this file is the checkout and the grant around it.
+# The token-holding halves are .github/actions/post-merge-regen (`prepare`,
+# `land`); this file wires them around the job that runs the caller's command.
 #
 # A consuming repo adds (see CONSUMING.md, "Consuming Post-merge regeneration"):
 #
@@ -16,6 +16,11 @@ name: Post-merge regeneration (reusable)
 #     contents: read
 #   jobs:
 #     regen:
+#       # One run at a time across all three jobs below; a newer pending run
+#       # replaces an older one, and every run reads the LIVE tip anyway.
+#       concurrency:
+#         group: post-merge-regen
+#         cancel-in-progress: false
 #       permissions:
 #         contents: write
 #         pull-requests: write
@@ -26,21 +31,25 @@ name: Post-merge regeneration (reusable)
 #       secrets:
 #         PR_TOKEN: ${{ secrets.SOME_PAT }}
 #
+# WHY THREE JOBS: the caller's command is repository code, and the PAT belongs
+# to a person. Code that runs in a step can reach every LATER step of its job:
+# it can write .git/config (an fsmonitor or a hook runs on the next git call),
+# rewrite the action's own files on disk, or read a parent process's
+# environment. So the command runs in a job of its own, with a read-only token
+# and no secret, and hands over only a patch. The PAT exists only in `land`,
+# on another runner, in a fresh checkout.
+#
 # WHY A PAT AND GITHUB_TOKEN: the PAT pushes the branch and opens the PR, so the
 # consumer's `pull_request` workflows run and its required checks can report.
 # GITHUB_TOKEN enables auto-merge, so the merge is caused by that token — and
 # GitHub starts no workflow run for an event GITHUB_TOKEN causes (except
 # `workflow_dispatch`/`repository_dispatch`): no deploy, no second regeneration.
-#
-# WHY `workflow_dispatch` ON THE CALLER: a regen merge starts nothing, so the
-# next regeneration waits for the next human merge. Dispatching is the way to
-# run it sooner.
 
 on:
   workflow_call:
     inputs:
       command:
-        description: 'The shell that regenerates, run at the repository root on the base tip with no token in its env.'
+        description: 'The shell that regenerates, run at the repository root on the base tip, in a job with a read-only token and no secret.'
         type: string
         required: true
       title:
@@ -63,7 +72,7 @@ on:
         required: false
         default: 'chore/post-merge-regen-'
       commit-author:
-        description: 'The commit author, as "Name <email>".'
+        description: 'The commit author, as "Name <email>". A ruleset that holds "unattributed" commits wants the PAT user here.'
         type: string
         required: false
         default: 'github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>'
@@ -85,37 +94,106 @@ permissions:
   pull-requests: write
 
 jobs:
-  regen:
-    name: Regenerate and open the PR
+  prepare:
+    name: Pick the tip
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      action: ${{ steps.prepare.outputs.action }}
+      tip: ${{ steps.prepare.outputs.tip }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - id: prepare
+        uses: 12-apps/ci/.github/actions/post-merge-regen@v2
+        with:
+          mode: prepare
+          base: ${{ inputs.base }}
+          branch-prefix: ${{ inputs.branch-prefix }}
+
+  generate:
+    name: Run the regeneration
+    needs: prepare
+    if: needs.prepare.outputs.action == 'regen'
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
+    # Read-only, and no secret in this job: the command is repository code.
     permissions:
-      contents: write
-      pull-requests: write
-    # One at a time, never cancelled: a merge that lands mid-run queues ONE
-    # more run, and that run regenerates the newer tip (it fetches the live
-    # tip, never the event's sha — a regen merge starts no run of its own).
-    concurrency:
-      group: post-merge-regen-${{ github.repository }}
-      cancel-in-progress: false
+      contents: read
+    outputs:
+      changed: ${{ steps.capture.outputs.changed }}
     steps:
       - uses: actions/checkout@v4
         with:
           # The consumer's generators may read history (the order records
-          # landed in); `persist-credentials: false` so the push below is
-          # authenticated by the PAT, not by a stored GITHUB_TOKEN header.
+          # landed in).
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ inputs.base || github.event.repository.default_branch }}
+          ref: ${{ needs.prepare.outputs.tip }}
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
+      - name: Regenerate
+        shell: bash
+        env:
+          REGEN_COMMAND: ${{ inputs.command }}
+        run: bash -euo pipefail -c "$REGEN_COMMAND"
+      - name: Capture the change
+        id: capture
+        shell: bash
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git diff --cached --binary > "$RUNNER_TEMP/post-merge-regen.patch"
+            git diff --cached --stat
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.capture.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-merge-regen-patch
+          path: ${{ runner.temp }}/post-merge-regen.patch
+          retention-days: 1
+          if-no-files-found: error
+
+  land:
+    name: Open and auto-merge the PR
+    needs: [prepare, generate]
+    # A failed command lands nothing: the superseded PRs stay open with
+    # auto-merge off until the next run replaces them.
+    if: needs.prepare.outputs.action == 'regen' && needs.generate.result == 'success'
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.tip }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - if: needs.generate.outputs.changed == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: post-merge-regen-patch
+          path: ${{ runner.temp }}/post-merge-regen
       - uses: 12-apps/ci/.github/actions/post-merge-regen@v2
         with:
-          command: ${{ inputs.command }}
-          title: ${{ inputs.title }}
-          body: ${{ inputs.body }}
+          mode: land
           base: ${{ inputs.base }}
           branch-prefix: ${{ inputs.branch-prefix }}
+          tip: ${{ needs.prepare.outputs.tip }}
+          patch: ${{ needs.generate.outputs.changed == 'true' && format('{0}/post-merge-regen/post-merge-regen.patch', runner.temp) || '' }}
+          title: ${{ inputs.title }}
+          body: ${{ inputs.body }}
           commit-author: ${{ inputs.commit-author }}
           pr-token: ${{ secrets.PR_TOKEN }}
