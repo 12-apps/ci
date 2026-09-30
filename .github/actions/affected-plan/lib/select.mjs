@@ -75,6 +75,11 @@ function taintOf(record, symbols) {
  * @param {(f:string)=>{prefix:string,replacement:string}[]} [options.aliasesFor]
  * @param {string[]} [options.calls]  callees whose top-level calls bracket as
  *   declarations (Gherkin step definitions — see exports-dataflow.mjs)
+ * @param {string[]} [options.extraFiles]  files to graph beside the roots' — a
+ *   lane's module globals (a setup file the runner loads), whose own imports
+ *   must be known for the per-test hash (lib/inputs.mjs)
+ * @param {(f:string)=>boolean} [options.opaqueOk]  files whose dynamic imports
+ *   the caller vouches for (a route already carries them) — see buildGraph
  * @returns {{mode:"full"|"narrowed"|"none", tests:string[], reasons:object, symbols:object, affected:Map, stats:object, why:string}}
  *   `affected`: file → the names in it that can see the change (exports, and
  *   `<callee>@<n>` for a bracketed call), or "*"
@@ -93,6 +98,8 @@ export function selectAffected(options) {
     routeOf = () => [],
     aliasesFor,
     calls = [],
+    extraFiles = [],
+    opaqueOk,
   } = options;
 
   const relevant = [...changed, ...deleted].filter((f) => !isIgnored(f));
@@ -286,8 +293,8 @@ export function selectAffected(options) {
 
   // ── the graph ────────────────────────────────────────────────────────────
   const packages = loadPackages(repoRoot, workspaceDirs);
-  const files = listSourceFiles(repoRoot, roots);
-  const { edges, unresolved } = buildGraph(repoRoot, files, { packages, aliasesFor });
+  const files = [...new Set([...listSourceFiles(repoRoot, roots), ...extraFiles])];
+  const { edges, unresolved } = buildGraph(repoRoot, files, { packages, aliasesFor, opaqueOk });
 
   // An import we cannot resolve is a hole in the graph, and the safe reading of
   // a hole is "this file might depend on anything". That used to widen the

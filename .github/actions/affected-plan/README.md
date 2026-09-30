@@ -51,6 +51,24 @@ This action asks the useful question instead:
 Type-only imports are not edges — they are erased before any module graph
 exists, so a change cannot travel through one.
 
+Three places where symbol granularity is NOT honest, each found by the
+2026-09-30 audit and each answered by widening (`symbols.mjs`):
+
+- **An import line that changed** is a move only when the diff proves it — the
+  bound name carries the same body on both sides. `import { value } from
+  "./good"` → `"./bad"` with an unchanged body reading `value` changes what
+  every export returns (E3); nothing in the diff vouches for `./bad`, so the
+  file widens. Default, namespace and side-effect imports are never provable.
+  A re-export whose source moved is held to the same test.
+- **Whitespace inside a string or template literal is content.** `'a  b'` and
+  `'a b'` hash differently (E4); only whitespace between tokens is collapsed.
+- **An initializer that runs code at load** — a call, `new`, `await`, a
+  template substitution — is observed by every importer, named or not:
+  `export const setup = JSON.parse("oops")` throws for the test that imports
+  only `value` (E5). A change to, or the arrival or removal of, such an export
+  widens to every export. Literals, identifiers, object and array literals of
+  those, functions, classes and arrows keep symbol granularity.
+
 ## Failing safe
 
 Both failure directions are green, and they are not symmetric. Running too much
@@ -63,9 +81,21 @@ widens to `mode=full`:
 | config missing or unreadable | `full` |
 | unknown lane | `full` |
 | the diff cannot be computed | `full` |
-| a relative import does not resolve | `full` — never narrow against a graph with holes |
+| a relative import does not resolve | that file is **blind**: widened, and never given a skip hash |
+| an import the parser cannot name — `import(expr)`, `require(expr)`, `import.meta.glob(…)` | the same: blind. Recognising part of the syntax is not proof of no dependency (E6). `opaqueImports` lets the consumer vouch for a file a route already covers |
 | a declaration cannot be bracketed | that file reports `*` (all exports) |
+| a lane-global input (`skipGreen.globals`) changed and nothing routes it — a setup file, or a module its closure holds | `full` — nothing imports a setup file, and every test runs under it (F3a) |
 | a changed path matching no rule | **`unclassified` — the action exits 1** |
+
+`full` always sizes a **positive** matrix (`--max-shards` shards). It carries no
+test list by construction, and reading the empty list before the mode gave the
+full suite zero shards — the log said "running the FULL suite" while the matrix
+was off (E1; `#84` to the 2026-09-30 audit).
+
+The graph follows every resolved import, not only files under a lane's
+`roots`: a root's module importing a helper from a directory no root names used
+to enter as a leaf, and the closure stopped one hop short. `roots` decide where
+the walk starts, never where a dependency chain ends.
 
 There is deliberately no `full` for an unrecognised path. It used to be the
 answer, and on the first consuming repo it fired on **69% of commits**: the old
@@ -173,8 +203,10 @@ the barrel does.
 | `routes[].match` + `.entry` | a codegen INPUT, replaced by the source file carrying its whole effect, then traced normally. A Prisma schema is the motivating case: non-`.ts`, but its only runtime effect is the generated client's surface |
 | `routes[].match` + `.command` | for an input whose entry cannot be named in a regex — a catalog bump's entry is whichever source imports the packages whose pins moved. Run once with every matching path, printing one entry per line |
 | `lanes.<name>.ignore` | added to the repo-wide `ignore` for this lane only — never subtracted. Prisma migrations are the case: they decide what integration runs against a real database and cannot reach a unit test, which mocks the client |
-| `lanes.<name>.roots` | directories to build the graph over |
+| `lanes.<name>.roots` | directories to build the graph over. A lane's module globals (below) are graphed beside them |
 | `lanes.<name>.test` / `.exclude` | which files are this lane's tests |
+| `lanes.<name>.skipGreen.globals` | paths that can change ANY verdict in the lane without being imported (the lockfile, vitest configs, setup files, a database lane's migrations). They join every test's skip hash — a module global with its own import closure — and a change to one that nothing routes plans the full suite. See `skip-green` |
+| `opaqueImports[].match` + `.why` | files whose dynamic imports (`import(expr)`, `import.meta.glob`) the consumer vouches for because a route already carries what they reach — a route table that `import()`s each `route.ts` when the `route.ts` files are themselves routed. Everywhere else such an import makes the file blind. Repo-wide, and per lane under `lanes.<name>.opaqueImports` |
 
 A route whose command fails, or prints nothing, leaves its paths **unclassified**
 rather than routed-to-nothing. A silent empty there would skip exactly the tests

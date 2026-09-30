@@ -21,7 +21,17 @@ inputs** is reported as skipped and does not run.
    A committed file the plan ROUTES to a suite (one it reads off disk with
    `readFileSync` — a manifest, a YAML, a ledger) joins that suite's inputs
    too: the closure cannot see it, the route says the suite's verdict depends
-   on it.
+   on it. So does every migration, for a test the consumer's `database` block
+   names as a migration reader, carrier or always-run file, and every schema
+   file for a schema reader (the 2026-09-30 audit, F1).
+   A global that is itself a **module** — a setup file, a vitest config, the
+   runner script — brings its own transitive import closure along (F3b); a
+   module global the graph cannot reach, or whose closure is blind, withholds
+   EVERY hash of the lane. And a change to a global that nothing routes plans
+   the **full** suite (F3a): selection walks imports, and nothing imports a
+   setup file. The manifest names the construction its hashes came from
+   (`inputs: <inputsVersion>`); a wider construction retires older manifests
+   rather than matching them.
 2. **`filter`** (in the plan job, before the matrix is sized) reads the
    manifest an earlier green run left in the Actions cache and drops every
    planned test whose hash matches its recorded one — unless the test is on the
@@ -48,6 +58,7 @@ the hash (or a non-hermetic test for the always-run list) to fix first.
 | situation | outcome |
 |---|---|
 | no manifest, unreadable manifest, another lane's manifest | nothing skipped |
+| a manifest whose hashes were made with another `inputsVersion` (a narrower construction) | nothing skipped — old proofs are retired, not trusted |
 | plan without `inputs` (lane did not opt in), plan not `narrowed` | nothing skipped |
 | test with `null` inputs (unresolved import in its closure) | runs |
 | test whose closure reaches a file git does not track (a workspace package's built `dist/` present at plan time wins over its `src/` — plan on a CLEAN checkout, before any install or build) | runs; the plan log says `N with a closure file git does not track` |
