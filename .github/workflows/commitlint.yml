@@ -31,9 +31,20 @@ name: Commit messages (reusable)
 # a repo with no `package.json` (this one) can still be gated. A consumer that
 # needs different rules passes `config-path`.
 
+# Pass `with: { runner: ubuntu-latest }` to require GitHub-hosted jobs.
+# Omit `runner` to preserve the existing CI_RUNNER fallback.
+
 on:
   workflow_call:
     inputs:
+      runner:
+        description: >-
+          Runner label for every job. A nonempty caller value overrides
+          CI_RUNNER; empty preserves CI_RUNNER or ubuntu-latest. Public
+          callers can pin ubuntu-latest even when a fleet label is inherited.
+        type: string
+        required: false
+        default: ''
       node-version:
         description: 'Node version used to run commitlint.'
         type: string
@@ -72,7 +83,7 @@ permissions:
 jobs:
   commitlint:
     name: Conventional commits
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 10

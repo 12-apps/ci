@@ -2285,3 +2285,29 @@ auto-merge off until the next run replaces them.
 - **Accept that a regen merge fires no push workflow.** Anything you run on
   `push` to the base, such as a conflict probe or a heal, sees that commit at
   the next human merge.
+
+
+
+### Explicit runner choice for monorepo callers
+
+`monorepo-static.yml`, `monorepo-tests.yml`, `commitlint.yml` and
+`post-merge-regen.yml` accept the optional string input `runner`. Its empty
+default preserves the existing choice: `vars.CI_RUNNER`, then `ubuntu-latest`.
+A nonempty input takes priority for **every job** in the called workflow.
+Public repositories that must stay on GitHub-hosted runners pass it on every
+call, even if an organization variable contains a private fleet label:
+
+```yaml
+jobs:
+  static:
+    uses: 12-apps/ci/.github/workflows/monorepo-static.yml@v2
+    with:
+      runner: ubuntu-latest
+```
+
+Pass the same input to tests, commitlint and regeneration when used. This input
+changes job routing only: it does not create runners, mutate repository settings,
+change token permissions or grant access to a fleet. Existing private consumers
+that omit it retain their configured runner. For post-merge regeneration, both
+explicit and inherited choices must be ephemeral per job, as its existing
+secret-isolation contract requires.

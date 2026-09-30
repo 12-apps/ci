@@ -38,7 +38,7 @@ name: Post-merge regeneration (reusable)
 #
 # RUNNERS: `generate` and `land` must not share a persistent host. Code the
 # command leaves behind on a runner that is reused (a process, a rewritten
-# tool cache or `_actions` copy) would run next to the PAT. Point CI_RUNNER at
+# tool cache or `_actions` copy) would run next to the PAT. Set `runner` (or the fallback CI_RUNNER) to
 # ephemeral runners only (GitHub-hosted, or a fleet that recycles per job).
 #
 # WHY A PAT AND GITHUB_TOKEN: the PAT pushes the branch and opens the PR, so the
@@ -47,9 +47,20 @@ name: Post-merge regeneration (reusable)
 # GitHub starts no workflow run for an event GITHUB_TOKEN causes (except
 # `workflow_dispatch`/`repository_dispatch`): no deploy, no second regeneration.
 
+# Pass `with: { runner: ubuntu-latest }` to require GitHub-hosted jobs.
+# Omit `runner` to preserve the existing CI_RUNNER fallback.
+
 on:
   workflow_call:
     inputs:
+      runner:
+        description: >-
+          Runner label for every job. A nonempty caller value overrides
+          CI_RUNNER; empty preserves CI_RUNNER or ubuntu-latest. Public
+          callers can pin ubuntu-latest even when a fleet label is inherited.
+        type: string
+        required: false
+        default: ''
       command:
         description: 'The shell that regenerates, run at the repository root on the base tip, in a job with a read-only token and no secret.'
         type: string
@@ -116,7 +127,7 @@ concurrency:
 jobs:
   prepare:
     name: Pick the tip
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     # `contents: write`: the keep path enables auto-merge, and merges a PR that
     # is already mergeable, and both need a token that can merge. This job runs
@@ -142,7 +153,7 @@ jobs:
     name: Run the regeneration
     needs: prepare
     if: needs.prepare.outputs.action == 'regen'
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     # Read-only, and no secret in this job: the command is repository code.
     permissions:
@@ -195,7 +206,7 @@ jobs:
     # A failed command lands nothing: the superseded PRs stay open with
     # auto-merge off until the next run replaces them.
     if: needs.prepare.outputs.action == 'regen' && needs.generate.result == 'success'
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: write
