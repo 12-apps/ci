@@ -266,3 +266,19 @@ test('a REAL node:test junit report with `<` and `>` in test names is read, not 
   assert.ok(parsed, 'a legible node:test report is never "untrustworthy"');
   assert.equal(parsed.executed, 2);
 });
+
+test('full-suite failure advice cannot suggest a PR-label bypass', () => {
+  const root = scratch({ 'report.xml': '<testsuites tests="1" skipped="1"/>' });
+  const cli = fileURLToPath(new URL('../check-test-signal.mjs', import.meta.url));
+  for (const event of ['push', 'workflow_dispatch', 'schedule', 'pull_request']) {
+    const result = spawnSync(process.execPath, [cli, join(root, 'report.xml')], {
+      encoding: 'utf8', env: { ...process.env, GITHUB_EVENT_NAME: event },
+    });
+    assert.equal(result.status, 1);
+    if (event === 'pull_request') assert.match(result.stderr, /Label the PR/);
+    else {
+      assert.match(result.stderr, /PR labels cannot bypass a full-suite run/);
+      assert.doesNotMatch(result.stderr, /Label the PR/);
+    }
+  }
+});

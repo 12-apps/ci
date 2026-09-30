@@ -257,8 +257,9 @@ on:
       unit-junit-reports:
         description: >-
           OPT-IN. Space-separated JUnit XML paths (files or directories) the unit
-          lane writes. When set, a PR run asserts the lane executed at least one
-          test case and fails if it did not.
+          lane writes. When set, every run with scheduled tests asserts the lane
+          executed at least one test case and fails if it did not, including
+          the full suite on push, workflow_dispatch and schedule.
 
           The mode it closes: affected selection is paired with
           `--passWithNoTests`, which is correct per-invocation — a changed file
@@ -270,7 +271,8 @@ on:
           to select nothing, not fewer; the selectors already fail SAFE, and this
           is the assertion that the fail-safe actually held.
 
-          The consumer's `unit-test-command` must emit the reports
+          The consumer's `unit-test-command` AND `unit-full-command` must emit
+          the reports
           (`--reporter=junit --outputFile.junit=<path>`); a workflow cannot
           inject reporter flags into an opaque command string. Directories are
           scanned recursively and summed, so a lane running vitest per workspace
@@ -283,7 +285,8 @@ on:
         default: ''
       integration-junit-reports:
         description: >-
-          OPT-IN. As `unit-junit-reports`, for the integration lane.
+          OPT-IN. As `unit-junit-reports`, for the integration lane. Both
+          `integration-command` and `integration-full-command` must emit reports.
 
           Fully compatible with sharding. At one shard the guard runs inside
           the job, exactly as before. Above one, each shard ships its reports
@@ -1092,12 +1095,12 @@ jobs:
           key: turbo-unit-${{ github.sha }}-s${{ matrix.shard }}
 
       # ── Zero-test-signal guard ─────────────────────────────────────────────
-      # PR-only: on push the FULL command runs, so a zero total means something
-      # else is already broken and the lane's own failure is the better signal.
+      # Full-suite commands can also exit zero with every test skipped. Assert
+      # actual execution on every event, not just affected pull-request runs.
       #
       # Deliberately NOT gated on the test step's outcome. A lane that FAILED
       # already reports red; a lane that PASSED having run nothing is the entire
-      # point of this step. Gated only on event, opt-in, and the label — and
+      # point of this step. Gated on opt-in and the PR-only label bypass — and
       # carrying no `continue-on-error`, because a guard that cannot fail is
       # decoration.
       # Gated on a single shard: a shard only sees its own slice, and an empty
@@ -1105,10 +1108,9 @@ jobs:
       # moves to `unit-signal` below, which asserts the MERGED total.
       - name: Verify the unit lane executed at least one test
         if: >-
-          ${{ github.event_name == 'pull_request'
-              && inputs.unit-junit-reports != ''
+          ${{ inputs.unit-junit-reports != ''
               && needs.unit-plan.outputs.count == 1
-              && !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label) }}
+              && (github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label)) }}
         uses: 12-apps/ci/.github/actions/vitest-signal-guard@v2
         with:
           reports: ${{ inputs.unit-junit-reports }}
@@ -1123,8 +1125,7 @@ jobs:
       - name: Stage JUnit reports for the signal job
         id: unit-junit-paths
         if: >-
-          ${{ github.event_name == 'pull_request'
-              && inputs.unit-junit-reports != ''
+          ${{ inputs.unit-junit-reports != ''
               && needs.unit-plan.outputs.count > 1
               && steps.unit.outcome == 'success' }}
         shell: bash
@@ -1173,10 +1174,9 @@ jobs:
     timeout-minutes: 10
     needs: [unit-plan, unit-tests]
     if: >-
-      ${{ github.event_name == 'pull_request'
-          && inputs.unit-junit-reports != ''
+      ${{ inputs.unit-junit-reports != ''
           && needs.unit-plan.outputs.count > 1
-          && !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label) }}
+          && (github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label)) }}
     steps:
       # Scoped to this attempt: artifact names are immutable within a run, so
       # each attempt uploads under its own prefix and reads back only its own —
@@ -1929,7 +1929,7 @@ jobs:
           fi
 
       # Zero-test-signal guard — see the unit lane's copy for why it is gated on
-      # event/opt-in/label only.
+      # opt-in and the PR-only label bypass.
       #
       # ALSO gated on a single shard, and that condition is load-bearing. The
       # guard's question is "did this LANE run anything", but a shard only ever
@@ -1942,10 +1942,9 @@ jobs:
       # MERGED total across every shard's shipped reports instead.
       - name: Verify the integration lane executed at least one test
         if: >-
-          ${{ github.event_name == 'pull_request'
-              && inputs.integration-junit-reports != ''
+          ${{ inputs.integration-junit-reports != ''
               && needs.integration-plan.outputs.count == 1
-              && !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label) }}
+              && (github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label)) }}
         uses: 12-apps/ci/.github/actions/vitest-signal-guard@v2
         with:
           reports: ${{ inputs.integration-junit-reports }}
@@ -1957,8 +1956,7 @@ jobs:
       - name: Stage JUnit reports for the signal job
         id: int-junit-paths
         if: >-
-          ${{ github.event_name == 'pull_request'
-              && inputs.integration-junit-reports != ''
+          ${{ inputs.integration-junit-reports != ''
               && needs.integration-plan.outputs.count > 1
               && steps.integration.outcome == 'success' }}
         shell: bash
@@ -2001,10 +1999,9 @@ jobs:
     timeout-minutes: 10
     needs: [integration-plan, integration-tests]
     if: >-
-      ${{ github.event_name == 'pull_request'
-          && inputs.integration-junit-reports != ''
+      ${{ inputs.integration-junit-reports != ''
           && needs.integration-plan.outputs.count > 1
-          && !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label) }}
+          && (github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, inputs.allow-zero-tests-label)) }}
     steps:
       # Scoped to this attempt — see unit-signal.
       - name: Download every shard's JUnit reports

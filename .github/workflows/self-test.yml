@@ -86,6 +86,10 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/runner-override.test.mjs
 
+      - name: Full-suite signal wiring
+        shell: bash
+        run: node --test .github/workflows/__tests__/full-suite-signal.test.mjs
+
       - name: bundle-ceiling-guard
         shell: bash
         run: node --test .github/actions/bundle-ceiling-guard/__tests__/bundle-ceiling-guard.test.mjs
