@@ -49,6 +49,7 @@ case " $* " in
   *" get-function-configuration "*) cat "${dir}/lambda.json" ;;
   *" describe-launch-template-versions "*) cat "${dir}/template.json" ;;
   *" describe-instances "*) echo 0 ;;
+  *" describe-images "*"099720109477"*) echo ami-ubuntu ;;
   *" describe-images "*"RootDeviceName"*) echo /dev/sda1 ;;
   *" describe-images "*"VolumeSize"*) echo 72 ;;
   *" describe-images "*"State"*) echo available ;;
@@ -153,6 +154,75 @@ test("a scaler that serves another fleet stops the run before any host starts", 
   assert.notEqual(status, 0);
   assert.match(stderr, /ci-runner-scale scales the future-pay-ci fleet, not other-ci/);
   assert.ok(!log.some((l) => l.includes("run-instances")));
+});
+
+test("by default the golden starts from the fleet's image, at its size, with the kit it already has", () => {
+  const { log, sent } = run("--instance-ids i-fake2 --document-name");
+  const golden = log.find((l) => l.includes("run-instances"));
+  assert.match(golden, /--image-id ami-base /);
+  assert.match(golden, /VolumeSize=72,/);
+  assert.ok(!log.some((l) => l.includes("099720109477")), "no Ubuntu lookup");
+  assert.doesNotMatch(sent[0], /git clone|snap install|CI_RUNNER_SCOPE/);
+});
+
+test("GOLDEN_BASE=ubuntu starts the golden from Canonical's newest noble image on a ROOT_GB root", () => {
+  const { log, sent } = runWith({ GOLDEN_BASE: "ubuntu", ROOT_GB: "64" }, "--instance-ids i-fake2 --document-name");
+  const lookup = log.find((l) => l.includes("099720109477"));
+  assert.match(lookup, /ubuntu-noble-24\.04-amd64-server-\*/);
+  const [golden, smoke] = log.filter((l) => l.includes("run-instances"));
+  assert.match(golden, /--image-id ami-ubuntu /);
+  assert.match(golden, /VolumeSize=64,/);
+  assert.match(smoke, /--image-id ami-new /);
+  assert.match(smoke, /VolumeSize=72,/, "the smoke host takes the new image's own size");
+});
+
+test("a clean golden installs the kit, the aws CLI and the fleet's scope and label before prepare-golden", () => {
+  const { sent } = runWith({ GOLDEN_BASE: "ubuntu", ROOT_GB: "64" }, "--instance-ids i-fake2 --document-name");
+  const golden = sent[0];
+  const prepare = golden.indexOf("prepare-golden.sh");
+  for (const step of [
+    "git clone -q 'https://github.com/12-apps/ci.git' /opt/src/ci",
+    "snap install aws-cli --classic",
+    "export CI_RUNNER_SCOPE='repos/12-apps/future-pay' CI_RUNNER_LABELS='future-pay-ci'",
+  ]) {
+    const at = golden.indexOf(step);
+    assert.ok(at !== -1 && at < prepare, `${step} before prepare-golden.sh`);
+  }
+  assert.ok(golden.indexOf("refresh-hold.conf") < golden.indexOf("git clone"), "the hold still comes first");
+});
+
+for (const [env, message] of [
+  [{ ROOT_GB: "64" }, /ROOT_GB needs GOLDEN_BASE=ubuntu/],
+  [{ GOLDEN_BASE: "ubuntu" }, /GOLDEN_BASE=ubuntu needs ROOT_GB/],
+  [{ GOLDEN_BASE: "ubuntu", ROOT_GB: "64GB" }, /GOLDEN_BASE=ubuntu needs ROOT_GB/],
+  [{ GOLDEN_BASE: "debian" }, /GOLDEN_BASE must be fleet or ubuntu/],
+]) {
+  test(`${JSON.stringify(env)} is refused before any AWS call`, () => {
+    const { status, stderr, log } = runWith(env);
+    assert.notEqual(status, 0);
+    assert.match(stderr, message);
+    assert.deepEqual(log, [""], "not one AWS call");
+  });
+}
+
+test("a region with no Ubuntu image stops the run before any host starts", () => {
+  const { status, stderr, log } = runWith({ GOLDEN_BASE: "ubuntu", ROOT_GB: "64" }, "099720109477");
+  assert.notEqual(status, 0);
+  assert.ok(!log.some((l) => l.includes("run-instances")));
+  assert.doesNotMatch(stderr, /base image ami-/);
+});
+
+test("the smoke host's user data tolerates a machine without the kit", () => {
+  const source = readFileSync(script, "utf8");
+  assert.match(source, /\[ ! -f \/etc\/ci-runner\/env \] \|\| sed -i 's\|\^CI_RUNNER_TOKEN_PARAMETER=/);
+});
+
+test("the workflow passes golden_base and root_gb through, defaulting to today's behaviour", () => {
+  const source = readFileSync(workflow, "utf8");
+  assert.match(source, /golden_base:\n(?: {8}.*\n)*? {8}default: fleet\n/);
+  assert.match(source, /root_gb:\n(?: {8}.*\n)*? {8}default: ''\n/);
+  assert.match(source, /GOLDEN_BASE: \$\{\{ inputs\.golden_base \}\}/);
+  assert.match(source, /ROOT_GB: \$\{\{ inputs\.root_gb \}\}/);
 });
 
 test("the workflow is reusable and schedules nothing: its logs belong to the consumer", () => {
