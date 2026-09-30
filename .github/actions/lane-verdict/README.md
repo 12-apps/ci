@@ -21,6 +21,10 @@ full. This action brings the same evidence to a single job.
     key-material: |
       node=${{ inputs.node-version }}
       pnpm turbo run lint --affected
+      base=${{ github.event.pull_request.base.sha }}
+      stack-base=${{ needs.changes.outputs.stack-base }}
+      engine=${{ github.job_workflow_sha }}
+      runner=${{ runner.os }}-${{ runner.arch }}
 # … every later step: if: ${{ steps.lane-verdict.outputs.hit != 'true' }} …
 - name: Record the lane verdict
   if: ${{ success() && steps.lane-verdict.outputs.key != '' && steps.lane-verdict.outputs.hit != 'true' }}
@@ -38,6 +42,18 @@ full. This action brings the same evidence to a single job.
   live in a workflow file the fingerprint ignores, so without them editing the
   command would inherit the old command's verdict), and probes the Actions
   cache with `lookup-only`. Output `hit` is `true` only when an entry exists.
+  The material also names what the tree alone does not (2026-09-30 audit,
+  E7/E8): the **base** the lane selected against — `--affected` over the same
+  tree retargeted at another base is another set, so the base sha and, mid
+  stack, the stack base are in the key; the **engine revision**
+  (`github.job_workflow_sha`) — a fix to this action or its workflow must not
+  inherit a verdict the old logic earned; and the **runner** (`os-arch`). A
+  schema epoch (`VERDICT_SCHEMA`, `verdict-v2`) is folded in too, so every key
+  recorded before the material grew can never match again.
+  The fingerprint command runs under `pipefail`, and a digest of EMPTY input
+  (md5, sha1, sha256, sha512) is refused by value: `git ls-tree missing |
+  sha256sum` prints one and exits 0 without either (E9), and two different
+  trees would then share a verdict.
 - **`record`** writes a marker naming the run and saves it under the key. The
   caller gates it on `success()`, so a job that failed records nothing, and
   places it LAST, so nothing runs after the claim.

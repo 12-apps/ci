@@ -155,3 +155,48 @@ test("an unusable fingerprint disables the mechanism instead of guessing", () =>
     );
   }
 });
+
+// ── the tree fingerprint's IDENTITY (2026-09-30 audit: E2, E7, E8, E9) ────────
+
+/** The `Key this lane's verdict`-style step of a plan job: from `id: fingerprint` to the next step. */
+const fingerprintStep = (lane) => {
+  const plan = jobs[`${lane}-plan`];
+  const at = plan.indexOf("id: fingerprint");
+  assert.notEqual(at, -1, `${lane}-plan has no fingerprint step`);
+  const rest = plan.slice(at);
+  const next = rest.indexOf("\n      - ", 1);
+  return next === -1 ? rest : rest.slice(0, next);
+};
+
+test("E2: each lane's fingerprint key folds ITS OWN setup command, not the unit lane's", () => {
+  // The integration key read `inputs.pre-test-command` — the unit setup — so a
+  // change to `pre-integration-command` alone inherited the old verdict.
+  assert.match(fingerprintStep("unit"), /LANE_PRE: \$\{\{ inputs\.pre-test-command \}\}/);
+  assert.match(fingerprintStep("integration"), /LANE_PRE: \$\{\{ inputs\.pre-integration-command \}\}/);
+  assert.doesNotMatch(fingerprintStep("integration"), /pre-test-command/);
+});
+
+for (const lane of LANES) {
+  test(`${lane}: the fingerprint key carries the base, the engine revision, the runner and a schema epoch`, () => {
+    const step = fingerprintStep(lane);
+    assert.match(step, /LANE_BASE: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/, "E7: same tree, other base, other selection");
+    assert.match(step, /LANE_ENGINE: \$\{\{ github\.job_workflow_sha \}\}/, "E8: an engine fix must not inherit an old verdict");
+    assert.match(step, /LANE_RUNNER: \$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}/, "E8: the image it ran on");
+    assert.match(step, /LANE_SCHEMA: verdict-v2/, "the epoch that retires every key recorded before these joined");
+    // …and every one of them is IN the hash, not merely declared.
+    const printf = /printf '((?:%s\\0)+%s)' \\\n((?:\s+"\$[A-Z_]+"(?: \\)?\n?)+)\s*\| sha256sum/.exec(step);
+    assert.ok(printf, `${lane}: the key printf was not found`);
+    const vars = [...printf[2].matchAll(/"\$([A-Z_]+)"/g)].map((m) => m[1]);
+    assert.equal(printf[1].split("\\0").length, vars.length, "one %s per variable");
+    for (const v of ["LANE_SCHEMA", "LANE_NODE", "LANE_PRE", "LANE_CMD", "FP_CMD", "LANE_BASE", "LANE_ENGINE", "LANE_RUNNER"]) {
+      assert.ok(vars.includes(v), `${lane}: ${v} is declared but not hashed`);
+    }
+  });
+
+  test(`${lane}: E9 — the consumer's fingerprint shell runs under pipefail and the empty digest is refused`, () => {
+    const step = fingerprintStep(lane);
+    assert.match(step, /fp="\$\(bash -o pipefail -c "\$FP_CMD"\)" \|\| fp=""/, "a producer dying inside the pipeline must fail the command");
+    assert.match(step, /e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855/, "sha256 of empty input, refused by value");
+    assert.match(step, /hashed EMPTY input/);
+  });
+}

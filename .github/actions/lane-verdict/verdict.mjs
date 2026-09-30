@@ -41,6 +41,27 @@ const HEX = /^[0-9a-f]{32,128}$/;
  * @param {(cmd: string) => string} [o.run]  injectable for tests
  * @returns {{ key: string, fingerprint: string, why: string }}
  */
+/**
+ * The key's schema epoch. Bumped when what a key STANDS FOR changes — here,
+ * when the audit of 2026-09-30 (E7/E8) added the base, the engine revision
+ * and the runner to the material: a verdict recorded under the old shape
+ * answers for fewer things than the new key asks, so none may match.
+ */
+export const VERDICT_SCHEMA = "verdict-v2";
+
+/**
+ * The digests of EMPTY input, by algorithm. `git ls-tree missing | sha256sum`
+ * prints one and exits 0 without `pipefail` (E9); a consumer's command can
+ * hand it back looking like a hash, and two different trees would then share
+ * a verdict. Refused by value, whatever shell produced it.
+ */
+const EMPTY_DIGESTS = new Set([
+  "d41d8cd98f00b204e9800998ecf8427e",
+  "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e",
+]);
+
 export function verdictKey({ lane, fingerprintCommand, material = "", event, run = runShell }) {
   if (!/^[a-z][a-z0-9-]*$/.test(lane ?? "")) return { key: "", fingerprint: "", why: `lane "${lane}" is not a name` };
   if (event !== "pull_request") return { key: "", fingerprint: "", why: `event is ${event || "unknown"} — a verdict is consulted only on a pull request` };
@@ -51,14 +72,19 @@ export function verdictKey({ lane, fingerprintCommand, material = "", event, run
   } catch (error) {
     return { key: "", fingerprint: "", why: `fingerprint command failed: ${String(error.message ?? error).split("\n")[0]}` };
   }
-  const fingerprint = String(out ?? "").replace(/\s+/g, "");
+  const fingerprint = String(out ?? "").replace(/\s+/g, "").toLowerCase();
   if (!HEX.test(fingerprint)) return { key: "", fingerprint: "", why: "fingerprint command produced no usable hash" };
-  const key16 = createHash("sha256").update(`${material}\0${fingerprintCommand}`).digest("hex").slice(0, 16);
+  if (EMPTY_DIGESTS.has(fingerprint)) {
+    return { key: "", fingerprint: "", why: "fingerprint command hashed EMPTY input — its producer failed" };
+  }
+  const key16 = createHash("sha256").update(`${VERDICT_SCHEMA}\0${material}\0${fingerprintCommand}`).digest("hex").slice(0, 16);
   return { key: `${lane}-lane-${key16}-${fingerprint}`, fingerprint, why: "" };
 }
 
 function runShell(command) {
-  return execSync(command, { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], shell: "/bin/bash" });
+  // `pipefail`: a producer that dies inside the consumer's pipeline must fail
+  // the command, not hand the next stage empty input to hash (E9).
+  return execSync(`set -o pipefail\n${command}`, { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], shell: "/bin/bash" });
 }
 
 function output(pairs) {

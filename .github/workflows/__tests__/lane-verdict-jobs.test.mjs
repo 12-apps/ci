@@ -64,6 +64,15 @@ for (const { file, job, lane, input } of JOBS) {
     assert.match(all[lookup].block, new RegExp(`lane: ${lane}\\n`));
     assert.match(all[lookup].block, new RegExp(`fingerprint-command: \\$\\{\\{ inputs\\.${input} \\}\\}`));
     assert.match(all[lookup].block, /key-material: \|\n\s+node=\$\{\{ inputs\.node-version \}\}/, "the Node version is part of how the lane runs");
+    // E7/E8 (2026-09-30 audit): the same tree retargeted at another base
+    // selects another `--affected` set; an engine fix must not inherit a
+    // verdict the old logic earned; the runner image decides what ran.
+    assert.match(all[lookup].block, /\n\s+base=\$\{\{ github\.event\.pull_request\.base\.sha \}\}\n/, "the base the lane selected against");
+    assert.match(all[lookup].block, /\n\s+engine=\$\{\{ github\.job_workflow_sha \}\}\n/, "the engine revision that ran it");
+    assert.match(all[lookup].block, /\n\s+runner=\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}(\n|$)/, "the runner it ran on");
+    if (file === "monorepo-static.yml") {
+      assert.match(all[lookup].block, /\n\s+stack-base=\$\{\{ needs\.changes\.outputs\.stack-base \}\}\n/, "mid-stack, `--affected` diffs against the stack base");
+    }
   });
 
   test(`${job}: every step after the lookup is gated on the verdict, and the record is last`, () => {
