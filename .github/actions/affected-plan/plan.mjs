@@ -502,6 +502,9 @@ if (skipGreen && result.mode === "narrowed" && result.graph) {
       edges: result.graph.edges,
       blind: result.graph.blind,
       globals,
+      // The plan's static routes: a file a suite reads off disk is an input of
+      // that suite even though no import reaches it (lib/inputs.mjs).
+      routes: routes.filter((r) => r.match && r.entry).map((r) => ({ match: r.match, entries: r.entry })),
       tree: treeIndex(repoRoot),
     });
     console.error(

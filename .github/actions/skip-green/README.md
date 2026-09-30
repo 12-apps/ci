@@ -18,6 +18,10 @@ inputs** is reported as skipped and does not run.
    `git ls-tree`, so two trees with identical counted entries hash alike.
    A test whose closure reaches an unresolvable import gets `null`: no hash,
    never skippable.
+   A committed file the plan ROUTES to a suite (one it reads off disk with
+   `readFileSync` — a manifest, a YAML, a ledger) joins that suite's inputs
+   too: the closure cannot see it, the route says the suite's verdict depends
+   on it.
 2. **`filter`** (in the plan job, before the matrix is sized) reads the
    manifest an earlier green run left in the Actions cache and drops every
    planned test whose hash matches its recorded one — unless the test is on the

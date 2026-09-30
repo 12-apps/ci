@@ -183,3 +183,65 @@ test("a global that matches no tracked path contributes nothing, and says so in 
   const { stats } = testInputs({ tests: ["src/c.test.ts"], edges, globals: [/^nope\.json$/], tree: treeIndex(dir) });
   assert.equal(stats.globals, 0, "the consumer's own tests must pin each real global as moving the hash");
 });
+
+// ── Routed inputs: a file a suite reads off disk ────────────────────────────
+// The plan config routes a committed file no module imports to the suite that
+// reads it with `readFileSync` (a manifest, a YAML, a ledger). Selection sees
+// it through the route; the closure never does — so without this the suite
+// would be skipped on the tree that changed the very file it asserts over.
+
+const ROUTED = {
+  ...BASE,
+  "public/manifest.webmanifest": '{"id":"/"}\n',
+  "src/manifest.test.ts": 'import { readFileSync } from "node:fs";\nreadFileSync("public/manifest.webmanifest");\n',
+};
+const ROUTES = [{ match: /^public\/manifest\.webmanifest$/, entries: ["src/manifest.test.ts"] }];
+
+function routedHashes(dir) {
+  const files = listSourceFiles(dir, ["src"]);
+  const { edges, unresolved } = buildGraph(dir, files, { packages: new Map(), aliases: [] });
+  const tests = files.filter((f) => /\.test\.ts$/.test(f)).sort();
+  return testInputs({ tests, edges, blind: [...new Set(unresolved.map((u) => u.file))], globals: GLOBALS, routes: ROUTES, tree: treeIndex(dir) }).inputs;
+}
+
+test("a routed file moves the hash of the suite it is routed to — and of no other", () => {
+  const dir = repo("routed", ROUTED);
+  const before = routedHashes(dir);
+  commit(dir, { "public/manifest.webmanifest": '{"id":"/app"}\n' }, "manifest");
+  const after = routedHashes(dir);
+  assert.notEqual(after["src/manifest.test.ts"], before["src/manifest.test.ts"], "the suite reads the file — it is an input");
+  assert.equal(after["src/a.test.ts"], before["src/a.test.ts"], "a suite the route does not name is untouched");
+  assert.equal(after["src/c.test.ts"], before["src/c.test.ts"]);
+});
+
+test("a route whose entry is only REACHED by the suite (through an import) still counts", () => {
+  const dir = repo("routed-via", {
+    ...ROUTED,
+    "src/reads.ts": 'import { readFileSync } from "node:fs";\nexport const read = () => readFileSync("public/manifest.webmanifest");\n',
+    "src/via.test.ts": 'import { read } from "./reads";\nread();\n',
+  });
+  const routes = [{ match: /^public\/manifest\.webmanifest$/, entries: ["src/reads.ts"] }];
+  const files = listSourceFiles(dir, ["src"]);
+  const graph = buildGraph(dir, files, { packages: new Map(), aliases: [] });
+  const tests = files.filter((f) => /\.test\.ts$/.test(f)).sort();
+  const run = () => testInputs({ tests, edges: graph.edges, blind: [], globals: GLOBALS, routes, tree: treeIndex(dir) }).inputs;
+  const before = run();
+  commit(dir, { "public/manifest.webmanifest": '{"id":"/x"}\n' }, "manifest");
+  const after = run();
+  assert.notEqual(after["src/via.test.ts"], before["src/via.test.ts"], "the reader is in the closure, so what it reads is an input");
+  assert.equal(after["src/a.test.ts"], before["src/a.test.ts"]);
+});
+
+test("routes without a static entry, or matching nothing tracked, change no hash", () => {
+  const dir = repo("routed-none", ROUTED);
+  const plain = routedHashes(dir);
+  const files = listSourceFiles(dir, ["src"]);
+  const { edges } = buildGraph(dir, files, { packages: new Map(), aliases: [] });
+  const tests = files.filter((f) => /\.test\.ts$/.test(f)).sort();
+  const withNoise = testInputs({
+    tests, edges, blind: [], globals: GLOBALS, tree: treeIndex(dir),
+    routes: [...ROUTES, { match: /^nowhere\//, entries: ["src/a.test.ts"] }, { match: /^src\//, entries: [] }, { command: "x" }],
+  }).inputs;
+  assert.deepEqual(withNoise, plain);
+});
+
