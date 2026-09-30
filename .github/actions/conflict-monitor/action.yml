@@ -1,0 +1,81 @@
+name: 'Conflict monitor'
+description: >-
+  Say on a PR the moment its base makes it conflict, and count every time that
+  happened.
+
+  `probe` re-runs the merge of every open PR (or one, with `pr`) against the
+  base tip with `git merge-tree`, classifies each conflicted file, and keeps ONE
+  comment on the PR up to date: created on the first conflict, edited when the
+  conflicted set changes, marked resolved when the branch merges cleanly again,
+  and left alone otherwise. `report` replays every sync merge in every PR's
+  history — each time a branch took the base in and did not merge cleanly — and
+  writes the counts, per group, as a job summary and a JSON file.
+
+  Needs a full-history checkout. The groups are the caller's (a JSON config);
+  see lib/config.mjs for the format.
+inputs:
+  mode:
+    description: '`probe` or `report`.'
+    required: true
+  config:
+    description: "Path to the caller's bucket config. A missing file means no buckets: every file is `code`."
+    required: false
+    default: '.github/conflict-monitor.json'
+  base:
+    description: 'The base branch PRs target. Empty: the repository default branch.'
+    required: false
+    default: ''
+  pr:
+    description: '`probe` only: probe this one PR instead of every open one.'
+    required: false
+    default: ''
+  window-days:
+    description: '`report` only: the trailing window the "since" column counts, when `since` is empty.'
+    required: false
+    default: '7'
+  since:
+    description: '`report` only: an ISO date the "since" column starts at. Overrides `window-days`.'
+    required: false
+    default: ''
+  until:
+    description: '`report` only: ignore syncs committed after this ISO timestamp — pins a replay so a re-run reproduces it.'
+    required: false
+    default: ''
+  base-tip:
+    description: '`report` only: the commit to treat as the base tip (default `origin/<base>`).'
+    required: false
+    default: ''
+  out:
+    description: '`report` only: where the JSON is written.'
+    required: false
+    default: 'conflict-report/report.json'
+  dry-run:
+    description: "`probe` only: log what would be written, write nothing."
+    required: false
+    default: 'false'
+  github-token:
+    description: 'Lists PRs; `probe` also reads and writes PR comments (`pull-requests: write`).'
+    required: false
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        MODE: ${{ inputs.mode }}
+        CONFIG_PATH: ${{ inputs.config }}
+        BASE_BRANCH: ${{ inputs.base || github.event.repository.default_branch }}
+        PR_NUMBER: ${{ inputs.pr }}
+        WINDOW_DAYS: ${{ inputs.window-days }}
+        SINCE: ${{ inputs.since }}
+        UNTIL: ${{ inputs.until }}
+        BASE_TIP: ${{ inputs.base-tip }}
+        OUT: ${{ inputs.out }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        case "$MODE" in
+          probe)  node "$GITHUB_ACTION_PATH/probe.mjs" ;;
+          report) node "$GITHUB_ACTION_PATH/report.mjs" ;;
+          *) echo "::error::conflict-monitor: mode must be probe or report, got '$MODE'"; exit 1 ;;
+        esac
