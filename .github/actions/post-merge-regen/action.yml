@@ -50,7 +50,7 @@ inputs:
     required: false
     default: ''
   allow-paths:
-    description: '`land`: newline-separated globs the regeneration may write. Empty: anything but `.github/workflows/**` and `.github/actions/**`.'
+    description: '`land`: newline-separated globs the regeneration may write. Empty: anything outside `.github/`, which is always refused.'
     required: false
     default: ''
   commit-author:

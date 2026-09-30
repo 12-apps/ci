@@ -2198,8 +2198,8 @@ jobs:
 - **`command`** runs at the repository root, on the base tip, in a job of its
   own. That job has a read-only token and no secret. The command must be
   idempotent: run it twice on one tree, and the second run changes nothing. It
-  may not change `.github/workflows/`, and the land job refuses a patch that
-  does.
+  may not change anything under `.github/`, and the land job refuses a patch
+  that does.
 - **`title`** is the PR title and the commit header. Put whatever your commit
   rules demand in it, such as a ticket reference; the job cannot invent one.
 - **`PR_TOKEN`** is a PAT with contents and pull-requests write. It pushes the
@@ -2210,8 +2210,8 @@ jobs:
   that user.
 - **`allow-paths`** (optional) lists the globs the regeneration may write. A
   path outside the list turns the run red instead of landing with zero
-  approvals. `.github/workflows/**` and `.github/actions/**` are always
-  refused, and a file renamed out of one counts as a change to it.
+  approvals. All of `.github/` is always refused, and a file renamed out of it
+  counts as a change to it.
 - **Runners** must be ephemeral. Code the command leaves on a reused host
   would run next to the PAT in `land`.
 - **Concurrency** is the engine's. The reusable workflow serializes whole runs

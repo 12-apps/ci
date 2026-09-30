@@ -76,8 +76,8 @@ on:
       allow-paths:
         description: >-
           Newline-separated globs (`**` spans directories, `*` does not) the
-          regeneration may write. Empty: any path except `.github/workflows/**`
-          and `.github/actions/**`, which are always refused. A path outside
+          regeneration may write. Empty: any path outside `.github/`, which is
+          always refused. A path outside
           the list turns the run red instead of landing.
         type: string
         required: false
@@ -180,10 +180,13 @@ jobs:
       - if: steps.capture.outputs.changed == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: post-merge-regen-patch-${{ github.run_attempt }}
+          name: post-merge-regen-patch
           path: ${{ runner.temp }}/post-merge-regen.patch
           retention-days: 1
           if-no-files-found: error
+          # A FIXED name: "Re-run failed jobs" re-runs only `land`, and it must
+          # find the patch the earlier, successful `generate` uploaded.
+          # `overwrite` covers a re-run of every job.
           overwrite: true
 
   land:
@@ -208,7 +211,7 @@ jobs:
       - if: needs.generate.outputs.changed == 'true'
         uses: actions/download-artifact@v4
         with:
-          name: post-merge-regen-patch-${{ github.run_attempt }}
+          name: post-merge-regen-patch
           path: ${{ runner.temp }}/post-merge-regen
       - uses: 12-apps/ci/.github/actions/post-merge-regen@v2
         with:

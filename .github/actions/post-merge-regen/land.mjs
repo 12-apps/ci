@@ -35,11 +35,11 @@ import { branchFor, regenPrs } from "./lib/plan.mjs";
 const HARDENED = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
 
 /**
- * Paths a regeneration may never write, whatever the caller allows. A change
- * to a workflow, or to an action a workflow runs, needs its own review, and it
- * would land here with zero approvals.
+ * Paths a regeneration may never write, whatever the caller allows: all of
+ * `.github/`. A workflow, an action a workflow runs, CODEOWNERS or a bot's
+ * config each needs its own review, and would land here with zero approvals.
  */
-const FORBIDDEN = /^\.github\/(workflows|actions)\//;
+const FORBIDDEN = /^\.github\//;
 
 /** `**` spans directories, `*` does not, `?` is one character; anchored at both ends. */
 export function globToRegExp(glob) {
@@ -47,9 +47,14 @@ export function globToRegExp(glob) {
   for (let i = 0; i < glob.length; i += 1) {
     const ch = glob[i];
     if (ch === "*" && glob[i + 1] === "*") {
-      out += ".*";
       i += 1;
-      if (glob[i + 1] === "/") i += 1;
+      if (glob[i + 1] === "/") {
+        // `**/` is zero or more WHOLE directories: `a/**/b` never matches `a/xb`.
+        out += "(?:.*/)?";
+        i += 1;
+      } else {
+        out += ".*";
+      }
     } else if (ch === "*") out += "[^/]*";
     else if (ch === "?") out += "[^/]";
     else out += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");

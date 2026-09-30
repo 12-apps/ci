@@ -356,10 +356,14 @@ describe("path rules", () => {
     assert.ok(!globToRegExp("docs/*.md").test("docs/adr/x.md"));
     assert.ok(globToRegExp("docs/*.md").test("docs/INDEX.md"));
     assert.ok(!globToRegExp("docs/adr/**").test("docs/adrx/y.md"));
+    assert.ok(globToRegExp("a/**/b").test("a/b") && globToRegExp("a/**/b").test("a/x/y/b"));
+    assert.ok(!globToRegExp("a/**/b").test("a/xb"));
+    assert.ok(globToRegExp("**/x.md").test("x.md") && !globToRegExp("**/x.md").test("fox.md"));
   });
 
-  it("workflows and actions are refused even when the allow-list would let them through", () => {
-    assert.deepEqual(refusedPaths([".github/workflows/a.yml", ".github/actions/x/action.yml", "docs/a.md"], "**"), [".github/workflows/a.yml", ".github/actions/x/action.yml"]);
+  it("all of .github/ is refused, even when the allow-list would let it through", () => {
+    const touched = [".github/workflows/a.yml", ".github/actions/x/action.yml", ".github/CODEOWNERS", ".github/conflict-monitor.json", "docs/a.md"];
+    assert.deepEqual(refusedPaths(touched, "**"), touched.slice(0, 4));
     assert.deepEqual(refusedPaths(["anything.txt"], ""), []);
   });
 });
@@ -381,6 +385,11 @@ describe("the reusable workflow's grants match what each job calls", () => {
     const b = block("generate");
     assert.match(b, /permissions:\n\s+contents: read\n/);
     assert.doesNotMatch(b, /pull-requests:|secrets\./);
+  });
+
+  it("names the patch artifact without the run attempt, so re-running only `land` finds it", () => {
+    assert.equal((yml.match(/name: post-merge-regen-patch\n/g) ?? []).length, 2);
+    assert.doesNotMatch(yml, /post-merge-regen-patch-\$\{\{/);
   });
 
   it("serializes whole runs at the workflow level", () => {
