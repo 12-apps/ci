@@ -1,0 +1,130 @@
+name: 'Skip what is already green'
+description: >-
+  Do not re-run, on a later push of the same pull request, a test that an
+  earlier GREEN run of this lane already passed with identical inputs.
+
+  Selection is cumulative on purpose (every push diffs against the merge base
+  with the default branch), so push 3 of a PR re-runs push 1's tests even when
+  push 3 changed nothing they can see. `affected-plan` hashes each selected
+  test's inputs — its transitive import closure plus the lane's declared global
+  inputs, as blob shas — into the plan. This action, in `filter` mode, compares
+  those hashes with the manifest an earlier green run of the lane recorded on
+  this PR and drops (or, under `shadow`, only reports) the tests whose inputs
+  have not moved. In `record` mode, after the lane passed, it writes the
+  manifest the next push will read.
+
+  Fails safe in every direction: no manifest, an unreadable one, a plan without
+  hashes, a test with no bounded hash, a test on the consumer's always-run list,
+  an always-run list that cannot be read — each runs the test. Only a lane
+  whose result is `success` records anything.
+
+inputs:
+  mode:
+    description: '`filter` (in the plan job, before the matrix is sized) or `record` (after the matrix, in a green lane).'
+    required: true
+  lane:
+    description: 'Lane name (`unit`, `integration`); the manifest is per lane.'
+    required: true
+  plan:
+    description: 'Path to the affected-plan JSON document, relative to working-directory. `filter` rewrites it in place.'
+    required: true
+  manifest:
+    description: 'Path of the lane''s manifest file inside the restored/saved cache directory, relative to working-directory.'
+    required: true
+  policy:
+    description: '`filter` only: `shadow` (report, run everything) or `enforce` (drop the already-green tests).'
+    required: false
+    default: 'shadow'
+  always-run:
+    description: >-
+      `filter` only. Path to the consumer's list of tests that must always run
+      (a JSON array, or `{"tests": [...]}`) — non-hermetic suites whose verdict
+      depends on something no hash sees. Empty for no list.
+    required: false
+    default: ''
+  max-shards:
+    description: '`filter` only: the lane''s shard ceiling, to size the filtered list by the same rule as the plan.'
+    required: false
+    default: '4'
+  min-tests-per-shard:
+    description: '`filter` only: below this many tests the lane stays on one runner.'
+    required: false
+    default: '40'
+  lane-result:
+    description: '`record` only: the lane''s result (`needs.<lane>-tests.result`). Anything but `success` records nothing.'
+    required: false
+    default: ''
+  head-sha:
+    description: '`record` only: the pull request head the green run tested (what the skip line names). Defaults to GITHUB_SHA.'
+    required: false
+    default: ''
+  working-directory:
+    description: 'Consumer checkout root.'
+    required: false
+    default: '.'
+
+outputs:
+  mode:
+    description: '`filter`: the plan''s mode after filtering (`narrowed`, `none`).'
+    value: ${{ steps.filter.outputs.mode }}
+  count:
+    description: '`filter`: tests left to run.'
+    value: ${{ steps.filter.outputs.count }}
+  shard-total:
+    description: '`filter`: shard count for the filtered list; `0` when nothing is left.'
+    value: ${{ steps.filter.outputs.shard-total }}
+  skipped:
+    description: '`filter`: tests dropped (enforce).'
+    value: ${{ steps.filter.outputs.skipped }}
+  would-skip:
+    description: '`filter`: tests that would have been dropped (shadow).'
+    value: ${{ steps.filter.outputs.would-skip }}
+  recorded:
+    description: '`record`: `true` when a manifest was written.'
+    value: ${{ steps.record.outputs.recorded }}
+  entries:
+    description: '`record`: entries in the manifest after this run.'
+    value: ${{ steps.record.outputs.entries }}
+
+runs:
+  using: composite
+  steps:
+    - name: Filter the plan against the green manifest
+      id: filter
+      if: ${{ inputs.mode == 'filter' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        LANE: ${{ inputs.lane }}
+        PLAN: ${{ inputs.plan }}
+        MANIFEST: ${{ inputs.manifest }}
+        POLICY: ${{ inputs.policy }}
+        ALWAYS_RUN: ${{ inputs.always-run }}
+        MAX_SHARDS: ${{ inputs.max-shards }}
+        PER_SHARD: ${{ inputs.min-tests-per-shard }}
+      run: |
+        set -uo pipefail
+        # NOT `set -e`: a filter that cannot decide must leave the plan as it
+        # is, which is exactly what a non-zero exit from the script means.
+        node "$GITHUB_ACTION_PATH/filter.mjs" \
+          --lane "$LANE" --plan "$PLAN" --manifest "$MANIFEST" --policy "$POLICY" \
+          --always-run "$ALWAYS_RUN" --max-shards "$MAX_SHARDS" --min-tests-per-shard "$PER_SHARD" \
+          || echo "::warning::skip-green ($LANE): the filter could not run — the plan runs unfiltered."
+
+    - name: Record what this green lane proved
+      id: record
+      if: ${{ inputs.mode == 'record' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        LANE: ${{ inputs.lane }}
+        PLAN: ${{ inputs.plan }}
+        MANIFEST: ${{ inputs.manifest }}
+        LANE_RESULT: ${{ inputs.lane-result }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+      run: |
+        set -uo pipefail
+        node "$GITHUB_ACTION_PATH/record.mjs" \
+          --lane "$LANE" --plan "$PLAN" --manifest "$MANIFEST" \
+          --lane-result "$LANE_RESULT" --head-sha "${HEAD_SHA:-$GITHUB_SHA}" --run-id "$GITHUB_RUN_ID" \
+          || echo "::warning::skip-green ($LANE): the record step could not run — nothing recorded."

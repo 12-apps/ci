@@ -377,6 +377,14 @@ export function selectAffected(options) {
     // entry -> the changed non-source paths that routed to it, so a reviewer
     // can see WHY a file nobody edited is seeded as fully changed.
     routes: routeReport,
+    // The graph this selection walked, for a caller that needs to answer a
+    // second question over the SAME edges — which files a selected test's
+    // verdict can depend on (lib/inputs.mjs). Handed out rather than rebuilt:
+    // two graphs over one tree are two things that can disagree, and a hash
+    // computed over a graph the selection did not walk is a hash of something
+    // else. `blind` names the files whose imports did not resolve; anything
+    // reaching one has no bounded closure.
+    graph: { edges, blind },
     stats: {
       changed: relevant.length,
       routed: Object.keys(routeReport).length,

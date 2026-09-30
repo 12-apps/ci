@@ -347,6 +347,41 @@ on:
         type: number
         required: false
         default: 1
+      skip-green:
+        description: >-
+          OPT-IN, and only with `affected-plan-config`. Do not re-run, on a
+          later push of the same pull request, a test an earlier GREEN run of
+          the lane already passed with identical inputs (`.github/actions/
+          skip-green`). Selection is cumulative on purpose — every push diffs
+          against the merge base — so push 3 re-runs push 1's tests even when
+          push 3 changed nothing they can see; this recognises the repeat per
+          TEST, where `*-fingerprint-command` recognises it per TREE.
+
+          `shadow` decides and reports (`would skip: <test> — green at <sha>`)
+          but runs everything; `enforce` drops the already-green tests from the
+          plan before the matrix is sized. Start with `shadow`: a week of it with
+          no "would have skipped, then failed" is the evidence to enforce.
+
+          The plan job hashes each selected test's inputs (its import closure
+          plus the globals the consumer declares under `lanes.<lane>.skipGreen`
+          in the plan config — a lane with no `skipGreen` block gets no hashes
+          and nothing is ever skipped). A green lane records them post-matrix
+          under `green-<lane>-<key>-pr<N>-<run_id>`; the next run restores by
+          prefix. `<key>` is the lane's Node version and commands, so changing
+          HOW the lane runs invalidates every entry. Never active off a pull
+          request. Empty (default) disables it.
+        type: string
+        required: false
+        default: ''
+      skip-green-always-run:
+        description: >-
+          Path, in the consumer, to the tests `skip-green` must never skip: a
+          JSON array or `{"tests": [...]}` of test paths whose verdict depends
+          on something no input hash sees (the clock, the network, test order).
+          A list that cannot be read skips nothing. Empty for no list.
+        type: string
+        required: false
+        default: ''
       affected-plan-config:
         description: >-
           Path to an `affected-plan` config (see
@@ -487,6 +522,10 @@ jobs:
       # two things that can disagree, and a recorder writing a DIFFERENT key
       # from the one the next run looks up is a skip that silently never happens.
       fingerprint: ${{ steps.fingerprint.outputs.value }}
+      # Non-empty only when `skip-green` is on for this run: the key half of the
+      # green manifest's cache name, handed to the post-matrix recorder for the
+      # same reason the fingerprint is — one computation, never two.
+      skip-green-key: ${{ steps.skip-green-key.outputs.value }}
     steps:
       # Only a caller that SIZES the lane needs the tree. Without a plan
       # command this job stays what it was: arithmetic over an input.
@@ -524,6 +563,64 @@ jobs:
           out: affected-plan.unit.json
           max-shards: ${{ inputs.unit-shards }}
           artifact-name: affected-plan-unit
+          # With skip-green on, the plan is uploaded AFTER filtering, below —
+          # the shards must run the list the filter left, and one artifact
+          # name cannot hold two documents.
+          upload-artifact: ${{ inputs.skip-green == '' }}
+
+      # ── Skip what this pull request already proved, per test (opt-in) ─────
+      # Three steps, in this order, BEFORE the matrix is sized: restore the
+      # manifest the last green run of this lane left on this PR, filter the
+      # plan against it, upload the plan the shards will run. The filter runs
+      # here rather than inside a shard for the reason the fingerprint lookup
+      # does — a step inside the matrix cannot shrink the matrix.
+      #
+      # The key folds in how the lane RUNS (Node, pre-command, test command),
+      # so a manifest recorded under one command never answers for another;
+      # the content half lives in the per-test hashes the plan carries.
+      - name: Key the green manifest to how this lane runs
+        id: skip-green-key
+        if: ${{ inputs.skip-green != '' && inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
+        shell: bash
+        env:
+          LANE_NODE: ${{ inputs.node-version }}
+          LANE_PRE: ${{ inputs.pre-test-command }}
+          LANE_CMD: ${{ inputs.unit-test-command }}
+        run: |
+          set -euo pipefail
+          key="$(printf '%s\0%s\0%s' "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" | sha256sum | cut -c1-16)"
+          echo "value=${key}" >> "$GITHUB_OUTPUT"
+          echo "unit green manifest key prefix: green-unit-${key}-pr${PR_NUMBER:-?}-"
+      # The exact key carries this run's id and can never hit; the PREFIX hits
+      # the newest manifest any earlier run of this lane saved for this PR.
+      - name: Restore the green manifest
+        if: ${{ steps.skip-green-key.outputs.value != '' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: .skip-green
+          key: green-unit-${{ steps.skip-green-key.outputs.value }}-pr${{ github.event.pull_request.number }}-${{ github.run_id }}
+          restore-keys: |
+            green-unit-${{ steps.skip-green-key.outputs.value }}-pr${{ github.event.pull_request.number }}-
+      - name: Skip what is already green
+        id: skipgreen
+        if: ${{ steps.skip-green-key.outputs.value != '' }}
+        uses: 12-apps/ci/.github/actions/skip-green@v2
+        with:
+          mode: filter
+          lane: unit
+          plan: affected-plan.unit.json
+          manifest: .skip-green/unit.json
+          policy: ${{ inputs.skip-green }}
+          always-run: ${{ inputs.skip-green-always-run }}
+          max-shards: ${{ inputs.unit-shards }}
+      - name: Upload the filtered plan
+        if: ${{ steps.skip-green-key.outputs.value != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: affected-plan-unit
+          path: affected-plan.unit.json
+          if-no-files-found: error
+          retention-days: 14
 
       # ── Has this exact tree already passed THIS LANE? (opt-in) ─────────────
       # The verdict lookup lives HERE, ahead of sizing, rather than inside each
@@ -612,6 +709,12 @@ jobs:
           # Set only when `affected-plan-config` opted this lane in; the plan
           # then sizes the matrix from the real test list rather than a proxy.
           PLAN_ASKED: ${{ steps.affected.outputs.shard-total }}
+          # The FILTERED plan's size, when skip-green rewrote the plan; the
+          # decision is made in bash below rather than with `||`, because a
+          # legitimate "0 left" must win over the unfiltered count and an
+          # expression `||` would read "0" as nothing to say.
+          SKIP_GREEN_FILTERED: ${{ steps.skipgreen.outputs.filtered }}
+          SKIP_GREEN_ASKED: ${{ steps.skipgreen.outputs.shard-total }}
           # PR-ONLY, and this is the load-bearing half of the input. The push
           # run is the post-merge safety net: it skips nothing, by definition.
           # A selector asked to size a push diff has no PR base to narrow
@@ -626,6 +729,11 @@ jobs:
           VERDICT_HIT: ${{ steps.verdict.outputs.cache-hit }}
         run: |
           set -uo pipefail
+          # skip-green rewrote the plan: the shards run ITS list, so the matrix
+          # is sized from it — zero included, which is the empty matrix below.
+          if [ "${SKIP_GREEN_FILTERED:-}" = "true" ] && [[ "${SKIP_GREEN_ASKED:-}" =~ ^[0-9]+$ ]]; then
+            PLAN_ASKED="$SKIP_GREEN_ASKED"
+          fi
           # Clamp rather than trust: a bad INPUT must never reach the matrix.
           if ! [[ "$SHARDS" =~ ^[0-9]+$ ]] || [ "$SHARDS" -lt 1 ]; then
             echo "::warning::unit-shards='$SHARDS' is not a positive integer; falling back to a single shard."
@@ -1162,12 +1270,13 @@ jobs:
     if: >-
       ${{ !cancelled()
           && github.event_name == 'pull_request'
-          && needs.unit-plan.outputs.fingerprint != ''
+          && (needs.unit-plan.outputs.fingerprint != '' || needs.unit-plan.outputs.skip-green-key != '')
           && needs.unit-tests.result == 'success'
           && needs.unit-signal.result != 'failure'
           && needs.unit-signal.result != 'cancelled' }}
     steps:
       - name: Note what passed
+        if: ${{ needs.unit-plan.outputs.fingerprint != '' }}
         shell: bash
         # Content is diagnostic only — the KEY carries the meaning, and
         # `lookup-only` means no reader ever downloads this.
@@ -1185,10 +1294,48 @@ jobs:
           } > .unit-lane-verdict/passed
 
       - name: Save the lane verdict
+        if: ${{ needs.unit-plan.outputs.fingerprint != '' }}
         uses: actions/cache/save@v4
         with:
           path: .unit-lane-verdict
           key: unit-lane-${{ needs.unit-plan.outputs.fingerprint }}
+
+      # ── Record what this green lane proved, per test (skip-green) ─────────
+      # The same placement argument as the lane verdict above: the claim is
+      # made after the matrix and after the signal job, by the run that earned
+      # it. `record` refuses anything but a `success` lane result, so a red or
+      # cancelled lane can never write a manifest even if this job somehow ran.
+      - name: Download the plan this lane ran
+        if: ${{ needs.unit-plan.outputs.skip-green-key != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: affected-plan-unit
+          path: .affected-plan
+      - name: Restore the green manifest
+        if: ${{ needs.unit-plan.outputs.skip-green-key != '' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: .skip-green
+          key: green-unit-${{ needs.unit-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-${{ github.run_id }}
+          restore-keys: |
+            green-unit-${{ needs.unit-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-
+      - name: Record the green tests
+        id: record
+        if: ${{ needs.unit-plan.outputs.skip-green-key != '' }}
+        uses: 12-apps/ci/.github/actions/skip-green@v2
+        with:
+          mode: record
+          lane: unit
+          plan: .affected-plan/affected-plan.unit.json
+          manifest: .skip-green/unit.json
+          lane-result: ${{ needs.unit-tests.result }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+      - name: Save the green manifest
+        if: ${{ steps.record.outputs.recorded == 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .skip-green
+          key: green-unit-${{ needs.unit-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-${{ github.run_id }}
 
   build:
     name: Build
@@ -1339,6 +1486,8 @@ jobs:
       # two things that can disagree, and a recorder writing a DIFFERENT key
       # from the one the next run looks up is a skip that silently never happens.
       fingerprint: ${{ steps.fingerprint.outputs.value }}
+      # See unit-plan.
+      skip-green-key: ${{ steps.skip-green-key.outputs.value }}
     steps:
       # Also checked out for the verdict lookup below: the caller's fingerprint
       # command hashes the TREE, so there has to be one.
@@ -1372,6 +1521,52 @@ jobs:
           out: affected-plan.integration.json
           max-shards: ${{ inputs.integration-shards }}
           artifact-name: affected-plan-integration
+          # Uploaded after filtering when skip-green is on — see unit-plan.
+          upload-artifact: ${{ inputs.skip-green == '' }}
+
+      # ── Skip what this pull request already proved, per test (opt-in) ─────
+      # The integration twin of unit-plan's three steps; the argument is there.
+      - name: Key the green manifest to how this lane runs
+        id: skip-green-key
+        if: ${{ inputs.skip-green != '' && inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
+        shell: bash
+        env:
+          LANE_NODE: ${{ inputs.node-version }}
+          LANE_PRE: ${{ inputs.pre-integration-command }}
+          LANE_CMD: ${{ inputs.integration-command }}
+        run: |
+          set -euo pipefail
+          key="$(printf '%s\0%s\0%s' "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" | sha256sum | cut -c1-16)"
+          echo "value=${key}" >> "$GITHUB_OUTPUT"
+          echo "integration green manifest key prefix: green-integration-${key}-pr${PR_NUMBER:-?}-"
+      - name: Restore the green manifest
+        if: ${{ steps.skip-green-key.outputs.value != '' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: .skip-green
+          key: green-integration-${{ steps.skip-green-key.outputs.value }}-pr${{ github.event.pull_request.number }}-${{ github.run_id }}
+          restore-keys: |
+            green-integration-${{ steps.skip-green-key.outputs.value }}-pr${{ github.event.pull_request.number }}-
+      - name: Skip what is already green
+        id: skipgreen
+        if: ${{ steps.skip-green-key.outputs.value != '' }}
+        uses: 12-apps/ci/.github/actions/skip-green@v2
+        with:
+          mode: filter
+          lane: integration
+          plan: affected-plan.integration.json
+          manifest: .skip-green/integration.json
+          policy: ${{ inputs.skip-green }}
+          always-run: ${{ inputs.skip-green-always-run }}
+          max-shards: ${{ inputs.integration-shards }}
+      - name: Upload the filtered plan
+        if: ${{ steps.skip-green-key.outputs.value != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: affected-plan-integration
+          path: affected-plan.integration.json
+          if-no-files-found: error
+          retention-days: 14
 
       # ── Has this exact tree already passed THIS LANE? (opt-in) ─────────────
       # The verdict lookup lives HERE, ahead of sizing, rather than inside each
@@ -1460,6 +1655,12 @@ jobs:
           # Set only when `affected-plan-config` opted this lane in; the plan
           # then sizes the matrix from the real test list rather than a proxy.
           PLAN_ASKED: ${{ steps.affected.outputs.shard-total }}
+          # The FILTERED plan's size, when skip-green rewrote the plan; the
+          # decision is made in bash below rather than with `||`, because a
+          # legitimate "0 left" must win over the unfiltered count and an
+          # expression `||` would read "0" as nothing to say.
+          SKIP_GREEN_FILTERED: ${{ steps.skipgreen.outputs.filtered }}
+          SKIP_GREEN_ASKED: ${{ steps.skipgreen.outputs.shard-total }}
           # PR-ONLY, and this is the load-bearing half of the input. The push
           # run is the post-merge safety net: it skips nothing, by definition.
           # A selector asked to size a push diff has no PR base to narrow
@@ -1474,6 +1675,10 @@ jobs:
           VERDICT_HIT: ${{ steps.verdict.outputs.cache-hit }}
         run: |
           set -uo pipefail
+          # skip-green rewrote the plan — see unit-plan.
+          if [ "${SKIP_GREEN_FILTERED:-}" = "true" ] && [[ "${SKIP_GREEN_ASKED:-}" =~ ^[0-9]+$ ]]; then
+            PLAN_ASKED="$SKIP_GREEN_ASKED"
+          fi
           # Clamp rather than trust: a bad INPUT must never reach the matrix.
           if ! [[ "$SHARDS" =~ ^[0-9]+$ ]] || [ "$SHARDS" -lt 1 ]; then
             echo "::warning::integration-shards='$SHARDS' is not a positive integer; falling back to a single shard."
@@ -1765,12 +1970,13 @@ jobs:
     if: >-
       ${{ !cancelled()
           && github.event_name == 'pull_request'
-          && needs.integration-plan.outputs.fingerprint != ''
+          && (needs.integration-plan.outputs.fingerprint != '' || needs.integration-plan.outputs.skip-green-key != '')
           && needs.integration-tests.result == 'success'
           && needs.integration-signal.result != 'failure'
           && needs.integration-signal.result != 'cancelled' }}
     steps:
       - name: Note what passed
+        if: ${{ needs.integration-plan.outputs.fingerprint != '' }}
         shell: bash
         env:
           VERDICT_KEY: integration-lane-${{ needs.integration-plan.outputs.fingerprint }}
@@ -1786,7 +1992,42 @@ jobs:
           } > .integration-lane-verdict/passed
 
       - name: Save the lane verdict
+        if: ${{ needs.integration-plan.outputs.fingerprint != '' }}
         uses: actions/cache/save@v4
         with:
           path: .integration-lane-verdict
           key: integration-lane-${{ needs.integration-plan.outputs.fingerprint }}
+
+      # ── Record what this green lane proved, per test (skip-green) ─────────
+      # See unit-verdict.
+      - name: Download the plan this lane ran
+        if: ${{ needs.integration-plan.outputs.skip-green-key != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: affected-plan-integration
+          path: .affected-plan
+      - name: Restore the green manifest
+        if: ${{ needs.integration-plan.outputs.skip-green-key != '' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: .skip-green
+          key: green-integration-${{ needs.integration-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-${{ github.run_id }}
+          restore-keys: |
+            green-integration-${{ needs.integration-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-
+      - name: Record the green tests
+        id: record
+        if: ${{ needs.integration-plan.outputs.skip-green-key != '' }}
+        uses: 12-apps/ci/.github/actions/skip-green@v2
+        with:
+          mode: record
+          lane: integration
+          plan: .affected-plan/affected-plan.integration.json
+          manifest: .skip-green/integration.json
+          lane-result: ${{ needs.integration-tests.result }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+      - name: Save the green manifest
+        if: ${{ steps.record.outputs.recorded == 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .skip-green
+          key: green-integration-${{ needs.integration-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-${{ github.run_id }}

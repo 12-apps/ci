@@ -25,6 +25,7 @@ import { dirname, join, resolve } from "node:path";
 import { databaseRoutes } from "./lib/database.mjs";
 import { explainByChange, explainByTest } from "./lib/explain.mjs";
 import { gherkinFeatures } from "./lib/gherkin.mjs";
+import { INPUTS_VERSION, testInputs, treeIndex } from "./lib/inputs.mjs";
 import { fileKeys, keyedChange, keyPatterns, wiringOf } from "./lib/keys.mjs";
 import { listSourceFiles, stripComments } from "./lib/modules.mjs";
 import { entriesForMatches } from "./lib/occurrences.mjs";
@@ -485,11 +486,43 @@ const gherkinReport =
     ? gherkinFeatures({ repoRoot, projects: gherkin.projects, calls: gherkin.calls, affected: result.affected })
     : null;
 
+// Per-test inputs, for a caller that skips what is already green (the
+// `skip-green` action). Opt-in per lane through `skipGreen.globals`: the
+// closure is the same for every consumer, but which paths a runner reads
+// WITHOUT importing them — a lockfile, a setup file, a migration folder — is
+// something only the consumer can declare, and a lane with no declaration
+// gets no hashes rather than hashes that miss its globals.
+const skipGreen = laneConfig.skipGreen;
+let inputsReport = null;
+if (skipGreen && result.mode === "narrowed" && result.graph) {
+  try {
+    const globals = (skipGreen.globals ?? []).map((source) => new RegExp(source));
+    inputsReport = testInputs({
+      tests: result.tests,
+      edges: result.graph.edges,
+      blind: result.graph.blind,
+      globals,
+      tree: treeIndex(repoRoot),
+    });
+    console.error(
+      `[inputs] ${inputsReport.stats.hashed} test(s) hashed over their import closure + ${inputsReport.stats.globals} global path(s)` +
+        (inputsReport.stats.unbounded ? `; ${inputsReport.stats.unbounded} unbounded (an unresolved import) — never skippable` : "") +
+        (inputsReport.stats.missing ? `; ${inputsReport.stats.missing} with a closure file git does not track — never skippable` : ""),
+    );
+  } catch (error) {
+    // No hashes is the safe answer: the caller then skips nothing. It is never
+    // a reason to fail the plan — selection is unaffected by this.
+    console.error(`::warning::affected-plan (${lane}): could not compute test inputs — nothing will be skipped (${error.message})`);
+    inputsReport = null;
+  }
+}
+
 emit({
   ...result,
   base: mergeBase,
   lane,
   changed,
+  ...(inputsReport ? { inputs: inputsReport.inputs, inputsVersion: INPUTS_VERSION, globalFiles: inputsReport.globalFiles } : {}),
   ...(keyed?.size ? { keys: Object.fromEntries([...keyed].map(([f, k]) => [f, k.report])) } : {}),
   ...(gherkin ? { gherkin: gherkinReport ?? { features: [], steps: {} } } : {}),
 });
@@ -543,6 +576,11 @@ function emit(plan) {
     affectedSymbols: plan.symbols ?? {},
     tests,
     reasons: plan.reasons ?? {},
+    // One hash per selected test over everything its verdict can depend on
+    // (lib/inputs.mjs), present only when the lane opted into `skipGreen`.
+    // `null` marks a test with no bounded inputs; the skip-green action never
+    // skips one of those.
+    ...(plan.inputs ? { inputsVersion: plan.inputsVersion, globalFiles: plan.globalFiles ?? [], inputs: plan.inputs } : {}),
   };
   mkdirSync(dirname(outPath), { recursive: true });
   writeFileSync(outPath, `${JSON.stringify(document, null, 2)}\n`);
