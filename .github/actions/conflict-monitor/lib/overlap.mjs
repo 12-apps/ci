@@ -22,7 +22,8 @@
  *                 directly and both sides' base conflicts are taken out;
  *   5. overlap    a conflicted path that is in both PRs' paths — or whose
  *                 rename source is: "P renames a→b, Q edits a" conflicts on
- *                 `b`, and is an overlap;
+ *                 `b`, and is an overlap. A file git moved aside for a
+ *                 directory (`fd~<commit>`) counts as `fd`;
  *   6. kind       git's own, read as E0 reads it (lib/shape.mjs), in words.
  *
  * A pair that shares a path and merges cleanly is an R1 pair: worth a line in
@@ -74,6 +75,9 @@ export const sharedPaths = (a, b) => [...a.paths].filter((p) => b.paths.has(p)).
 
 /** Worth a merge at all: a shared path, or a rename on either side. */
 export const isCandidate = (a, b) => a.renamedFrom.size > 0 || b.renamedFrom.size > 0 || sharedPaths(a, b).length > 0;
+
+/** `fd~<commit>` → `fd`: the name git gives a file it moved aside, back to the file's own. */
+const unmangled = (path) => path.replace(/~[0-9a-f]{40}(?:[0-9a-f]{24})?$/, "");
 
 /** `path` is in `side`'s paths, directly or through a rename source either side recorded. */
 function touches(side, other, path) {
@@ -141,16 +145,20 @@ export function analyzePair({ baseSha, a, b, cwd, cache = new Map() }) {
   if (!isCandidate(low.paths, high.paths)) return { overlaps: [], shared, synthesised: null };
   if (isStackedPair(low.head, high.head, { mainSide: baseSha, cwd, cache })) return { stacked: true };
   const { merge, e0, synthesised } = pairMerge(baseSha, low, high, { cwd, cache });
-  const overlaps = [];
+  const owned = new Set([...e0, ...[...e0].map(unmangled)]);
+  const inBoth = (p) => touches(low.paths, high.paths, p) && touches(high.paths, low.paths, p);
+  const found = new Map();
   if (merge.conflicted) {
-    for (const path of merge.files) {
-      if (e0.has(path)) continue;
-      if (!touches(low.paths, high.paths, path) || !touches(high.paths, low.paths, path)) continue;
-      const kinds = merge.kinds.get(path) ?? new Set();
-      const blob = kinds.has("content") ? blobAt(merge.tree, path, cwd) : "";
-      overlaps.push({ path, kind: kindOf(fileShape(kinds, blob)) });
+    for (const file of merge.files) {
+      // git records a file that had to move aside for a directory as
+      // `path~<commit>`; the PRs' files lists name it `path`.
+      const path = inBoth(file) ? file : unmangled(file);
+      if (owned.has(file) || owned.has(path) || !inBoth(path) || found.has(path)) continue;
+      const kinds = new Set([...(merge.kinds.get(file) ?? []), ...(path !== file ? merge.kinds.get(path) ?? [] : [])]);
+      const blob = kinds.has("content") ? blobAt(merge.tree, file, cwd) : "";
+      found.set(path, kindOf(fileShape(kinds, blob)));
     }
   }
-  overlaps.sort((x, y) => x.path.localeCompare(y.path));
+  const overlaps = [...found].map(([path, kind]) => ({ path, kind })).sort((x, y) => x.path.localeCompare(y.path));
   return { overlaps, shared, synthesised };
 }

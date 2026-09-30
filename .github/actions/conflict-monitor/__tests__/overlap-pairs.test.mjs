@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 
 import { KINDS, analyzePair, isCandidate, kindOf, pathSetOf } from "../lib/overlap.mjs";
-import { overlapDigest } from "../lib/overlap-state.mjs";
+import { fold, groupsOf, stateFor } from "../lib/overlap-state.mjs";
 import { lines, makeRepo } from "./fixture.mjs";
 
 // The pair rule over real repositories: every kind produced by git itself, the
@@ -118,7 +118,7 @@ test("swapping which PR is which changes nothing", () => {
   assert.deepEqual(analyze(r, x, y), analyze(r, y, x));
   assert.equal(analyze(r, y, x).synthesised, 1, "both clean with main: the lower number is synthesised");
   // Each PR's comment digest, from either order: unchanged.
-  const digests = (res, partner) => overlapDigest(res.overlaps.map((o) => ({ partner, path: o.path, kind: o.kind })));
+  const digests = (res, partner) => stateFor(fold(groupsOf(res.overlaps.map((o) => ({ partner, path: o.path, kind: o.kind })))));
   assert.equal(digests(analyze(r, x, y), 2), digests(analyze(r, y, x), 2));
   assert.equal(digests(analyze(r, x, y), 1), digests(analyze(r, y, x), 1));
 });
@@ -137,7 +137,22 @@ test("no shared path and no rename: not a candidate, no merge run", () => {
   const x = pr(r, 1, { "a.txt": lines("X") });
   const y = pr(r, 2, { "list.txt": lines("Y") });
   assert.equal(isCandidate(side(r, x).paths, side(r, y).paths), false);
-  assert.deepEqual(analyze(r, x, y), { overlaps: [], shared: [], synthesised: null });
+  const cache = new Map();
+  const res = analyzePair({ baseSha: r.git("rev-parse", "main"), a: side(r, x), b: side(r, y), cwd: r.dir, cache });
+  assert.deepEqual(res, { overlaps: [], shared: [], synthesised: null });
+  assert.equal(cache.size, 0, "no merge, no stack test: nothing was computed");
+});
+
+test("a file turned into a directory against an edit of the file: git names it `fd~<oid>`, and it is the overlap on `fd`", () => {
+  const r = world();
+  r.commit("add fd", { fd: lines("f") });
+  const x = pr(r, 1, { fd: lines("X") });
+  const y = pr(r, 2, { fd: null, "fd/inside.txt": lines("Y") });
+  const res = analyze(r, x, y);
+  // git reports `file/directory` AND `modify/delete` on the moved-aside
+  // file; the edit was deleted from under it, so the kind is `deletes or moves`.
+  assert.deepEqual(res.overlaps, [{ path: "fd", kind: KINDS.moved }]);
+  assert.deepEqual(analyze(r, y, x), res);
 });
 
 test("an ignored path is dropped before the pair is looked at", () => {

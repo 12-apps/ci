@@ -2203,7 +2203,9 @@ names.
   partner the comment has never named gets a FRESH comment (the old one is
   deleted after the new one is posted), because an edit notifies nobody. A
   partner that merged becomes a "#Y merged" row. When nothing is left, the
-  comment turns to "No open PR overlaps this one any more".
+  comment turns to "No open PR overlaps this one any more". A PR that stops
+  being paired, because its base was retargeted or its head is newly ignored,
+  has its comment turned once to "no longer checked".
 * **What it leaves out:** a pair that only shares a file and merges cleanly
   (job summary and log line only); a path or bucket you ignore; a PR whose
   head branch you ignore; a stack, meaning a PR whose base is another PR's
@@ -2295,14 +2297,33 @@ overlap-pairs {"base":"<sha>","open":8,"reads":19,"rateUsed":212,"rateLimit":100
 ```
 
 `r2` holds the predicted conflicts, which are commented; `r1` holds the pairs
-that share a file and merge cleanly. A run reads one PR-list page per 100 open
-PRs, each PR's files and comments, and one `GET /pulls/{n}` for a partner that
-left the open list. It writes once per create or edit, and twice per re-post.
-The `GITHUB_TOKEN` budget is shared by every workflow in the repository, so
-`rateUsed` is worth watching.
+that share a file and merge cleanly.
 
-A PR whose head or files cannot be read is skipped, and its partners keep what
-their comments already said about it. A failed write fails the run.
+A run reads:
+
+* one PR-list page per 100 open PRs, whatever their base;
+* each paired PR's files and comments, and the comments of each open PR it
+  does not pair;
+* one `GET /pulls/{n}` for each partner a comment names that is no longer
+  open, merged rows included, at most 25 per run. Past that bound, the rest
+  keep their rows as they were, and the log says so.
+
+It writes once per create or edit, and twice per re-post. The `GITHUB_TOKEN`
+budget is shared by every workflow in the repository, so `rateUsed` is worth
+watching.
+
+A comment stays under GitHub's 65,536-character limit however large the
+overlap is:
+
+* it shows at most 100 file rows, within a character budget, and at most 50
+  partners, and counts the rest (`| #Y | 312 more file(s) |`);
+* paths are cut at 256 characters, and control characters, a newline among
+  them, are shown as visible symbols;
+* the digest covers every row, shown or not, so a change among the hidden rows
+  still updates the comment.
+
+A PR whose head, files or comments cannot be read is skipped, and its partners
+keep what their comments already said about it. A failed write fails the run.
 
 The overlap comment is found by its marker AND the `github-actions[bot]`
 login, and the state it carries is validated before use. A comment anybody

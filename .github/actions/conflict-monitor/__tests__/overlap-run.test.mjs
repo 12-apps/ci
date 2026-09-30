@@ -2,141 +2,23 @@ import { strict as assert } from "node:assert";
 import { after, test } from "node:test";
 
 import { MARKER, decide, renderOverlap } from "../lib/comment.mjs";
-import { parseConfig, parseOverlapConfig } from "../lib/config.mjs";
-import { OVERLAP_BOT, OVERLAP_MARKER, RESOLVED, MERGED, readComment } from "../lib/overlap-state.mjs";
-import { overlapLogLine, overlapSummary, runOverlap } from "../overlap.mjs";
+import { OVERLAP_BOT, OVERLAP_MARKER, RESOLVED, MERGED, groupsOf, readComment } from "../lib/overlap-state.mjs";
+import { overlapLogLine, overlapSummary } from "../overlap.mjs";
 import { runProbe } from "../probe.mjs";
-import { lines, makeRepo } from "./fixture.mjs";
+import { lines } from "./fixture.mjs";
+import { A, cleanupWorlds, config, own, pair, run, stubApi, world } from "./overlap-world.mjs";
 
-// The overlap mode end to end: a real "remote" whose `refs/pull/N/head` refs
-// are written by hand (as GitHub keeps them), a real clone of it as the
-// checkout under test, and a stubbed GitHub whose files API is computed from
-// the remote's own refs — so a push to a PR is one `update-ref` away.
+// The overlap mode end to end, over the shared world (overlap-world.mjs): a
+// real remote with hand-written `refs/pull/N/head` refs, a real clone as the
+// checkout, and a stubbed GitHub whose files API is computed from the refs.
 
-const repos = [];
-after(() => repos.forEach((r) => r.cleanup()));
+after(cleanupWorlds);
 
-const A = (second, last = "eight") => lines("one", second, "three", "four", "five", "six", "seven", last);
-
-function world() {
-  const remote = makeRepo();
-  repos.push(remote);
-  remote.commit("base", { "a.txt": A("two"), "gen.txt": lines("g"), "list.txt": lines("alpha", "omega") });
-  const local = makeRepo();
-  repos.push(local);
-  local.git("remote", "add", "origin", remote.dir);
-  const w = {
-    remote,
-    local,
-    pulls: [],
-    /** Open (or push to) PR `n`: a branch off `from` with one more commit. */
-    push(n, files, { from = null, base = "main", draft = false, head = `feat/pr${n}` } = {}) {
-      const exists = w.pulls.find((p) => p.number === n);
-      remote.checkout(exists ? head : from ?? "main");
-      if (!exists) remote.checkout(head, true);
-      const sha = remote.commit(`pr ${n}`, files);
-      remote.checkout("main");
-      remote.git("update-ref", `refs/pull/${n}/head`, sha);
-      if (!exists) w.pulls.push({ number: n, state: "open", draft, base: { ref: base }, head: { ref: head } });
-      return sha;
-    },
-    baseSha() {
-      local.git("fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main");
-      return local.git("rev-parse", "origin/main");
-    },
-  };
-  return w;
-}
-
-const STATUS = { A: "added", M: "modified", D: "removed", R: "renamed" };
-function filesOf(remote, n) {
-  const head = remote.git("rev-parse", `refs/pull/${n}/head`);
-  const mb = remote.git("merge-base", "main", head);
-  return remote
-    .git("diff", "--name-status", "-M", mb, head)
-    .split("\n")
-    .filter(Boolean)
-    .map((l) => {
-      const [st, a, b] = l.split("\t");
-      return b ? { filename: b, previous_filename: a, status: "renamed" } : { filename: a, status: STATUS[st[0]] ?? "modified" };
-    });
-}
-
-/** GitHub, stubbed: open PRs, their files, a comment store, closed PRs' states, and a log of every write. */
-function stubApi(w, { closed = {} } = {}) {
-  const comments = new Map();
-  const list = (n) => comments.get(n) ?? comments.set(n, []).get(n);
-  const writes = [];
-  const fail = { files: new Set(), write: null };
-  let nextId = 100;
-  const stats = { reads: 0, writes: 0, rateLimit: 1000, rateUsed: 0 };
-  return {
-    comments: list,
-    writes,
-    fail,
-    stats,
-    async paginate(path) {
-      stats.reads += 1;
-      if (/\/pulls\?state=open/.test(path)) return w.pulls.filter((p) => p.state === "open");
-      let m = /\/pulls\/(\d+)\/files$/.exec(path);
-      if (m) {
-        if (fail.files.has(Number(m[1]))) throw new Error("502 Bad Gateway");
-        return filesOf(w.remote, Number(m[1]));
-      }
-      m = /\/issues\/(\d+)\/comments$/.exec(path);
-      if (m) return [...list(Number(m[1]))].map((c) => ({ ...c }));
-      throw new Error(`unexpected paginate ${path}`);
-    },
-    async request(method, path, body) {
-      if (method === "GET") {
-        stats.reads += 1;
-        const n = Number(/\/pulls\/(\d+)$/.exec(path)?.[1]);
-        if (closed[n]) return { number: n, state: "closed", ...closed[n] };
-        const err = new Error(`GET ${path} → 404: Not Found`);
-        err.status = 404;
-        throw err;
-      }
-      stats.writes += 1;
-      if (fail.write?.(method)) throw new Error(`${method} ${path} → 403: Resource not accessible by integration`);
-      let m = /\/issues\/(\d+)\/comments$/.exec(path);
-      if (method === "POST" && m) {
-        const c = { id: nextId++, body: body.body, user: { type: "Bot", login: OVERLAP_BOT } };
-        list(Number(m[1])).push(c);
-        writes.push(["create", Number(m[1])]);
-        return c;
-      }
-      m = /\/issues\/comments\/(\d+)$/.exec(path);
-      for (const [pr, cs] of comments) {
-        const i = cs.findIndex((x) => x.id === Number(m?.[1]));
-        if (i === -1) continue;
-        if (method === "PATCH") {
-          cs[i].body = body.body;
-          writes.push(["update", pr]);
-        } else if (method === "DELETE") {
-          cs.splice(i, 1);
-          writes.push(["delete", pr]);
-        }
-        return null;
-      }
-      throw new Error(`unexpected ${method} ${path}`);
-    },
-  };
-}
-
-const config = parseConfig(JSON.stringify({ buckets: [{ name: "generated", paths: ["gen.txt"] }] }));
-const overlapOf = (block = {}) => parseOverlapConfig(block, config.rules);
-const run = (w, api, opts = {}) =>
-  runOverlap({ api, repo: "o/r", base: "main", baseSha: w.baseSha(), config, overlap: overlapOf(opts.block), cwd: w.local.dir, dryRun: opts.dryRun });
-const own = (api, n) => api.comments(n).filter((c) => c.body.startsWith(OVERLAP_MARKER));
-const rowsOn = (api, n, open = [1, 2, 3, 4, 5]) => readComment(own(api, n).at(-1), { self: n, open: new Set(open) });
-
-/** #1 and #2 (a draft) change the same line; #3 shares the file and merges cleanly with both. */
-function pair() {
-  const w = world();
-  w.push(1, { "a.txt": A("ONE") });
-  w.push(2, { "a.txt": A("TWO") }, { draft: true });
-  w.push(3, { "a.txt": A("two", "THREE") });
-  return w;
+/** The comment on #n as the next run reads it, with its groups flattened back to rows. */
+function rowsOn(api, n, open = [1, 2, 3, 4, 5]) {
+  const c = readComment(own(api, n).at(-1), { self: n, open: new Set(open) });
+  const rows = c.groups.flatMap((g) => g.rows.map((r) => ({ partner: g.partner, path: r.path, kind: r.kind, ...(g.merged ? { merged: true } : {}) })));
+  return { ...c, rows };
 }
 
 test("both PRs of a predicted conflict get one comment each, with the same set; drafts are paired; R1 is summary only", async () => {
@@ -349,7 +231,7 @@ test("a well-formed row naming a PR that does not exist is dropped by its 404, a
   await run(w, api);
   // Both hidden lines forged, and consistent with each other.
   const rows = [{ partner: 2, path: "a.txt", kind: "same lines" }, { partner: 777, path: "x", kind: "same lines" }];
-  own(api, 1)[0].body = renderOverlap({ rows, seen: [2, 777] }, { base: "main", baseSha: w.baseSha() });
+  own(api, 1)[0].body = renderOverlap({ groups: groupsOf(rows), seen: [2, 777] }, { base: "main", baseSha: w.baseSha() });
   api.writes.length = 0;
   await run(w, api);
   assert.deepEqual(api.writes, [["update", 1]]);
