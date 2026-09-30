@@ -181,6 +181,13 @@ function totalTests(reports) {
 }
 
 function reportZeroSignal(count) {
+  if (process.env.GITHUB_EVENT_NAME && process.env.GITHUB_EVENT_NAME !== 'pull_request') {
+    fail(
+      `${LANE} lane executed zero tests`,
+      `${count} JUnit report(s) totalled 0 executed test cases (skipped/disabled cases are not execution). ` +
+        'Check the full-suite command, test discovery and skip conditions. PR labels cannot bypass a full-suite run.',
+    );
+  }
   process.stderr.write(
     [
       `::error title=${LANE} lane executed zero tests::${count} JUnit report(s) ` +

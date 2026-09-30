@@ -679,8 +679,9 @@ it skip.
 
 ### Zero-test-signal guard (opt-in)
 
-`unit-junit-reports` / `integration-junit-reports` assert that a PR run's lane
-actually executed at least one test case, and fail it if not. Empty (the
+`unit-junit-reports` / `integration-junit-reports` assert that a scheduled lane
+actually executed at least one test case, and fail it if not, on pull requests
+and full-suite push, dispatch or scheduled runs. Empty (the
 default) disables the mechanism entirely.
 
 The hole it closes: affected selection is paired with `--passWithNoTests`, which
@@ -692,7 +693,7 @@ test signal whatsoever. Selection machinery makes that more likely, not less;
 the selectors already fail safe, and this is the assertion that the fail-safe
 actually held.
 
-Your test command has to emit the reports — a workflow cannot inject
+Both the affected and full-suite commands must emit the reports — a workflow cannot inject
 `--reporter=junit` into an opaque command string:
 
 ```
@@ -705,18 +706,19 @@ one a distinct filename, then point the input at the directory — paths are
 scanned recursively and summed.
 
 It is **fail-closed**: a missing or unparseable report fails too, because "no
-report" and "no tests" are the same amount of evidence. It runs on
-`pull_request` only (on push the full command runs, so a zero total means
-something else is already broken and that lane's own failure is the better
-signal), and it is deliberately **not** gated on whether the tests passed — a
-failing lane already reports red; a lane that *passed having run nothing* is the
-entire point.
+report" and "no tests" are the same amount of evidence. A full-suite command
+can also exit zero with all cases skipped, even without `--passWithNoTests`.
+Every successful execution is checked: inside the job at one shard, or over
+the merged reports above one shard. Empty individual slices are allowed when
+the lane total is positive. A planned `count=0`, including safe verdict reuse,
+creates no test jobs and needs no fresh report. A failing or cancelled lane
+already reports red; this guard catches a lane that *passed having run nothing*.
 
 `allow-zero-tests-label` (default `ci:allow-zero-tests`) skips the guard for a
 genuinely test-free PR — workflow YAML, docs, a regenerated baseline — so the
 bypass is a visible act on the PR rather than a silent condition. It only skips
 the guard: it does not widen selection or force a full suite, so it costs no CI
-time.
+time. Labels never bypass the full-suite guard on non-PR events.
 
 > **Do not rename this to `ci:full-tests`.** That label already means *widen
 > selection to the full suite* in a sibling repo. One label with two meanings
