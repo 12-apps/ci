@@ -599,6 +599,7 @@ jobs:
           LANE_NODE: ${{ inputs.node-version }}
           LANE_PRE: ${{ inputs.pre-test-command }}
           LANE_CMD: ${{ inputs.unit-test-command }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           key="$(printf '%s\0%s\0%s' "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" | sha256sum | cut -c1-16)"
@@ -1587,6 +1588,7 @@ jobs:
           LANE_NODE: ${{ inputs.node-version }}
           LANE_PRE: ${{ inputs.pre-integration-command }}
           LANE_CMD: ${{ inputs.integration-command }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           key="$(printf '%s\0%s\0%s' "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" | sha256sum | cut -c1-16)"
