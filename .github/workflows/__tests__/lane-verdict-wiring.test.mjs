@@ -24,7 +24,10 @@
 // that do nothing; a record in the wrong place still works, it just makes a
 // claim it did not earn. So they are asserted over the text.
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -155,3 +158,84 @@ test("an unusable fingerprint disables the mechanism instead of guessing", () =>
     );
   }
 });
+
+// ── the tree fingerprint's IDENTITY (2026-09-30 audit: E2, E7, E8, E9) ────────
+
+/** The `Key this lane's verdict`-style step of a plan job: from `id: fingerprint` to the next step. */
+const fingerprintStep = (lane) => {
+  const plan = jobs[`${lane}-plan`];
+  const at = plan.indexOf("id: fingerprint");
+  assert.notEqual(at, -1, `${lane}-plan has no fingerprint step`);
+  const rest = plan.slice(at);
+  const next = rest.indexOf("\n      - ", 1);
+  return next === -1 ? rest : rest.slice(0, next);
+};
+
+test("E2: each lane's fingerprint key folds ITS OWN setup command, not the unit lane's", () => {
+  // The integration key read `inputs.pre-test-command` — the unit setup — so a
+  // change to `pre-integration-command` alone inherited the old verdict.
+  assert.match(fingerprintStep("unit"), /LANE_PRE: \$\{\{ inputs\.pre-test-command \}\}/);
+  assert.match(fingerprintStep("integration"), /LANE_PRE: \$\{\{ inputs\.pre-integration-command \}\}/);
+  assert.doesNotMatch(fingerprintStep("integration"), /pre-test-command/);
+});
+
+for (const lane of LANES) {
+  test(`${lane}: the fingerprint key carries the base, the engine revision, the runner and a schema epoch`, () => {
+    const step = fingerprintStep(lane);
+    assert.match(step, /BASE_SHA: \$\{\{ steps\.base\.outputs\.base-sha \}\}/, "E7: key the actual fetched base");
+    assert.match(step, /MERGE_BASE: \$\{\{ steps\.base\.outputs\.merge-base \}\}/, "same trees with different ancestry select differently");
+    assert.match(step, /EXECUTION_ID: \$\{\{ steps\.execution\.outputs\.execution-identity \}\}/, "E8: central sources and actual Node/runner/image identity");
+    assert.match(jobs[`${lane}-plan`], /id: execution[\s\S]*?uses: 12-apps\/ci\/\.github\/actions\/lane-verdict@v2[\s\S]*?mode: identity/, "the identity is produced by the central action");
+    assert.match(step, /printf '%s\\0' ci-lane-v2/, "the epoch that retires every incomplete previous key");
+    // …and every one of them is IN the hash, not merely declared.
+    // String slicing, not one regex over the whole step: a nested quantifier
+    // over the continuation lines backtracks exponentially (CodeQL flagged the
+    // first draft), and the shape here is fixed enough to cut by anchors.
+    const from = step.indexOf("lane=\"$(printf '");
+    assert.notEqual(from, -1, `${lane}: the key printf was not found`);
+    const to = step.indexOf("| sha256sum", from);
+    assert.notEqual(to, -1, `${lane}: the key printf is not piped to sha256sum`);
+    const segment = step.slice(from, to);
+    const format = /printf '([^']*)'/.exec(segment)[1];
+    const vars = [...segment.matchAll(/"\$([A-Z_]+)"/g)].map((m) => m[1]);
+    assert.equal(format, "%s\\0", "printf repeats this NUL-delimited format for every argument");
+    for (const v of ["EXECUTION_ID", "LANE_NODE", "LANE_PRE", "LANE_CMD", "FP_CMD", "BASE_SHA", "MERGE_BASE", "STACK_BASE_SHA", "LANE_VARS", "PLAN_CMD", "PLAN_CONFIG"]) {
+      assert.ok(vars.includes(v), `${lane}: ${v} is declared but not hashed`);
+    }
+  });
+
+  test(`${lane}: E9 — the consumer's fingerprint shell runs under pipefail and the empty digest is refused`, () => {
+    const step = fingerprintStep(lane);
+    assert.match(step, /fp="\$\(bash -e -o pipefail -c "\$FP_CMD"\)" \|\| fp=""/, "pipeline and early-command failures must fail the command");
+    assert.match(step, /e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855/, "sha256 of empty input, refused by value");
+    assert.match(step, /hashed EMPTY input/);
+  });
+
+  test(`${lane}: E9 — the actual fingerprint script refuses every known empty digest`, () => {
+    const script = fingerprintStep(lane).split("        run: |\n")[1].split("\n")
+      .filter((line) => line.startsWith("          ")).map((line) => line.slice(10)).join("\n");
+    const dir = mkdtempSync(path.join(tmpdir(), "empty-lane-fingerprint-"));
+    const output = path.join(dir, "outputs");
+    try {
+      const fingerprints = ["a".repeat(64), ...["md5", "sha1", "sha256", "sha512"]
+        .flatMap((algorithm) => { const digest = createHash(algorithm).update("").digest("hex"); return [digest, digest.toUpperCase()]; })];
+      for (const fingerprint of fingerprints) {
+        writeFileSync(output, "");
+        const result = spawnSync("bash", ["-e", "-o", "pipefail", "-c", script], {
+          cwd: dir, encoding: "utf8", env: { ...process.env,
+            GITHUB_OUTPUT: output, EXECUTION_ID: "b".repeat(64), LANE_NODE: "24.19.0",
+            BASE_SHA: "c".repeat(40), MERGE_BASE: "c".repeat(40), STACK_BASE_SHA: "",
+            PLAN_CONFIG: "", PLAN_CMD: "", LANE_PRE: "true", LANE_CMD: "node tests.mjs", LANE_VARS: "{}",
+            FP_CMD: `printf '%s' '${fingerprint}'`,
+          },
+        });
+        assert.equal(result.status, 0, result.stderr);
+        const emitted = readFileSync(output, "utf8").trim();
+        if (fingerprint === fingerprints[0]) assert.match(emitted, /^value=[0-9a-f]{16}-a{64}$/);
+        else assert.equal(emitted, "value=", fingerprint);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}

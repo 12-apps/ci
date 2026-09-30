@@ -946,6 +946,17 @@ two implementations of one decision, and they drift.
 Config reference, the plan document's shape, and the full rationale:
 [`.github/actions/affected-plan/README.md`](.github/actions/affected-plan/README.md).
 
+Literal relative `import.meta.glob` dependencies are also tracked: supported
+`*`/`?`/`**` patterns, arrays and relative exclusions include matching file
+contents and add/remove/rename membership in selection and per-test hashes.
+Normal source importers remain in the plan. Built-in `?raw`/`?url` glob reads
+are terminal bytes; ordinary matched source modules retain transitive imports.
+Computed or unsupported patterns/options (including `base` and
+`caseSensitive: false`), symlink/read uncertainty and untracked members prevent
+reuse. No opaque-import allowlist can suppress that safeguard. See the action
+README's **Vite glob inputs** section for the bounded subset and test limits.
+
+
 # Consuming the Quality gate
 
 Separate from CD: a reusable static-quality + test-reliability gate

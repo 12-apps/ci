@@ -137,8 +137,26 @@ export function selectAffected(options) {
     calls = [],
   } = options;
 
-  const relevant = [...changed, ...deleted].filter((f) => !isIgnored(f));
-  if (relevant.length === 0) {
+  // A glob observes membership as well as exported symbols. Discover it
+  // before ignore/classification and `none` pruning, including deleted assets.
+  const diff = [...changed, ...deleted];
+  const packages = loadPackages(repoRoot, workspaceDirs);
+  const files = listSourceFiles(repoRoot, roots);
+  const { edges, unresolved, globs } = buildGraph(repoRoot, files, { packages, aliasesFor });
+  const globSources = new Map();
+  const globChanged = new Set();
+  for (const glob of globs) {
+    const inputs = diff.filter(glob.matches);
+    if (inputs.length) {
+      globSources.set(glob.file, [...new Set([...(globSources.get(glob.file) ?? []), ...inputs])]);
+      inputs.forEach((file) => globChanged.add(file));
+    }
+  }
+  // An unsupported glob can read even a normally ignored asset. Keep its
+  // importer blind and unskippable on any edit; never add an unchecked waiver.
+  for (const item of unresolved) if (item.glob && diff.length) globSources.set(item.file, diff);
+  const relevant = diff.filter((f) => !isIgnored(f) || globChanged.has(f));
+  if (relevant.length === 0 && globSources.size === 0) {
     return { mode: "none", tests: [], reasons: {}, symbols: {}, stats: { changed: 0 }, why: "every changed path is one the ignore rules prove cannot change a verdict" };
   }
 
@@ -165,7 +183,7 @@ export function selectAffected(options) {
   // index), and "routed to nothing" must not read as "unclassified". An entry
   // may name symbols — `file#a,b` — and only those are seeded, so a route can
   // be as narrow as the change it stands for.
-  const routedFrom = new Map();
+  const routedFrom = new Map(globSources);
   const direct = [];
   const unobservable = [];
   for (const file of relevant) {
@@ -174,7 +192,7 @@ export function selectAffected(options) {
     const entries = classified ? routed.entries : routed;
     if (entries.length === 0) {
       if (classified) unobservable.push(file);
-      else direct.push(file);
+      else if (isSource(file) || !globChanged.has(file)) direct.push(file);
       continue;
     }
     for (const entry of entries) {
@@ -311,6 +329,7 @@ export function selectAffected(options) {
     const previous = affected.get(file);
     const next = !names || names.length === 0 || previous === "*" ? "*" : new Set([...(previous ?? []), ...names]);
     affected.set(file, next);
+    if (globSources.has(file)) moduleEffects.add(file);
     symbolReport[file] = next === "*" ? ["*"] : [...next].sort();
     routeReport[file] = [...new Set([...(routeReport[file] ?? []), ...sources])];
   }
@@ -327,11 +346,6 @@ export function selectAffected(options) {
     };
   }
 
-  // ── the graph ────────────────────────────────────────────────────────────
-  const packages = loadPackages(repoRoot, workspaceDirs);
-  const files = listSourceFiles(repoRoot, roots);
-  const { edges, unresolved } = buildGraph(repoRoot, files, { packages, aliasesFor });
-
   // An import we cannot resolve is a hole in the graph, and the safe reading of
   // a hole is "this file might depend on anything". That used to widen the
   // whole RUN to `full`, which is safe and also how this stops working: one odd
@@ -346,9 +360,9 @@ export function selectAffected(options) {
   // the same claim the global fallback made, made only where it is true, so a
   // hole costs one file rather than the entire suite.
   //
-  // It cannot resurrect a `none`: that verdict is returned above, before this
-  // graph exists, and it means no exported symbol moved anywhere — so there is
-  // nothing for an unreadable file to have depended on.
+  // Ordinary unresolved imports do not resurrect a comment-only `none`.
+  // Unsupported globs were seeded above because their unknown membership can
+  // include ignored assets as well as source declarations.
   const blind = [...new Set(unresolved.map((u) => u.file))];
   for (const file of blind) {
     affected.set(file, "*");

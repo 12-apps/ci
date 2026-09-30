@@ -18,6 +18,8 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, normalize, relative, resolve as pathResolve } from "node:path";
 
+import { globArguments, resolveGlob } from "./globs.mjs";
+
 /** Extensions tried, in order, when a specifier names no file extension. */
 export const EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"];
 
@@ -63,6 +65,7 @@ const FROM_STATEMENT = /(?:^|[\n;])[ \t]*(import|export)\b([^;]*?)\bfrom\s*["'](
 /** `import "./side-effect"` — no clause, always a value edge. */
 const BARE_IMPORT = /(?:^|[\n;])[ \t]*import\s*["']([^"']+)["']/g;
 /** `import("./x")` and `require("./x")` — dynamic, always a value edge. */
+const GLOB_ACCESS = /(?<![\w$.])import\s*\.\s*meta\s*\.\s*glob(?:Eager)?\b/g;
 const DYNAMIC_CALL = /(?<![\w$.])\b(import|require)\s*\(/g;
 // Anything beyond a single plain string argument is opaque to this parser.
 // In particular, computed paths MUST produce a blind dependency, not vanish.
@@ -77,7 +80,8 @@ const LITERAL_ARGUMENT = /^\s*(["'])([^"'\\\r\n]*)\1\s*\)/;
  * `/* *​/` sequence inside a template literal is not a comment either.
  *
  * `masked` is `code` with every string literal's CONTENT blanked to spaces,
- * the quotes themselves left in place. It exists because import syntax is not
+ * the quotes themselves left in place. Template `${…}` expressions remain
+ * code; only their surrounding text is masked. It exists because import syntax is not
  * only written as code — it is also written ABOUT, inside string literals, by
  * any test that asserts on the shape of another file's source:
  *
@@ -105,7 +109,7 @@ export function scan(source) {
   let i = 0;
   const n = source.length;
   let quote = null; // ' " ` when inside a string
-  let templateDepth = 0;
+  const templateDepth = []; // brace depth inside each open `${…}` expression
   let lastSig = "";
   let lastWord = "";
 
@@ -114,6 +118,16 @@ export function scan(source) {
     const next = source[i + 1];
 
     if (quote) {
+      if (quote === "`" && c === "$" && next === "{") {
+        out += "${";
+        hidden += "${";
+        templateDepth.push(0);
+        quote = null;
+        lastSig = "{";
+        lastWord = "";
+        i += 2;
+        continue;
+      }
       out += c;
       // A newline inside a template literal is a real newline: blank it to a
       // space and every line number after it would shift.
@@ -135,7 +149,6 @@ export function scan(source) {
 
     if (c === '"' || c === "'" || c === "`") {
       quote = c;
-      if (c === "`") templateDepth += 1;
       out += c;
       hidden += c;
       i += 1;
@@ -170,6 +183,19 @@ export function scan(source) {
       continue;
     }
 
+    // Braces in strings, comments and regex literals never reach this branch.
+    // Nested templates push their own expression depth, so closing an inner
+    // `${…}` resumes its text without losing the outer expression's braces.
+    if (templateDepth.length > 0) {
+      if (c === "{") templateDepth[templateDepth.length - 1] += 1;
+      else if (c === "}") {
+        if (templateDepth[templateDepth.length - 1] === 0) {
+          templateDepth.pop();
+          quote = "`";
+        } else templateDepth[templateDepth.length - 1] -= 1;
+      }
+    }
+
     out += c;
     hidden += c;
     if (!/\s/.test(c)) {
@@ -177,7 +203,6 @@ export function scan(source) {
       lastSig = c;
     }
     i += 1;
-    void templateDepth;
   }
   return { code: out, masked: hidden };
 }
@@ -324,6 +349,11 @@ export function parseImports(rawSource) {
     push(literal ? literal[2] : `<computed ${m[1]}>`, "", m.index, true);
     out[out.length - 1].dynamic = true;
     if (!literal) out[out.length - 1].unbounded = true;
+  }
+  for (const m of inCode(GLOB_ACCESS)) {
+    const glob = m[0].endsWith("glob") ? globArguments(source.slice(m.index + m[0].length)) : null;
+    push("<import.meta.glob>", "", m.index, true);
+    Object.assign(out[out.length - 1], { dynamic: true, glob: glob ?? true, unbounded: !glob });
   }
   return out.sort((a, b) => a.position - b.position).map(({ position, ...record }) => record);
 }
@@ -502,6 +532,7 @@ export function listSourceFiles(repoRoot, roots) {
 export function buildGraph(repoRoot, files, options = {}) {
   const edges = new Map();
   const unresolved = [];
+  const globs = [];
   // Roots discover entry points; they are not an assertion that dependencies
   // stop at their boundaries. Follow resolved source files to a fixed point.
   const pending = [...new Set(files)];
@@ -525,7 +556,26 @@ export function buildGraph(repoRoot, files, options = {}) {
     for (const imp of parseImports(source)) {
       if (imp.typeOnly) continue;
       if (imp.unbounded) {
-        unresolved.push({ file, spec: imp.spec, line: imp.line });
+        unresolved.push({ file, spec: imp.spec, line: imp.line, ...(imp.glob ? { glob: true } : {}) });
+        continue;
+      }
+      if (imp.glob) {
+        const resolved = resolveGlob(repoRoot, file, imp.glob);
+        if (!resolved) unresolved.push({ file, spec: imp.spec, line: imp.line, glob: true });
+        else {
+          globs.push({ file, ...imp, matches: resolved.matches });
+          // Without a built-in byte query, only source modules and JSON have
+          // modeled dependency semantics here. A CSS/Vue/custom transform can
+          // read further files, so its importer must remain unskippable.
+          if (!imp.glob.terminal && resolved.files.some((target) =>
+            !EXTENSIONS.includes(target.slice(target.lastIndexOf("."))) && !target.endsWith(".json"))) {
+            unresolved.push({ file, spec: imp.spec, line: imp.line, glob: true });
+          }
+          for (const target of resolved.files) {
+            out.push({ ...imp, target, terminal: imp.glob.terminal });
+            if (!imp.glob.terminal && EXTENSIONS.includes(target.slice(target.lastIndexOf("."))) && !seen.has(target)) pending.push(target);
+          }
+        }
         continue;
       }
       const aliases = typeof options.aliasesFor === "function" ? options.aliasesFor(file) : (options.aliases ?? []);
@@ -549,7 +599,7 @@ export function buildGraph(repoRoot, files, options = {}) {
     }
     edges.set(file, out);
   }
-  return { edges, unresolved };
+  return { edges, unresolved, globs };
 }
 
 export { pathResolve };

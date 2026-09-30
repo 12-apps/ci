@@ -49,6 +49,33 @@ not runtime edges. Inline-only clauses such as `import { type Foo }` can still
 evaluate the target module (including under Node's TypeScript stripping), so
 they retain a module-evaluation edge even though they bind no runtime value.
 
+## Vite glob inputs
+
+Literal [`import.meta.glob`](https://vite.dev/guide/features#glob-import) calls
+are dependency sets, including their membership. The bounded subset accepts
+relative `./`/`../` string patterns, arrays with relative `!` exclusions, `*`,
+`?` and whole-segment `**`. Literal `eager`/`import` options and built-in
+`query: '?raw'` / `'?url'` are supported. Matching is case-sensitive and
+non-exhaustive; a simple TypeScript type argument is recognized too.
+
+Matched source modules are followed transitively, even beyond graph roots.
+JSON and raw/URL reads contribute their bytes; raw/URL edges do not execute a
+matched source file's imports. Member addition, removal and rename select the
+glob's readers and change their input hashes, including normally ignored
+assets. These dependencies supplement ordinary source importers rather than
+replacing them. Unrelated tests can still reuse identical inputs.
+
+This is not full tinyglobby compatibility. Computed arguments/options, `base`,
+case-insensitive or exhaustive matching, absolute/alias patterns, richer glob
+syntax, unmodeled asset transforms, symlinks and unreadable inventories leave
+the importer **blind and unskippable**. Filesystem matches are enumerated, so
+an untracked/generated member also prevents a reusable hash. There is no
+`opaqueImports` bypass or unchecked promise that an unknown import is safe.
+
+`glob-imports.test.mjs` exercises the actual planner, hashes and skip-green
+filter across multiple synthetic commits. It does not execute Vite or claim a
+hosted consumer run; that remains a separate integration proof.
+
 ## Failing safe
 
 Both failure directions are green, and they are not symmetric. Running too much

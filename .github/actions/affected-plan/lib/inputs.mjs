@@ -40,6 +40,7 @@ import { createHash } from "node:crypto";
 
 /** Bump when the construction below changes shape — see ci-test-fingerprint's FORMAT_VERSION. */
 export const INPUTS_VERSION = "test-inputs-v2";
+const MODULE_RE = /\.(?:[cm]?[jt]sx?)$/;
 
 /**
  * `path -> "<mode> <sha>"` for every tracked blob and gitlink at `ref`.
@@ -72,20 +73,7 @@ export function treeIndex(repoRoot, ref = "HEAD") {
  *   the closure is one whose imports did not resolve.
  */
 export function closureOf(file, edges, blindFiles) {
-  const seen = new Set([file]);
-  const stack = [file];
-  let blind = false;
-  while (stack.length > 0) {
-    const current = stack.pop();
-    if (blindFiles.has(current)) blind = true;
-    for (const record of edges.get(current) ?? []) {
-      if (!seen.has(record.target)) {
-        seen.add(record.target);
-        stack.push(record.target);
-      }
-    }
-  }
-  return { files: seen, blind };
+  return inputClosure([file], edges, blindFiles, new Map());
 }
 
 /** Resolve persistent routes against this tree, never just the current diff. */
@@ -111,17 +99,22 @@ function routedFiles(routes, tree) {
 function inputClosure(seeds, edges, blindFiles, routed) {
   const files = new Set(seeds);
   const stack = [...files];
+  const expanded = new Set();
   let blind = false;
   while (stack.length > 0) {
     const file = stack.pop();
+    if (expanded.has(file)) continue;
+    expanded.add(file);
     blind ||= blindFiles.has(file);
     const dependencies = [
-      ...(edges.get(file) ?? []).map((record) => record.target),
-      ...(routed.get(file) ?? []),
+      ...(edges.get(file) ?? []),
+      ...[...(routed.get(file) ?? [])].map((target) => ({ target })),
     ];
-    for (const dependency of dependencies) if (!files.has(dependency)) {
-      files.add(dependency);
-      stack.push(dependency);
+    for (const dependency of dependencies) {
+      files.add(dependency.target);
+      // ?raw/?url globs read a matched file's bytes, not its source imports.
+      // A second ordinary path to that file still expands it independently.
+      if (!dependency.terminal && !expanded.has(dependency.target)) stack.push(dependency.target);
     }
   }
   return { files, blind };
@@ -130,7 +123,10 @@ function inputClosure(seeds, edges, blindFiles, routed) {
 /** The dependency-closed global set, shared by selection and input hashing. */
 export function globalInputs({ edges, blind = [], globals = [], routes = [], tree }) {
   const roots = [...tree.keys()].filter((p) => globals.some((re) => re.test(p)));
-  return inputClosure(roots, edges, new Set(blind), routedFiles(routes, tree));
+  const closure = inputClosure(roots, edges, new Set(blind), routedFiles(routes, tree));
+  // Preserve main's fail-closed check for callers supplying a partial graph.
+  closure.blind ||= roots.some((file) => MODULE_RE.test(file) && !edges.has(file));
+  return closure;
 }
 
 /**
@@ -147,6 +143,10 @@ export function testInputs({ tests, edges, blind = [], globals = [], routes = []
   const routed = routedFiles(routes, tree);
   const globalRoots = [...tree.keys()].filter((p) => globals.some((re) => re.test(p)));
   const globalClosure = inputClosure(globalRoots, edges, blindFiles, routed);
+  const absentGlobal = globalRoots.find((file) => MODULE_RE.test(file) && !edges.has(file));
+  const globalsUnbounded = absentGlobal ? `${absentGlobal}: graph does not hold this module global`
+    : globalClosure.blind ? "a global closure contains an import that did not resolve" : null;
+  globalClosure.blind ||= Boolean(globalsUnbounded);
   const globalFiles = [...globalClosure.files].sort();
   const globalMissing = globalFiles.some((file) => !tree.has(file));
   const globalLines = globalFiles.map((p) => `${tree.get(p)} ${p}`);
@@ -190,5 +190,5 @@ export function testInputs({ tests, edges, blind = [], globals = [], routes = []
     inputs[test] = hash.digest("hex");
     hashed++;
   }
-  return { inputs, globalFiles, stats: { hashed, unbounded, missing, globals: globalFiles.length } };
+  return { inputs, globalFiles, stats: { hashed, unbounded, missing, globals: globalFiles.length, globalsUnbounded } };
 }

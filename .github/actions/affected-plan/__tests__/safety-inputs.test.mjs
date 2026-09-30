@@ -101,8 +101,9 @@ test("global hashes include transitive dependencies and reject blind or untracke
 
 test("routed reads made by a global are also global dependencies", () => {
   const tree = new Map([["src/a.test.mjs", "100644 a"], ["runner/setup.mjs", "100644 b"], ["config/value.json", "100644 c"]]);
-  const options = { tests: ["src/a.test.mjs"], edges: new Map(), globals: [/^runner\/setup\.mjs$/], routes: [{ match: /^config\//, entries: ["runner/setup.mjs#setup"] }], tree };
+  const options = { tests: ["src/a.test.mjs"], edges: new Map([["runner/setup.mjs", []]]), globals: [/^runner\/setup\.mjs$/], routes: [{ match: /^config\//, entries: ["runner/setup.mjs#setup"] }], tree };
   const before = testInputs(options);
+  assert.equal(typeof before.inputs["src/a.test.mjs"], "string", "setup is a known parsed leaf, not a missing graph module");
   tree.set("config/value.json", "100644 changed");
   assert.notEqual(testInputs(options).inputs["src/a.test.mjs"], before.inputs["src/a.test.mjs"]);
 });

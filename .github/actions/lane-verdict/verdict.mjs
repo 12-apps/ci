@@ -34,7 +34,20 @@ import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { executionIdentity, VERDICT_SCHEMA } from "./provenance.mjs";
 
+// Preserve the public epoch export while sharing one source of truth with all
+// success-result caches. The stronger identity intentionally retires older keys.
+export { VERDICT_SCHEMA } from "./provenance.mjs";
+
 const HEX = /^[0-9a-f]{32,128}$/;
+
+// Preserve upstream's defense in depth: a consumer can mask its own producer
+// failure, so known empty digests never become reusable passing evidence.
+const EMPTY_DIGESTS = new Set([
+  "d41d8cd98f00b204e9800998ecf8427e",
+  "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e",
+]);
 
 /**
  * @param {object} o
@@ -61,8 +74,11 @@ export function verdictKey({ lane, fingerprintCommand, material = "", event, run
   } catch (error) {
     return { key: "", fingerprint: "", why: `fingerprint command failed: ${String(error.message ?? error).split("\n")[0]}` };
   }
-  const fingerprint = String(out ?? "").replace(/\s+/g, "");
+  const fingerprint = String(out ?? "").replace(/\s+/g, "").toLowerCase();
   if (!HEX.test(fingerprint)) return { key: "", fingerprint: "", why: "fingerprint command produced no usable hash" };
+  if (EMPTY_DIGESTS.has(fingerprint)) {
+    return { key: "", fingerprint: "", why: "fingerprint command hashed EMPTY input — refusing unverifiable evidence" };
+  }
   const key16 = createHash("sha256").update(JSON.stringify([context, material, fingerprintCommand])).digest("hex").slice(0, 16);
   return { key: `${lane}-lane-${VERDICT_SCHEMA}-${key16}-${fingerprint}`, fingerprint, why: "" };
 }

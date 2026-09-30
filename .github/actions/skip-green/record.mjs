@@ -57,7 +57,7 @@ export function nextManifest({ lane, plan, previous, laneResult, headSha, runId 
   // Skipped tests keep the entry that earned them; a skipped test with no
   // entry is a contradiction (it was skipped BECAUSE of one) and is left out.
   return {
-    manifest: { version: MANIFEST_VERSION, lane, entries },
+    manifest: { version: MANIFEST_VERSION, lane, inputs: plan.inputsVersion ?? null, entries },
     added,
     why: `${added} entr${added === 1 ? "y" : "ies"} added or refreshed, ${Object.keys(entries).length} in the manifest`,
   };
@@ -82,7 +82,7 @@ function main() {
     appendOutputs({ recorded: "false", entries: 0, added: 0 });
     return 0;
   }
-  const { manifest: previous, why: previousWhy } = readManifest(manifestPath, lane);
+  const { manifest: previous, why: previousWhy } = readManifest(manifestPath, lane, plan?.inputsVersion);
   console.log(`[skip-green] ${lane}: previous manifest — ${previousWhy}`);
   const { manifest, added, why } = nextManifest({ lane, plan, previous, laneResult, headSha, runId });
   console.log(`[skip-green] ${lane}: ${why}`);

@@ -137,6 +137,56 @@ test("buildGraph reports unresolved modules so the caller can widen", () => {
   assert.equal(unresolved[0].spec, "./missing");
 });
 
+test("E6: a dynamic import with a space before the parenthesis is an edge, not a silent drop", () => {
+  const root = fixture({ "a/b.ts": 'const m = await import ("./value");\n', "a/value.ts": "export const v = 1;\n" });
+  const { edges, unresolved } = buildGraph(root, ["a/b.ts"], { packages: new Map() });
+  assert.deepEqual(unresolved, []);
+  assert.deepEqual(edges.get("a/b.ts").map((e) => e.target), ["a/value.ts"]);
+});
+
+test("E6: an import the parser cannot name is UNRESOLVED, never a complete-looking closure", () => {
+  // `import(source)`, `require(expr)` and Vite's `import.meta.glob` each bind
+  // files the parser has no path for. The audit changed `value` from 1 to 2
+  // behind such an import, the test failed, and the plan reported
+  // `unresolved=0` and selected nothing.
+  for (const line of [
+    "const m = await import(source);",
+    "const m = await import(`./locale/${lang}`);",
+    "const m = require(path.join(__dirname, name));",
+    'const all = import.meta.glob("../art/*.svg", { eager: true, base: "../elsewhere" });',
+  ]) {
+    const root = fixture({ "a/b.ts": `${line}\n` });
+    const { unresolved } = buildGraph(root, ["a/b.ts"], { packages: new Map() });
+    assert.equal(unresolved.length, 1, line);
+    assert.match(unresolved[0].spec, /^<(?:computed |import\.meta\.glob)/, line);
+    assert.equal(unresolved[0].line, 1);
+  }
+  // Prose and string literals still do not count.
+  const root = fixture({ "a/b.ts": '/** register() calls import (x) itself. */\nconst s = "import(y)";\nexport const k = 1;\n' });
+  assert.deepEqual(buildGraph(root, ["a/b.ts"], { packages: new Map() }).unresolved, []);
+});
+
+test("buildGraph follows a resolved target OUTSIDE the listed files, so the closure does not stop at a root's edge", () => {
+  // src/a.ts → ../lib/b.ts → ./c.ts: only src/ is listed, yet b's own import
+  // must be parsed, or c is invisible to every closure that reaches b.
+  const root = fixture({
+    "src/a.ts": 'import { b } from "../lib/b";\n',
+    "lib/b.ts": 'import { c } from "./c";\nexport const b = c;\n',
+    "lib/c.ts": "export const c = 1;\n",
+  });
+  const { edges, unresolved } = buildGraph(root, ["src/a.ts"], { packages: new Map() });
+  assert.deepEqual(unresolved, []);
+  assert.deepEqual(edges.get("src/a.ts").map((e) => e.target), ["lib/b.ts"]);
+  assert.deepEqual(edges.get("lib/b.ts").map((e) => e.target), ["lib/c.ts"], "the target outside the roots was parsed in turn");
+  assert.ok(edges.has("lib/c.ts"), "…and so was ITS target");
+});
+
+test("E6: an unchecked opaque-import waiver cannot hide an unresolved dependency", () => {
+  const root = fixture({ "src/registry.ts": "const m = await import(entry.file);\n", "src/other.ts": "const m = await import(entry.file);\n" });
+  const { unresolved } = buildGraph(root, ["src/registry.ts", "src/other.ts"], { packages: new Map(), opaqueOk: (f) => f === "src/registry.ts" });
+  assert.deepEqual(unresolved.map((u) => u.file), ["src/registry.ts", "src/other.ts"]);
+});
+
 test("a published package is external, not a hole in the graph", () => {
   const root = fixture({ "a/b.ts": 'import React from "react";\n' });
   const { unresolved } = buildGraph(root, ["a/b.ts"], { packages: new Map() });

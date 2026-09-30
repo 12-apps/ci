@@ -10,7 +10,12 @@ import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { verdictKey } from "../verdict.mjs";
+import { createRequire } from "node:module";
+
+import { VERDICT_SCHEMA, verdictKey } from "../verdict.mjs";
+import { VERDICT_SCHEMA as PROVENANCE_SCHEMA } from "../provenance.mjs";
+
+const require_crypto = () => createRequire(import.meta.url)("node:crypto");
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "verdict.mjs");
 const TMP = mkdtempSync(join(tmpdir(), "lane-verdict-"));
@@ -57,6 +62,40 @@ test("no command, a failing command, or a command that prints no hash — no key
   assert.match(ok({ run: () => "abc" }).why, /no usable hash/, "too short to be one");
   assert.match(ok({ run: () => "" }).why, /no usable hash/);
   for (const c of [ok({ fingerprintCommand: "" }), ok({ run: () => "not a hash" })]) assert.equal(c.key, "");
+});
+
+test("E9: the digest of EMPTY input is refused by value, whatever produced it", () => {
+  for (const empty of [
+    "d41d8cd98f00b204e9800998ecf8427e",
+    "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+    "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e",
+  ]) {
+    const { key, why } = ok({ run: () => `${empty}\n` });
+    assert.equal(key, "", empty);
+    assert.match(why, /EMPTY input/);
+  }
+});
+
+test("E9: a producer that dies inside the consumer's pipeline fails the command", () => {
+  // Without pipefail, `false | sha256sum` prints the empty digest and exits 0.
+  const { key, why } = verdictKey({ lane: "lint", fingerprintCommand: "node -e 'process.exit(17)' | sha256sum | cut -c1-64", material: "m", event: "pull_request" });
+  assert.equal(key, "");
+  assert.match(why, /fingerprint command failed|EMPTY input/);
+  // …and a healthy pipeline still hashes.
+  const good = verdictKey({ lane: "lint", fingerprintCommand: "printf 'x' | sha256sum | cut -c1-64", material: "m", event: "pull_request" });
+  assert.match(good.key, new RegExp(`^lint-lane-${VERDICT_SCHEMA}-[0-9a-f]{16}-[0-9a-f]{64}$`), good.why);
+});
+
+test("E8: the key carries a schema epoch, so a key from before the material grew cannot match", () => {
+  const { createHash } = require_crypto();
+  const v1 = createHash("sha256").update("24\npnpm turbo run lint\0fp").digest("hex").slice(0, 16);
+  assert.ok(!ok().key.includes(`-${v1}-`), "the v1 construction (material\\0command) is not this key");
+  assert.equal(VERDICT_SCHEMA, PROVENANCE_SCHEMA, "the public schema export shares the provenance epoch");
+  assert.equal(VERDICT_SCHEMA, "ci-verdict-v2");
+  const previous = createHash("sha256").update("verdict-v2\0" + "24\npnpm turbo run lint\0fp").digest("hex").slice(0, 16);
+  assert.notEqual(ok().key, `lint-lane-${previous}-${FP}`, "the incomplete previous v2 identity is also retired");
 });
 
 test("a lane that is not a name is refused (it prefixes a cache key)", () => {

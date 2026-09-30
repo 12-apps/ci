@@ -4,7 +4,7 @@
  *
  * Shape (one file per lane, kept in the Actions cache under a per-PR prefix):
  *
- *   { version: "green-manifest-v2", lane: "unit",
+ *   { version: "green-manifest-v2", lane: "unit", inputs: "test-inputs-v2",
  *     entries: { "<test path>": { hash, sha, run } } }
  *
  * `hash` is the test's input hash from the plan (affected-plan lib/inputs.mjs):
@@ -21,7 +21,14 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-// Older entries predate dependency-complete inputs and execution provenance.
+/**
+ * v2 (2026-09-30): the manifest names the INPUTS version its hashes were made
+ * with (`inputs`, affected-plan's INPUTS_VERSION), and a reader refuses a
+ * mismatch. The audit's F1–F3 changed what a hash covers, so every hash
+ * recorded before it is a claim about fewer inputs than the test really has;
+ * bumping here retires all of them at once instead of trusting a collision
+ * not to happen.
+ */
 export const MANIFEST_VERSION = "green-manifest-v2";
 
 /** A 40-hex git sha, a run id — anything else is not an entry we made. */
@@ -34,9 +41,11 @@ const HASH_RE = /^[0-9a-f]{64}$/;
  * @param {string} path
  * @param {string} lane  the manifest must name this lane; another lane's file
  *   under the wrong path skips nothing rather than answering for it
+ * @param {string} [inputsVersion]  the plan's `inputsVersion`; a manifest hashed
+ *   under another construction answers for different inputs and skips nothing
  * @returns {{ manifest: object|null, why: string }}
  */
-export function readManifest(path, lane) {
+export function readManifest(path, lane, inputsVersion) {
   if (!existsSync(path)) return { manifest: null, why: "no manifest — the first run of this lane on the pull request records one" };
   let parsed;
   try {
@@ -46,6 +55,9 @@ export function readManifest(path, lane) {
   }
   if (parsed?.version !== MANIFEST_VERSION) return { manifest: null, why: `manifest version ${JSON.stringify(parsed?.version)} is not ${MANIFEST_VERSION} — skipping nothing` };
   if (parsed.lane !== lane) return { manifest: null, why: `manifest is for lane ${JSON.stringify(parsed.lane)}, not ${lane} — skipping nothing` };
+  if (inputsVersion && parsed.inputs !== inputsVersion) {
+    return { manifest: null, why: `manifest hashes were made with ${JSON.stringify(parsed.inputs)}, the plan's are ${inputsVersion} — skipping nothing` };
+  }
   if (!parsed.entries || typeof parsed.entries !== "object") return { manifest: null, why: "manifest has no entries — skipping nothing" };
   // Drop malformed entries one by one rather than the whole file: a bad line
   // costs its own test a skip, never the lane's.
@@ -56,7 +68,7 @@ export function readManifest(path, lane) {
     if (!SHA_RE.test(String(entry.sha))) continue;
     entries[test] = { hash: entry.hash, sha: entry.sha, run: String(entry.run ?? "") };
   }
-  return { manifest: { version: MANIFEST_VERSION, lane, entries }, why: `${Object.keys(entries).length} recorded test(s)` };
+  return { manifest: { version: MANIFEST_VERSION, lane, inputs: parsed.inputs ?? null, entries }, why: `${Object.keys(entries).length} recorded test(s)` };
 }
 
 export function writeManifest(path, manifest) {

@@ -52,6 +52,9 @@ full. This action brings the same evidence to a single job.
   Fingerprint shell commands use `bash -e -o pipefail`: a failed producer piped
   into a successful hash command disables the lookup, as does an early failed
   command. Intentional shell error handling (`command || fallback`) still works.
+  Known digests of empty input (MD5, SHA-1, SHA-256 and SHA-512) are also
+  refused by value, including uppercase output, as defense in depth when a
+  consumer has masked its own producer error.
 - **`record`** writes a marker naming the run and saves it under the key. The
   caller gates it on `success()`, so a job that failed records nothing, and
   places it LAST, so nothing runs after the claim.

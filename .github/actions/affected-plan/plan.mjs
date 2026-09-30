@@ -504,7 +504,8 @@ if (skipGreen) {
     process.exit(0);
   }
 }
-const isGlobalChange = (file) => globalState.blind || globalState.files.has(file) || globals.some((re) => re.test(file));
+const isGlobalChange = (file) => globalState.blind || globalState.files.has(file) ||
+  (globalGraph.globs ?? []).some((glob) => glob.matches(file)) || globals.some((re) => re.test(file));
 // If even the lane's inventory is unavailable, the runner must discover its
 // full suite. Do not turn a global change into an empty classified route.
 if (globalTests.length === 0 && [...changed, ...deleted].some(isGlobalChange)) {

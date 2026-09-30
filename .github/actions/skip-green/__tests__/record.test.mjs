@@ -37,6 +37,10 @@ const record = (over = {}) => nextManifest({ lane: "unit", plan: PLAN, previous,
 test("a green lane records the tests it RAN, with the head and run that earned them", () => {
   const { manifest, added } = record();
   assert.deepEqual(manifest.entries["src/a.test.ts"], { hash: H(1), sha: NEW, run: "9" });
+  // The manifest names the inputs construction its hashes came from, so a
+  // later construction (a wider hash) retires it instead of matching it.
+  assert.equal(manifest.version, MANIFEST_VERSION);
+  assert.equal(record({ plan: { ...PLAN, inputsVersion: "test-inputs-v2" } }).manifest.inputs, "test-inputs-v2");
   assert.equal(added, 1);
 });
 
