@@ -63,6 +63,17 @@ on:
         description: The caller's deployment environment the role's `sub` names
         type: string
         default: runner-image
+      golden_base:
+        description: >-
+          `fleet` updates the image the fleet runs now; `ubuntu` rebuilds from a
+          clean Ubuntu 24.04 on a `root_gb` root, which drops every block the
+          old image carried (refresh-image.sh, GOLDEN_BASE)
+        type: string
+        default: fleet
+      root_gb:
+        description: The root volume in GiB, with golden_base ubuntu only
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -125,6 +136,8 @@ jobs:
           SUBNET_ID: ${{ inputs.subnet_id }}
           SECURITY_GROUP_ID: ${{ inputs.security_group_id }}
           INSTANCE_PROFILE_ARN: ${{ inputs.instance_profile_arn }}
+          GOLDEN_BASE: ${{ inputs.golden_base }}
+          ROOT_GB: ${{ inputs.root_gb }}
         run: exec bash .ci-engine/scripts/runner-host/wake/refresh-image.sh
       # A cancelled or timed-out step is SIGKILLed with its process tree, so
       # the script's exit trap may never run: terminate what this run tagged.

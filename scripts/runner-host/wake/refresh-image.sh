@@ -27,6 +27,19 @@
 #      refresh never rotates it), which copies the image to every region,
 #      points the templates at it and prunes the old images.
 #
+# GOLDEN_BASE picks what the golden host starts from:
+#   fleet  (default) the image the fleet launches now, updated in place;
+#   ubuntu the latest Canonical Ubuntu 24.04 image, on a ROOT_GB root volume,
+#          with the kit installed from scratch.
+# Why `ubuntu` exists: an image built from the previous one inherits every
+# block that image ever wrote. EBS takes no discard, so fstrim cannot give them
+# back, and the snapshot only grows. On 2026-09-29 hosts used ~27 GB of a
+# 116 GB root while the snapshot was 76 GB. Every region's copy, every
+# snapshot and every host's volume pays for that. A clean base resets it, and
+# ROOT_GB sizes the root (deploy.sh then launches the fleet at the new image's
+# size). ROOT_GB is refused with `fleet`: a volume cannot be smaller than the
+# snapshot it is made from.
+#
 # Neither host registers a runner. The smoke host's user data blanks the token
 # parameter before any slot starts. The golden host needs the real parameter in
 # its env file (the image carries it), so its slots and idle timer are held by
@@ -45,6 +58,14 @@ ref="${CI_REF:?set CI_REF to the ci commit the image should run}"
 template="ci-runner-fleet-${label}"
 refresh_id="${REFRESH_ID:-manual-$(date -u +%Y%m%d%H%M%S)}"
 types=(m7a.2xlarge m6a.2xlarge m7i.2xlarge m6i.2xlarge)
+golden_base="${GOLDEN_BASE:-fleet}"
+root_gb="${ROOT_GB:-}"
+ci_source="${CI_SOURCE:-https://github.com/12-apps/ci.git}"
+case "$golden_base" in
+  fleet) [[ -z "$root_gb" ]] || { echo "refresh: ROOT_GB needs GOLDEN_BASE=ubuntu; a volume cannot shrink below its snapshot" >&2; exit 1; } ;;
+  ubuntu) [[ "$root_gb" =~ ^[1-9][0-9]*$ ]] || { echo "refresh: GOLDEN_BASE=ubuntu needs ROOT_GB, the root volume in GiB" >&2; exit 1; } ;;
+  *) echo "refresh: GOLDEN_BASE must be fleet or ubuntu, not ${golden_base}" >&2; exit 1 ;;
+esac
 
 aws() { command aws --region "$region" --output text "$@"; }
 log() { printf 'refresh: %s\n' "$*" >&2; }
@@ -73,16 +94,17 @@ trap 'exit 130' INT TERM
 cat > "$work/user-data.yaml" <<'UD'
 #cloud-config
 bootcmd:
-  - [sh, -c, "sed -i 's|^CI_RUNNER_TOKEN_PARAMETER=.*|CI_RUNNER_TOKEN_PARAMETER=|' /etc/ci-runner/env"]
+  - [sh, -c, "[ ! -f /etc/ci-runner/env ] || sed -i 's|^CI_RUNNER_TOKEN_PARAMETER=.*|CI_RUNNER_TOKEN_PARAMETER=|' /etc/ci-runner/env"]
 UD
 
-# launch <ami> <name> → sets $launched, on-demand, the fleet's disk shape.
+# launch <ami> <name> [gb] → sets $launched, on-demand, the fleet's disk
+# shape; the root is the image's own size unless gb is given.
 # Never call it as $(launch …): a subshell's `started+=` does not reach the
 # EXIT trap, and the host outlives the run (it did, on the first real one).
 launch() {
-  local ami=$1 name=$2 dev gb t id
+  local ami=$1 name=$2 gb=${3:-} dev t id
   dev=$(aws ec2 describe-images --image-ids "$ami" --query 'Images[0].RootDeviceName')
-  gb=$(aws ec2 describe-images --image-ids "$ami" --query 'Images[0].BlockDeviceMappings[0].Ebs.VolumeSize')
+  [[ -n "$gb" ]] || gb=$(aws ec2 describe-images --image-ids "$ami" --query 'Images[0].BlockDeviceMappings[0].Ebs.VolumeSize')
   for t in "${types[@]}"; do
     if id=$(aws ec2 run-instances --image-id "$ami" --instance-type "$t" --subnet-id "$SUBNET_ID" \
         --security-group-ids "$SECURITY_GROUP_ID" --iam-instance-profile "Arn=${INSTANCE_PROFILE_ARN}" \
@@ -161,10 +183,32 @@ fi
 log "live settings: regions ${REGIONS}, budget ${DAILY_BUDGET}, idle ${IDLE_MINUTES:-default}, pnpm store ${PNPM_STORE}, pool ${POOL_SIZE}"
 
 # ── 1. golden ────────────────────────────────────────────────────────────────
-base=$(jq -r .ImageId "$work/template.json")
-log "base image ${base} (what ${template} launches now), ci ${ref}"
-launch "$base" ci-runner-golden
+if [[ "$golden_base" == ubuntu ]]; then
+  # Canonical's account; the newest noble gp3 server image. DescribeImages
+  # needs nothing the role does not already have for the fleet's own images.
+  base=$(aws ec2 describe-images --owners 099720109477 \
+    --filters 'Name=name,Values=ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*' 'Name=state,Values=available' \
+    --query 'sort_by(Images, &CreationDate)[-1].ImageId')
+  [[ "$base" == ami-* ]] || { log "no Ubuntu 24.04 image found in ${region}: nothing launched"; exit 1; }
+  log "base image ${base} (clean Ubuntu 24.04, ${root_gb} GiB root), ci ${ref}"
+  launch "$base" ci-runner-golden "$root_gb"
+else
+  base=$(jq -r .ImageId "$work/template.json")
+  log "base image ${base} (what ${template} launches now), ci ${ref}"
+  launch "$base" ci-runner-golden
+fi
 golden=$launched
+# A clean Ubuntu has no kit, no /etc/ci-runner/env for install.sh to take the
+# scope and label from, and no aws CLI for the boot-time token read
+# (fetch-credential.sh). The fleet's own image has all three, and keeps what
+# its env file says.
+clean_kit=""
+if [[ "$golden_base" == ubuntu ]]; then
+  clean_kit="command -v git >/dev/null || { apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -yq git; }
+[[ -d /opt/src/ci/.git ]] || git clone -q '${ci_source}' /opt/src/ci
+command -v aws >/dev/null || snap install aws-cli --classic
+export CI_RUNNER_SCOPE='repos/${REPOSITORY}' CI_RUNNER_LABELS='${RUNNER_LABEL}'"
+fi
 wait_ssm "$golden"
 cat > "$work/golden.sh" <<EOF
 set -e
@@ -178,6 +222,7 @@ done
 systemctl daemon-reload
 systemctl stop ci-runner-idle.timer ci-runner-idle.service 2>/dev/null || true
 for s in 1 2 3; do systemctl stop "ci-runner@\$s" 2>/dev/null || true; done
+${clean_kit}
 cd /opt/src/ci
 git fetch -q origin "${ref}"
 git checkout -q --detach FETCH_HEAD
