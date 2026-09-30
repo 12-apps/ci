@@ -183,6 +183,32 @@ on:
         type: number
         required: false
         default: 30
+      lint-fingerprint-command:
+        description: >-
+          OPT-IN. Shell that prints a hex hash of every tracked path that can
+          change the lint lane's outcome (a consumer script over `git
+          ls-tree`). On a pull request the job looks the hash up FIRST — before
+          any install — keyed to how the lane runs (Node version, the lint command), and a verdict an
+          earlier PASSING run of this pull request recorded under that key
+          skips every step: the job is green on that evidence. A run whose
+          job passed records the key last. Never on push. Empty (default)
+          disables it. See `.github/actions/lane-verdict`.
+        type: string
+        required: false
+        default: ''
+      type-check-fingerprint-command:
+        description: >-
+          OPT-IN. Shell that prints a hex hash of every tracked path that can
+          change the type-check lane's outcome (a consumer script over `git
+          ls-tree`). On a pull request the job looks the hash up FIRST — before
+          any install — keyed to how the lane runs (Node version, `pre-typecheck-command`, the type-check command), and a verdict an
+          earlier PASSING run of this pull request recorded under that key
+          skips every step: the job is green on that evidence. A run whose
+          job passed records the key last. Never on push. Empty (default)
+          disables it. See `.github/actions/lane-verdict`.
+        type: string
+        required: false
+        default: ''
       retry-gate-extra-lanes:
         description: >-
           JSON `{"<job-name regex>": "<lane>"}` for jobs the CONSUMER defines,
@@ -723,16 +749,39 @@ jobs:
         with:
           fetch-depth: 0
 
+
+      # ── Skip a lane this exact tree already passed (opt-in) ────────────────
+      # First, before any install: the consumer's `lint-fingerprint-command` hashes every
+      # tracked path that can change this lane's outcome, the action keys it to
+      # how the lane RUNS (below), and a verdict recorded under that key means
+      # every step after this one is skipped — the job is green on the earlier
+      # run's evidence, and its dependents see `success` as usual. Same
+      # mechanism as the tests lanes' `*-fingerprint-command`, applied to a job
+      # instead of a matrix. Never off a pull request: the push run is the
+      # safety net and skips nothing.
+      - name: Look up a recorded lane verdict
+        id: lane-verdict
+        if: ${{ inputs.lint-fingerprint-command != '' && github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/lane-verdict@v2
+        with:
+          lane: lint
+          fingerprint-command: ${{ inputs.lint-fingerprint-command }}
+          key-material: |
+            node=${{ inputs.node-version }}
+            pnpm turbo run lint --affected
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         with:
           run_install: false
 
       - uses: actions/setup-node@v4
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         with:
           node-version: ${{ inputs.node-version }}
           cache: ${{ !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
 
       - name: Install dependencies
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         shell: bash
         run: |
           set -o pipefail
@@ -758,6 +807,7 @@ jobs:
       # newest entry the default branch wrote, and turbo's own content hashes
       # decide what inside it is reusable. What a PR no longer does is WRITE.
       - name: Restore turbo cache
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         uses: actions/cache/restore@v4
         with:
           path: .turbo
@@ -789,11 +839,11 @@ jobs:
       # default (GITHUB_BASE_REF) is exactly the ref wanted.
       - name: Fetch the base for turbo --affected
         id: base
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ (github.event_name == 'pull_request') && steps.lane-verdict.outputs.hit != 'true' }}
         uses: 12-apps/ci/.github/actions/fetch-base@v2
 
       - name: Point turbo --affected at the base
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ (github.event_name == 'pull_request') && steps.lane-verdict.outputs.hit != 'true' }}
         shell: bash
         env:
           STACK_BASE: ${{ needs.changes.outputs.stack-base }}
@@ -812,6 +862,7 @@ jobs:
           fi
 
       - name: Lint
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         shell: bash
         # PR: --affected lints only the packages the diff touched (plus
         # dependents). Push (safety net): everything — --affected against the
@@ -832,11 +883,24 @@ jobs:
       # No status function: a lane that failed has nothing worth publishing as
       # the branch's warm state.
       - name: Save turbo cache
-        if: ${{ github.event_name != 'pull_request' }}
+        if: ${{ (github.event_name != 'pull_request') && steps.lane-verdict.outputs.hit != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: .turbo
           key: turbo-lint-${{ github.sha }}
+
+      # The claim is made LAST, by the job that earned it: `success()` means
+      # every step above passed, so the next pull-request run of this exact
+      # tree, under this exact command, may skip them all. A job that failed
+      # records nothing; one whose lookup hit has nothing new to say.
+      - name: Record the lane verdict
+        if: ${{ success() && steps.lane-verdict.outputs.key != '' && steps.lane-verdict.outputs.hit != 'true' }}
+        uses: 12-apps/ci/.github/actions/lane-verdict@v2
+        with:
+          mode: record
+          lane: lint
+          key: ${{ steps.lane-verdict.outputs.key }}
+
 
   type-check:
     name: Type Check
@@ -857,16 +921,40 @@ jobs:
         with:
           fetch-depth: 0
 
+
+      # ── Skip a lane this exact tree already passed (opt-in) ────────────────
+      # First, before any install: the consumer's `type-check-fingerprint-command` hashes every
+      # tracked path that can change this lane's outcome, the action keys it to
+      # how the lane RUNS (below), and a verdict recorded under that key means
+      # every step after this one is skipped — the job is green on the earlier
+      # run's evidence, and its dependents see `success` as usual. Same
+      # mechanism as the tests lanes' `*-fingerprint-command`, applied to a job
+      # instead of a matrix. Never off a pull request: the push run is the
+      # safety net and skips nothing.
+      - name: Look up a recorded lane verdict
+        id: lane-verdict
+        if: ${{ inputs.type-check-fingerprint-command != '' && github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/lane-verdict@v2
+        with:
+          lane: type-check
+          fingerprint-command: ${{ inputs.type-check-fingerprint-command }}
+          key-material: |
+            node=${{ inputs.node-version }}
+            pre=${{ inputs.pre-typecheck-command }}
+            pnpm turbo run check-types --affected
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         with:
           run_install: false
 
       - uses: actions/setup-node@v4
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         with:
           node-version: ${{ inputs.node-version }}
           cache: ${{ !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
 
       - name: Install dependencies
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         shell: bash
         run: |
           set -o pipefail
@@ -876,7 +964,7 @@ jobs:
       # script) so shell metacharacters in a computed value can never be
       # template-expanded into the run block (Actions hardening guidance).
       - name: Pre-typecheck setup
-        if: ${{ inputs.pre-typecheck-command != '' }}
+        if: ${{ (inputs.pre-typecheck-command != '') && steps.lane-verdict.outputs.hit != 'true' }}
         shell: bash
         env:
           PRE_CMD: ${{ inputs.pre-typecheck-command }}
@@ -904,6 +992,7 @@ jobs:
       # newest entry the default branch wrote, and turbo's own content hashes
       # decide what inside it is reusable. What a PR no longer does is WRITE.
       - name: Restore turbo cache
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         uses: actions/cache/restore@v4
         with:
           path: .turbo
@@ -915,11 +1004,12 @@ jobs:
       # layer below, so type-check would skip the packages the lower layers
       # touched. See the note there for why this is a conditional step.
       - name: Point turbo --affected at the stack base
-        if: needs.changes.outputs.stack-base != ''
+        if: ${{ (needs.changes.outputs.stack-base != '') && steps.lane-verdict.outputs.hit != 'true' }}
         shell: bash
         run: echo "TURBO_SCM_BASE=${{ needs.changes.outputs.stack-base }}" >> "$GITHUB_ENV"
 
       - name: Type check
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         shell: bash
         # PR: --affected (turbo still builds each affected package's upstream
         # deps first, so cross-package type errors are caught). Push: everything.
@@ -939,11 +1029,24 @@ jobs:
       # No status function: a lane that failed has nothing worth publishing as
       # the branch's warm state.
       - name: Save turbo cache
-        if: ${{ github.event_name != 'pull_request' }}
+        if: ${{ (github.event_name != 'pull_request') && steps.lane-verdict.outputs.hit != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: .turbo
           key: turbo-typecheck-${{ github.sha }}
+
+      # The claim is made LAST, by the job that earned it: `success()` means
+      # every step above passed, so the next pull-request run of this exact
+      # tree, under this exact command, may skip them all. A job that failed
+      # records nothing; one whose lookup hit has nothing new to say.
+      - name: Record the lane verdict
+        if: ${{ success() && steps.lane-verdict.outputs.key != '' && steps.lane-verdict.outputs.hit != 'true' }}
+        uses: 12-apps/ci/.github/actions/lane-verdict@v2
+        with:
+          mode: record
+          lane: type-check
+          key: ${{ steps.lane-verdict.outputs.key }}
+
 
   actionlint:
     name: Actionlint

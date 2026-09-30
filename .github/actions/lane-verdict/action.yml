@@ -1,0 +1,94 @@
+name: 'Lane verdict (skip a lane this tree already passed)'
+description: >-
+  Answers, at the top of a job, whether this exact tree already PASSED this
+  lane on an earlier pull-request run — and records the verdict at the bottom
+  of a job that passed. The tests lanes do this to size their matrix at zero
+  (monorepo-tests.yml); this brings the same evidence to a single job, so Lint,
+  Type Check, Build or a gates job skips its install and its work. `lookup`
+  runs the consumer's fingerprint command (a hash of every tracked path that
+  can change the lane's outcome), keys it to how the lane RUNS, and probes the
+  Actions cache without downloading; `record` saves the key. Never active off
+  a pull request; a command that fails or prints no hash disables the lookup
+  and the lane runs.
+
+inputs:
+  mode:
+    description: '`lookup` (default) or `record`.'
+    required: false
+    default: 'lookup'
+  lane:
+    description: 'Lane name, lower-case: `lint`, `type-check`, `build`, `gates`… It prefixes the key.'
+    required: true
+  fingerprint-command:
+    description: >-
+      lookup: consumer shell that prints a 32–128 hex-digit hash of the tree as
+      this lane sees it. Empty disables the lookup.
+    required: false
+    default: ''
+  key-material:
+    description: >-
+      lookup: everything that decides how the lane RUNS and is not in the tree
+      the fingerprint hashes — the Node version, the pre-command, the command.
+      Folded into the key, so changing any of it invalidates every verdict.
+    required: false
+    default: ''
+  key:
+    description: 'record: the `key` the lookup step produced.'
+    required: false
+    default: ''
+
+outputs:
+  hit:
+    description: '`true` when a recorded verdict answers for this tree; anything else means run the lane.'
+    value: ${{ steps.report.outputs.hit }}
+  key:
+    description: 'The cache key, or empty when no lookup was possible; hand it to the record step.'
+    value: ${{ steps.key.outputs.key }}
+
+runs:
+  using: composite
+  steps:
+    - name: Key this lane's verdict
+      id: key
+      if: ${{ inputs.mode == 'lookup' }}
+      shell: bash
+      env:
+        LANE: ${{ inputs.lane }}
+        FP_CMD: ${{ inputs.fingerprint-command }}
+        KEY_MATERIAL: ${{ inputs.key-material }}
+      run: node "$GITHUB_ACTION_PATH/verdict.mjs" key
+
+    # `lookup-only`: the entry's existence is the whole message.
+    - name: Look up a recorded verdict
+      id: probe
+      if: ${{ inputs.mode == 'lookup' && steps.key.outputs.key != '' }}
+      uses: actions/cache/restore@v4
+      with:
+        path: .lane-verdict/${{ inputs.lane }}
+        key: ${{ steps.key.outputs.key }}
+        lookup-only: true
+
+    - name: Report
+      id: report
+      if: ${{ inputs.mode == 'lookup' }}
+      shell: bash
+      env:
+        LANE: ${{ inputs.lane }}
+        KEY: ${{ steps.key.outputs.key }}
+        HIT: ${{ steps.probe.outputs.cache-hit }}
+      run: node "$GITHUB_ACTION_PATH/verdict.mjs" report
+
+    - name: Mark the verdict
+      if: ${{ inputs.mode == 'record' && inputs.key != '' }}
+      shell: bash
+      env:
+        LANE: ${{ inputs.lane }}
+        KEY: ${{ inputs.key }}
+      run: node "$GITHUB_ACTION_PATH/verdict.mjs" marker
+
+    - name: Save the verdict
+      if: ${{ inputs.mode == 'record' && inputs.key != '' }}
+      uses: actions/cache/save@v4
+      with:
+        path: .lane-verdict/${{ inputs.lane }}
+        key: ${{ inputs.key }}
