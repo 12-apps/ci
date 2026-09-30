@@ -2207,7 +2207,9 @@ names.
   being paired, because its base was retargeted or its head is newly ignored,
   has its comment turned once to "no longer checked". This is given up in one
   case: two PRs that overlap only each other and stop being paired in the
-  same run keep their last comment.
+  same run keep their last comment. The same is true of a PR that only an
+  untrusted (forged or corrupted) comment names as a partner, because the
+  sweep follows trusted comments only.
 * **What it leaves out:** a pair that only shares a file and merges cleanly
   (job summary and log line only); a path or bucket you ignore; a PR whose
   head branch you ignore; a stack, meaning a PR whose base is another PR's

@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { after, test } from "node:test";
 
-import { overlapSummary, runOverlap } from "../overlap.mjs";
+import { confirmPartners, overlapSummary, runOverlap } from "../overlap.mjs";
 import { lines } from "./fixture.mjs";
 import { A, cleanupWorlds, config, overlapOf, own, pair, run, stubApi, world } from "./overlap-world.mjs";
 
@@ -207,6 +207,18 @@ test("lookups rotate by run: partners whose reads keep failing cannot starve the
     await runOverlap({ api, repo: "o/r", base: "main", baseSha: w.baseSha(), config, overlap: overlapOf(), cwd: w.local.dir, maxLookups: 2, lookupSeed: seed });
   }
   assert.deepEqual([...new Set(partnersOn1())].sort((a, b) => a - b), [2, 4, 5], "#6–#9 dropped; only the unreadable #4 and #5 kept");
+});
+
+test("rotation covers every partner within ⌈n / max⌉ consecutive runs, even when every read keeps failing", async () => {
+  const partners = Array.from({ length: 60 }, (_, i) => 1000 + i);
+  const asked = new Set();
+  const api = { request: async (_method, path) => {
+    asked.add(Number(path.split("/").pop()));
+    throw Object.assign(new Error("500"), { status: 500 });
+  } };
+  const runs = Math.ceil(partners.length / 25);
+  for (let seed = 0; seed < runs; seed += 1) await confirmPartners(partners, { api, repo: "o/r", base: "main", max: 25, seed });
+  assert.equal(asked.size, partners.length, `every partner asked within ${runs} runs`);
 });
 
 test("the unchecked sweep costs nothing in the steady state: 20 ignored PRs, no comment reads for them", async () => {

@@ -129,7 +129,9 @@ function analyzeAll(sides, { baseSha, cwd }) {
 export async function confirmPartners(partners, { api, repo, base, max = MAX_LOOKUPS, seed = 0 }) {
   const states = new Map();
   const sorted = [...new Set(partners)].sort((a, b) => a - b);
-  const start = sorted.length ? ((seed % sorted.length) + sorted.length) % sorted.length : 0;
+  // A window of `max` that advances by `max` a run: consecutive run numbers
+  // cover all n within ⌈n / max⌉ runs.
+  const start = sorted.length ? (((seed * max) % sorted.length) + sorted.length) % sorted.length : 0;
   const order = [...sorted.slice(start), ...sorted.slice(0, start)];
   for (const [i, n] of order.entries()) {
     if (i >= max) {
