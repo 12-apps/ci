@@ -77,3 +77,22 @@ The isolated workflow/guard aggregate passes **286/286**, zero skips, in 1.42 s;
 actionlint again passes all five changed workflows. The 318 count above refers
 to the earlier combined local tree, not this isolated PR. Private caller fallback
 behavior remains unchanged. Hosted verification is still pending.
+
+**Hosted proof (2026-09-30):** source head
+`2549ff61a619dbc6588ea397f298f62a45e3717f` ran
+[Self Tests 36743687944](https://github.com/12-apps/ci/actions/runs/36743687944).
+[Action script tests 109984347476](https://github.com/12-apps/ci/actions/runs/36743687944/job/109984347476)
+completed successfully. The actual log records the runner override suite at
+16:23:03 UTC: **17 tests, 17 pass, 0 fail, 0 skipped**, 83.76 ms. It includes
+all 18 missing-override mutations and each inherited-first negative, with the
+explicit public and unchanged private/default cases. The existing runner
+selection step, including its imported declaration/timeout checks, logs
+**32/32**, 121.84 ms. Declared inputs and workflow permissions also passed.
+[Runner image 109984347781](https://github.com/12-apps/ci/actions/runs/36743687944/job/109984347781)
+passed its build and smoke check; the empty-matrix case was intentionally
+skipped. These are fixture timings, not a workload speed or billing claim.
+
+This documentation-only head must pass its own exact-head checks before merge.
+The first source head's CodeQL analysis was still running when this addendum
+was written, and is not counted as completed evidence here. The normal release
+and real consumer runner metadata remain separate rollout checks.
