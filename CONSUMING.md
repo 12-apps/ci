@@ -2038,3 +2038,105 @@ Run the caller via **workflow_dispatch** with `action=provision`,
 `target=digitalocean`. It creates the droplet and prints its IP; set the
 `DEPLOY_HOST` repo Variable to that IP so subsequent push-to-main runs deploy to
 it.
+
+---
+
+# Consuming the Conflict monitor
+
+Says on a PR the moment its base makes it conflict, and counts every time that
+happened. GitHub has no "became conflicting" event and computes `mergeable`
+lazily, so the monitor re-runs each merge itself with `git merge-tree` — no
+worktree, no checkout of the PR.
+
+* **`probe`** — every open PR against the base (or one, with `pr`). A
+  conflicted PR gets ONE comment, found by a hidden marker and edited in place:
+  created on the first conflict, edited when the conflicted set changes, marked
+  resolved when the branch merges cleanly again, and not touched otherwise. The
+  table names each file, its conflict shape (`edit/edit`, `insert/insert`,
+  `add/add`, `modify/delete`, …), its group, and the base PRs that touched it
+  since the branch last synced.
+* **`report`** — replays every time a PR branch merged the base in and it did
+  not merge cleanly, over the whole history, and writes the counts per group
+  (all time and a trailing window) as a job summary and a `conflict-report`
+  artifact.
+
+## A. Caller workflow (consumer `.github/workflows/conflict-monitor.yml`)
+
+```yaml
+name: Conflict monitor
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [synchronize]
+  schedule:
+    - cron: '17 11 * * 1'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    # A fork PR's token is read-only on `pull_request`; its comment resolves
+    # at the next push to the base instead.
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: 12-apps/ci/.github/workflows/conflict-monitor.yml@v2
+    with:
+      mode: probe
+      pr: ${{ github.event.pull_request.number || '' }}
+
+  report:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: 12-apps/ci/.github/workflows/conflict-monitor.yml@v2
+    with:
+      mode: report
+```
+
+The `pull_request: synchronize` trigger is what turns a comment to "resolved"
+within minutes: a push to the base is what MAKES a PR conflict, but the push
+that fixes it — the author's merge, or a heal job's — lands on the PR branch.
+
+## B. The group config (`.github/conflict-monitor.json`, optional)
+
+Groups are your vocabulary, so they are yours to declare. Rules are tried in
+order and the first match wins; a file no rule claims is `code`, and the report
+splits `code` by what the conflict looked like (`stacked`, `duplicated scope`,
+`append point`, `moved or deleted`, `concurrent edit`).
+
+```json
+{
+  "buckets": [
+    { "name": "removed from git", "absent": true, "paths": ["apps/web/mcp/manifest.json"] },
+    { "name": "route table", "paths": ["apps/web/server/routes.generated.ts"] },
+    { "name": "dependencies", "paths": ["pnpm-lock.yaml", "**/package.json"] }
+  ],
+  "ticketPattern": "FUT-\\d+"
+}
+```
+
+* `paths` are globs: `**` crosses directories and may match none, `*` stays in
+  one segment, and a pattern is anchored at the root (`.*.json` is a ROOT file).
+* `absent: true` claims a path only once it no longer exists at the base tip —
+  how a file you took out of git keeps classifying in the history report
+  without the rule claiming a live file later. List exact paths there, not a
+  glob: a glob would claim a live file the day a refactor removes it.
+* `ticketPattern` is matched against each PR's title and head branch; it only
+  feeds the informational "duplicated scope shared a ticket" count.
+
+A malformed config fails the step naming the file and the reason.
+
+## C. What it cannot see
+
+A sync done by REBASE leaves no merge commit, so the report cannot count it.
+The culprits are candidates: base commits that touched the conflicted file,
+which is not proof they touched the conflicting lines.

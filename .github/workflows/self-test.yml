@@ -122,6 +122,16 @@ jobs:
         shell: bash
         run: node --test .github/actions/failure-ledger/__tests__/*.test.mjs
 
+      # The conflict monitor over throwaway repositories git builds at test
+      # time: every conflict shape produced by git itself, the group
+      # precedence, a base whose history was rewritten, a stacked branch, and
+      # the ONE-comment rule against a stubbed GitHub. The shape reader is the
+      # part that would fail silently — a message format it stopped parsing
+      # files every conflict under `code: other`, and nothing turns red.
+      - name: conflict-monitor
+        shell: bash
+        run: node --test .github/actions/conflict-monitor/__tests__/*.test.mjs
+
       # Not an action's tests — the workflow FILES' own shape. A reusable
       # workflow that references an action by a relative path works in every
       # job above (same checkout, same directory) and breaks only in the
