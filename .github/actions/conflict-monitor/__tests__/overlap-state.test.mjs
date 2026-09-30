@@ -141,14 +141,15 @@ test("a bad entries payload is dropped whole", () => {
   ];
   for (const payload of bad) assert.equal(decodeEntries(withEntries(payload), { self: 1, open }), null, JSON.stringify(payload).slice(0, 120));
   assert.equal(decodeEntries(`${OVERLAP_MARKER}\n<!-- conflict-monitor:overlap:entries !!! -->`, { self: 1, open }), null);
-  assert.ok(decodeEntries(withEntries({ g: [g(7, [["a.ts", "distinct types"]], 1)], s: [2, 7] }), { self: 1, open }), "a merged partner that is not open");
+  assert.ok(decodeEntries(withEntries({ g: [g(7, [], 1)], s: [2, 7] }), { self: 1, open }), "a merged partner that is not open");
+  assert.equal(decodeEntries(withEntries({ g: [g(7, [["a.ts", "same lines"]], 1)], s: [] }), { self: 1, open }), null, "a merged group stores no rows");
   assert.deepEqual(decodeEntries(withEntries({ g: [g(2)], s: [2, 99] }), { self: 1, open }).seen, [2], "a seen partner nobody knows is dropped");
 });
 
-test("1,000+ rows over 60 partners, worst-case paths: the body stays under the ceiling, reads back trusted, and a hidden row still moves the digest", () => {
+test("1,000+ rows over 210 partners, worst-case paths: the body stays under the ceiling, reads back trusted, and a hidden row still moves the digest", () => {
   const rows = [];
-  for (let p = 0; p < 60; p += 1) {
-    for (let i = 0; i < 35; i += 1) rows.push(row(1000 + p, `${"|`@<".repeat(80)}/${i}`, "same lines"));
+  for (let p = 0; p < 210; p += 1) {
+    for (let i = 0; i < 6; i += 1) rows.push(row(1000 + p, `${"|`@<".repeat(80)}/${i}`, "same lines"));
   }
   const plan = planOverlap(null, groupsOf(rows));
   const body = renderOverlap(plan, ctx);
@@ -157,7 +158,7 @@ test("1,000+ rows over 60 partners, worst-case paths: the body stays under the c
   const back = readComment({ body, user: BOT }, { self: 1, open });
   assert.equal(back.trusted, true);
   assert.equal(back.groups.length, LIMITS.partners);
-  assert.equal(back.rest.partners, 10);
+  assert.equal(back.rest.partners, 10, "past LIMITS.partners, the highest-numbered fold into `rest`");
   assert.deepEqual(planOverlap(back, groupsOf(rows)), { action: "none" }, "the next run over the same rows writes nothing");
   // The last row of the last partner is never shown; changing it moves the digest.
   const changed = rows.map((r, i) => (i === rows.length - 1 ? { ...r, kind: "same spot" } : r));
@@ -209,4 +210,22 @@ test("only github-actions[bot] with the marker is the overlap comment; E0's comm
   assert.equal(isOverlapComment({ body: e0, user: BOT }), false);
   assert.equal(isOwnComment({ body: overlap, user: BOT }), false, "E0's finder never takes the overlap comment");
   assert.ok(!OVERLAP_MARKER.startsWith(MARKER) && !MARKER.startsWith(OVERLAP_MARKER));
+});
+
+test("merged groups take no share of the shown rows: an open partner's live path is shown", () => {
+  const many = groupsOf(Array.from({ length: 100 }, (_, i) => row(5, `m${i}.ts`))).map((g) => ({ ...g, merged: true }));
+  const body = renderOverlap({ groups: [...many, ...groups([row(9, "live.ts")])], seen: [5, 9] }, ctx);
+  assert.match(body, /\| #9 \| <code>live\.ts<\/code> \| same lines \|/);
+  assert.doesNotMatch(body, /\| #9 \| 1 more file/);
+});
+
+test("60 partners: one unreadable for a run is carried like any other — no write when it goes, none when it comes back", () => {
+  const partners = Array.from({ length: 60 }, (_, p) => 1000 + p);
+  const rows = (skip) => partners.filter((p) => p !== skip).map((p) => row(p));
+  const open = new Set(partners);
+  const prev = readComment({ body: renderOverlap(planOverlap(null, groupsOf(rows())), ctx), user: BOT }, { self: 1, open });
+  const carried = prev.groups.filter((g) => g.partner === 1055);
+  assert.equal(carried.length, 1, "every partner up to LIMITS.seen keeps its own group");
+  assert.deepEqual(planOverlap(prev, [...groupsOf(rows(1055)), ...carried]), { action: "none" });
+  assert.deepEqual(planOverlap(prev, groupsOf(rows())), { action: "none" });
 });

@@ -83,7 +83,7 @@ test("an invalid entries line under a `resolved` state line is rewritten in plac
   assert.deepEqual(api.writes, [["update", 1]]);
 });
 
-test("a merged row is re-checked: a partner that did not merge is dropped", async () => {
+test("a merged group a trusted comment stores is final: it is not looked up again, and the comment does not change", async () => {
   const w = pair();
   w.push(4, { "a.txt": A("FOUR") });
   const api = stubApi(w, { closed: { 4: { merged_at: "2026-09-30T12:00:00Z" } } });
@@ -96,9 +96,9 @@ test("a merged row is re-checked: a partner that did not merge is dropped", asyn
   api.writes.length = 0;
   api.lookups.length = 0;
   await run(w, api);
-  assert.ok(api.lookups.includes(4), "the merged row was looked up again");
-  assert.doesNotMatch(own(api, 1)[0].body, /#4 merged/);
-  assert.ok(api.writes.some((x) => x[1] === 1));
+  assert.deepEqual(api.lookups, [], "confirmed when it was written; never read again");
+  assert.match(own(api, 1)[0].body, /#4 merged/);
+  assert.deepEqual(api.writes, []);
 });
 
 test("partner lookups are bounded per run, and the bound is logged; rows past it are kept as they were", async () => {
@@ -167,4 +167,57 @@ test("a PR whose comments cannot be listed is skipped and logged; the others are
   assert.deepEqual(api.writes, [["create", 2]]);
   assert.ok(logs.some((l) => /#1: .*comments could not be listed/.test(l)), logs.join("\n"));
   assert.deepEqual(result.tally.failedWrites, []);
+});
+
+test("lookups never starve: 26 merged partners and one closed all resolve within two runs, and the steady state costs 0 lookups", async () => {
+  const w = world();
+  const selfFiles = {};
+  for (let k = 1; k <= 27; k += 1) selfFiles[`f${k}.txt`] = lines("S");
+  w.push(100, selfFiles);
+  for (let k = 1; k <= 27; k += 1) w.push(100 + k, { [`f${k}.txt`]: lines("P") });
+  const closed = {};
+  for (let k = 1; k <= 26; k += 1) closed[100 + k] = { merged_at: "2026-09-30T12:00:00Z" };
+  closed[127] = { merged_at: null };
+  const api = stubApi(w, { closed });
+  await run(w, api);
+  for (let k = 1; k <= 27; k += 1) w.pull(100 + k).state = "closed";
+  await run(w, api);
+  await run(w, api);
+  const body = own(api, 100).at(-1).body;
+  assert.match(body, /#126 merged/);
+  assert.doesNotMatch(body, /#127/, "the partner closed without merging is gone");
+  assert.doesNotMatch(body, /If #1\d\d merges first/, "no open row is left for a PR that is gone");
+  api.lookups.length = 0;
+  api.writes.length = 0;
+  await run(w, api);
+  assert.deepEqual(api.lookups, [], "a stored merged group is final: never looked up again");
+  assert.deepEqual(api.writes, []);
+});
+
+test("lookups rotate by run: partners whose reads keep failing cannot starve the others", async () => {
+  const w = pair();
+  for (const n of [4, 5, 6, 7, 8, 9]) w.push(n, { "a.txt": A(`P${n}`) });
+  const closed = { 4: { status: 500 }, 5: { status: 500 } };
+  for (const n of [6, 7, 8, 9]) closed[n] = { merged_at: null };
+  const api = stubApi(w, { closed });
+  await run(w, api);
+  for (const n of [4, 5, 6, 7, 8, 9]) w.pull(n).state = "closed";
+  const partnersOn1 = () => (own(api, 1).at(-1).body.match(/\| #(\d+) \|/g) ?? []).map((s) => Number(/\d+/.exec(s)[0]));
+  for (let seed = 0; seed < 6; seed += 1) {
+    await runOverlap({ api, repo: "o/r", base: "main", baseSha: w.baseSha(), config, overlap: overlapOf(), cwd: w.local.dir, maxLookups: 2, lookupSeed: seed });
+  }
+  assert.deepEqual([...new Set(partnersOn1())].sort((a, b) => a - b), [2, 4, 5], "#6–#9 dropped; only the unreadable #4 and #5 kept");
+});
+
+test("the unchecked sweep costs nothing in the steady state: 20 ignored PRs, no comment reads for them", async () => {
+  const w = world();
+  w.push(1, { "a.txt": A("ONE") });
+  w.push(2, { "a.txt": A("TWO") });
+  for (let k = 0; k < 20; k += 1) w.push(10 + k, { [`dep${k}.txt`]: lines("x") }, { head: `renovate/dep-${k}` });
+  const api = stubApi(w);
+  const block = { ignoreHeads: ["renovate/"] };
+  await run(w, api, { block });
+  const before = api.stats.reads;
+  await run(w, api, { block });
+  assert.equal(api.stats.reads - before, 5, "1 list page + 2 files lists + 2 comment lists");
 });

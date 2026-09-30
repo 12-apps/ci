@@ -19,11 +19,18 @@
  *
  * THE COMMENT IS BOUNDED. GitHub refuses a body over 65,536 characters, and a
  * refused write fails the run on every event for as long as the pair exists.
- * So what is stored and shown is capped — at most LIMITS.partners groups (the
- * rest fold into one `rest` aggregate), LIMITS.rows shown rows within a
- * character budget, paths cut at LIMITS.path — while the digest covers every
- * row through each group's count and hash: a change among the rows NOT shown
- * still moves it. The decoder accepts exactly what the encoder can produce.
+ * So what is stored and shown is capped — at most LIMITS.partners groups,
+ * LIMITS.rows shown rows (open groups only) within a character budget, paths
+ * cut at LIMITS.path — while the digest covers every row through each group's
+ * count and hash: a change among the rows NOT shown still moves it. Every
+ * group keeps its own count and hash, rows or not, so any of them can be
+ * carried for a partner that could not be read. The decoder accepts exactly
+ * what the encoder can produce.
+ *
+ * ACCEPTED: past LIMITS.partners partners on ONE PR, the highest-numbered
+ * fold into a single `rest` aggregate. A folded partner cannot be carried
+ * (one unreadable run costs an edit, and its return another) and is dropped
+ * rather than shown as merged. It takes 200 PRs overlapping one PR.
  *
  * The entries line is read back out of a comment, so it is untrusted input:
  * the finder takes only `github-actions[bot]`'s comments, and even then the
@@ -41,7 +48,7 @@ export const MERGED = "merged";
 export const UNCHECKED = "unchecked";
 
 export const LIMITS = {
-  partners: 50, // groups stored by partner; the rest fold into `rest`
+  partners: 200, // groups stored by partner (count and hash each); the rest fold into `rest`
   rows: 100, // rows shown (and stored) across all groups
   path: 256, // characters of a shown path
   seen: 200, // partners remembered as named
@@ -135,9 +142,10 @@ export function stateFor({ groups, rest }) {
 const jsonCost = (value) => Math.ceil((Buffer.byteLength(JSON.stringify(value)) * 4) / 3) + 4;
 
 /**
- * Choose the rows that are shown, and so stored: groups in partner order, rows
- * in path order, a prefix that stops at the first row over LIMITS.rows or the
- * character budget. `tableRow(partner, path, kind)` is the renderer's own row,
+ * Choose the rows that are shown, and so stored: OPEN groups in partner order,
+ * rows in path order, a prefix that stops at the first row over LIMITS.rows or
+ * the character budget. A merged group stores no rows — it is shown as one
+ * "#Y merged" line — so it never takes an open partner's place. `tableRow(partner, path, kind)` is the renderer's own row,
  * so the budget counts what is really written.
  */
 export function compact({ groups, rest }, tableRow) {
@@ -146,6 +154,7 @@ export function compact({ groups, rest }, tableRow) {
   let full = false;
   const out = groups.map((g) => {
     const rows = [];
+    if (g.merged) return { ...g, rows };
     for (const r of g.rows) {
       if (full) break;
       const row = { path: shownPath(r.path), kind: r.kind };
@@ -190,9 +199,11 @@ const HAS_CONTROL = /[\u0000-\u001f\u007f\u0085\u2028\u2029]/;
  *
  *   - at most LIMITS.partners distinct groups, LIMITS.rows rows in all, and
  *     LIMITS.seen seen partners — exactly what encodeEntries can write;
- *   - a MERGED group's partner must not be open: an open PR has not merged;
- *   - a group whose partner is not open is only a claim — overlap.mjs confirms
- *     it with one bounded `GET /pulls/{n}` before it is kept;
+ *   - a MERGED group's partner must not be open (an open PR has not merged),
+ *     and it has no shown rows;
+ *   - an OPEN group whose partner is not open is only a claim — overlap.mjs
+ *     confirms it with one bounded `GET /pulls/{n}` before it is kept; a
+ *     merged group was confirmed when it was written, and is final;
  *   - a shown path is what shownPath writes: no control character, no longer
  *     than LIMITS.path; a kind is one of the four or git's own spelling.
  *
@@ -217,7 +228,7 @@ export function decodeEntries(body, { self, open }) {
     const [partner, total, hash, merged, shown] = g;
     if (!isPr(partner) || partner === self || groups.some((x) => x.partner === partner)) return null;
     if (merged !== 0 && merged !== 1) return null;
-    if (merged && open.has(partner)) return null;
+    if (merged && (open.has(partner) || (Array.isArray(shown) && shown.length))) return null;
     if (typeof hash !== "string" || !HASH.test(hash) || !Array.isArray(shown)) return null;
     if (!isCount(total, 1_000_000) || total < 1 || total < shown.length) return null;
     rows += shown.length;
@@ -281,17 +292,22 @@ export function readComment(comment, ctx) {
  */
 export function planOverlap(prev, groups) {
   const open = openGroups(groups);
-  const next = stateFor(fold(groups));
-  if (!prev) return open.length ? { action: "create", groups: open, seen: partnersOf(open) } : { action: "none" };
+  const folded = fold(groups);
+  const next = stateFor(folded);
+  // Partners folded into `rest` are not tracked one by one: only the stored
+  // groups' partners are `seen`, and only they can be new.
+  const named = partnersOf(openGroups(folded.groups));
+  const seenOf = (...lists) => [...new Set([...named, ...lists.flat()])].slice(0, LIMITS.seen).sort((x, y) => x - y);
+  if (!prev) return open.length ? { action: "create", groups: open, seen: seenOf() } : { action: "none" };
   const trusted = prev.trusted;
   if (trusted && prev.state === next) return { action: "none" };
   if (!open.length) return { action: "update", groups, seen: groups.length ? prev.seen : [] };
   // An untrusted comment has no state and no `seen` to compare with: it is
   // rewritten in place rather than re-posted, so a bad payload cannot buy a
   // notification — whatever its state line claims.
-  if (trusted && [RESOLVED, MERGED, UNCHECKED].includes(prev.state)) return { action: "repost", groups: open, seen: partnersOf(open) };
-  if (trusted && partnersOf(open).some((p) => !prev.seen.includes(p))) return { action: "repost", groups: open, seen: partnersOf(open) };
-  return { action: "update", groups, seen: [...new Set([...prev.seen, ...partnersOf(open)])].sort((x, y) => x - y) };
+  if (trusted && [RESOLVED, MERGED, UNCHECKED].includes(prev.state)) return { action: "repost", groups: open, seen: seenOf() };
+  if (trusted && named.some((p) => !prev.seen.includes(p))) return { action: "repost", groups: open, seen: seenOf() };
+  return { action: "update", groups, seen: seenOf(prev.seen) };
 }
 
 /**

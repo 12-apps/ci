@@ -116,7 +116,11 @@ test("a partner that merged becomes a merged row, kept in the digest; one closed
   assert.deepEqual(api.writes, [["update", 1]], "the closed PRs' own comments stay as they were");
   const prev = rowsOn(api, 1, [1, 3]);
   assert.equal(prev.state, MERGED);
-  assert.deepEqual(prev.rows, [{ partner: 2, path: "a.txt", kind: "same lines", merged: true }]);
+  assert.deepEqual(
+    prev.groups.map((g) => [g.partner, g.merged, g.total, g.rows.length]),
+    [[2, true, 1, 0]],
+    "#2's group is merged: its count and hash kept, no rows stored",
+  );
   assert.match(own(api, 1)[0].body, /#2 merged\. If this PR now conflicts, the conflict comment lists the files\./);
   api.writes.length = 0;
   await run(w, api);

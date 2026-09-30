@@ -120,8 +120,10 @@ const OVERLAP_HINT = {
   "both add": "both PRs create this file",
   "deletes or moves": "one PR deletes or moves a file the other edits",
 };
-const orList = (items) => (items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} or ${items[items.length - 1]}`);
-const mergedLine = (n) => `* #${n} merged. If this PR now conflicts, the conflict comment lists the files.`;
+const listOf = (items, word) => (items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} ${word} ${items[items.length - 1]}`);
+/** Every merged partner on one line: the list is bounded by LIMITS.partners, the lines would not be. */
+const mergedLine = (partners) =>
+  partners.length ? [`* ${listOf(partners.map((n) => `#${n}`), "and")} merged. If this PR now conflicts, the conflict comment lists the files.`] : [];
 
 /**
  * One table row of the overlap comment. The path is already `shownPath`'s
@@ -137,7 +139,7 @@ function overlapBody(view, seen, { base, baseSha }) {
   const head = hiddenLines(view, seen);
   const checked = `Checked against \`${base}\` at \`${baseSha.slice(0, 7)}\`.`;
   if (state === OVERLAP_RESOLVED) return [...head, "### No open PR overlaps this one any more", "", checked].join("\n");
-  const merged = partnersOf(view.groups.filter((g) => g.merged)).map(mergedLine);
+  const merged = mergedLine(partnersOf(view.groups.filter((g) => g.merged)));
   if (state === MERGED) return [...head, "### Every PR that overlapped this one has merged", "", checked, "", ...merged].join("\n");
   const open = view.groups.filter((g) => !g.merged);
   const table = [];
@@ -161,7 +163,7 @@ function overlapBody(view, seen, { base, baseSha }) {
     "",
     ...(hints.length ? [hints.join(" "), ""] : []),
     ...(merged.length ? [...merged, ""] : []),
-    `No action needed. If ${orList(partners)} merges first, the conflict comment will list what to resolve.`,
+    `No action needed. If ${listOf(partners, "or")} merges first, the conflict comment will list what to resolve.`,
   ].join("\n");
 }
 

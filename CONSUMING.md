@@ -2205,7 +2205,9 @@ names.
   partner that merged becomes a "#Y merged" row. When nothing is left, the
   comment turns to "No open PR overlaps this one any more". A PR that stops
   being paired, because its base was retargeted or its head is newly ignored,
-  has its comment turned once to "no longer checked".
+  has its comment turned once to "no longer checked". This is given up in one
+  case: two PRs that overlap only each other and stop being paired in the
+  same run keep their last comment.
 * **What it leaves out:** a pair that only shares a file and merges cleanly
   (job summary and log line only); a path or bucket you ignore; a PR whose
   head branch you ignore; a stack, meaning a PR whose base is another PR's
@@ -2302,11 +2304,17 @@ that share a file and merge cleanly.
 A run reads:
 
 * one PR-list page per 100 open PRs, whatever their base;
-* each paired PR's files and comments, and the comments of each open PR it
-  does not pair;
-* one `GET /pulls/{n}` for each partner a comment names that is no longer
-  open, merged rows included, at most 25 per run. Past that bound, the rest
-  keep their rows as they were, and the log says so.
+* each paired PR's files and comments;
+* the comments of an open PR it does not pair, but only when a paired PR's
+  comment still names it as a partner. That happens once, in the run where
+  the PR stops being paired;
+* one `GET /pulls/{n}` for a partner a comment still shows as open that has
+  left the open list, at most 25 per run. Each answer settles that partner:
+  it becomes a merged row, which is final and never read again, or it is
+  dropped. Only a partner whose read fails is asked again. The order rotates
+  by run, so partners that keep failing cannot hold the others back. When the
+  bound is hit, the rest keep their rows until a later run, and the log says
+  so. In the steady state, a run makes no lookups at all.
 
 It writes once per create or edit, and twice per re-post. The `GITHUB_TOKEN`
 budget is shared by every workflow in the repository, so `rateUsed` is worth
@@ -2315,8 +2323,12 @@ watching.
 A comment stays under GitHub's 65,536-character limit however large the
 overlap is:
 
-* it shows at most 100 file rows, within a character budget, and at most 50
-  partners, and counts the rest (`| #Y | 312 more file(s) |`);
+* it shows at most 100 file rows, all from open partners and within a
+  character budget, and counts the rest (`| #Y | 312 more file(s) |`);
+* it tracks up to 200 partners, each with a count and a hash of all its rows.
+  Past 200 partners on ONE PR, the rest are folded into a single count, which
+  is accepted. Folded partners are not carried through a run that cannot read
+  them, and are dropped rather than shown as merged;
 * paths are cut at 256 characters, and control characters, a newline among
   them, are shown as visible symbols;
 * the digest covers every row, shown or not, so a change among the hidden rows

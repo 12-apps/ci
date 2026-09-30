@@ -112,45 +112,51 @@ function analyzeAll(sides, { baseSha, cwd }) {
 }
 
 /**
- * Whether a partner that left the open list merged INTO THE BASE — the check
- * every row a comment claims about a PR that is not open has to pass, a merged
- * row included, before it is kept. One `GET /pulls/{n}` per partner per run,
- * at most `max` of them. A 404, or a PR closed or merged elsewhere, is
- * "closed" (dropped); a failed read or one past the bound is "unknown" (its
- * rows are kept as they were, so a flaky read does not flap the comment).
+ * Whether each partner that left the open list merged INTO THE BASE. Only the
+ * UNCONFIRMED ones are asked about: a partner a trusted comment still shows as
+ * open. A group a trusted comment already stores as merged was confirmed when
+ * it was written, and is final — it is never read again.
+ *
+ * One `GET /pulls/{n}` per partner, at most `max` per run. Each answer settles
+ * the partner for good (a merged group, or dropped), so only a partner whose
+ * read FAILS is asked again; the order rotates by `seed` (the run number), so
+ * a few that keep failing cannot hold the rest back past ⌈n / max⌉ runs.
+ *
+ *   merged    merged_at set, into the base
+ *   closed    a 404, or closed or merged elsewhere: its group is dropped
+ *   unknown   a failed read, or past the bound: its group is kept as it was
  */
-export function partnerStates({ api, repo, base, max = MAX_LOOKUPS }) {
-  const seen = new Map();
-  let spent = 0;
-  return async (n) => {
-    if (seen.has(n)) return seen.get(n);
-    if (spent >= max) {
-      if (spent === max) log(`partner lookups capped at ${max} this run: #${n} and any later partner keep their rows as they were`);
-      spent += 1;
-      seen.set(n, "unknown");
-      return "unknown";
+export async function confirmPartners(partners, { api, repo, base, max = MAX_LOOKUPS, seed = 0 }) {
+  const states = new Map();
+  const sorted = [...new Set(partners)].sort((a, b) => a - b);
+  const start = sorted.length ? ((seed % sorted.length) + sorted.length) % sorted.length : 0;
+  const order = [...sorted.slice(start), ...sorted.slice(0, start)];
+  for (const [i, n] of order.entries()) {
+    if (i >= max) {
+      log(`partner lookups capped at ${max} this run: ${order.length - max} partner(s) keep their rows until a later run`);
+      break;
     }
-    spent += 1;
-    let state;
     try {
       const pr = await api.request("GET", `/repos/${repo}/pulls/${n}`);
-      state = (pr?.merged_at || pr?.merged === true) && pr?.base?.ref === base ? "merged" : "closed";
+      states.set(n, (pr?.merged_at || pr?.merged === true) && pr?.base?.ref === base ? "merged" : "closed");
     } catch (err) {
-      state = err.status === 404 ? "closed" : "unknown";
-      if (state === "unknown") log(`#${n}: state could not be read — its rows are kept (${err.message})`);
+      states.set(n, err.status === 404 ? "closed" : "unknown");
+      if (err.status !== 404) log(`#${n}: state could not be read — its rows are kept (${err.message})`);
     }
-    seen.set(n, state);
-    return state;
-  };
+  }
+  return states;
 }
+
+/** The partners a trusted comment shows as open that are not open any more. */
+const unconfirmed = (prev, open) => (prev?.trusted ? prev.groups.filter((g) => !g.merged && !open.has(g.partner)).map((g) => g.partner) : []);
 
 /**
  * This run's groups for one PR, plus what its previous comment said about the
  * partners this run could not see: a partner that could not be read keeps its
  * group; one that left the open list becomes a merged group once GitHub says
- * it merged, and is dropped when it did not.
+ * it merged, and is dropped when it did not. A merged group stays as it is.
  */
-async function groupsFor(self, { live, prev, open, readable, failed, stateOf }) {
+function groupsFor(self, { live, prev, open, readable, failed, states }) {
   const groups = groupsOf(live.get(self) ?? []);
   if (!prev?.trusted) return groups;
   for (const g of prev.groups) {
@@ -163,7 +169,11 @@ async function groupsFor(self, { live, prev, open, readable, failed, stateOf }) 
       if (!readable.has(g.partner) || failed.has(pairKey(self, g.partner))) groups.push(g);
       continue;
     }
-    const state = await stateOf(g.partner);
+    if (g.merged) {
+      groups.push(g);
+      continue;
+    }
+    const state = states.get(g.partner) ?? "unknown";
     if (state === "merged") groups.push({ ...g, merged: true });
     else if (state === "unknown") groups.push(g);
   }
@@ -218,9 +228,21 @@ async function ownComments({ api, repo, self, tally }) {
   }
 }
 
-export async function runOverlap({ api, repo, base, baseSha, config, overlap, cwd = process.cwd(), fetch = fetchHeads, dryRun = false, maxLookups = MAX_LOOKUPS }) {
+export async function runOverlap({
+  api,
+  repo,
+  base,
+  baseSha,
+  config,
+  overlap,
+  cwd = process.cwd(),
+  fetch = fetchHeads,
+  dryRun = false,
+  maxLookups = MAX_LOOKUPS,
+  lookupSeed = 0,
+}) {
   // EVERY open PR, whatever its base: one that was paired and no longer is
-  // (retargeted, or its head newly ignored) still carries a comment to close.
+  // (retargeted, or its head newly ignored) may still carry a comment to close.
   const pulls = [...(await api.paginate(`/repos/${repo}/pulls?state=open`))].sort((a, b) => a.number - b.number);
   // Only PRs whose base IS the base are paired: a stack member above the
   // bottom targets its parent's branch. Drafts are paired — most PRs open as
@@ -250,21 +272,35 @@ export async function runOverlap({ api, repo, base, baseSha, config, overlap, cw
     return result;
   }
   const readable = new Set(sides.map((s) => s.number));
-  const stateOf = partnerStates({ api, repo, base, max: maxLookups });
   const ctx = (self) => ({ self, open: new Set(open.keys()) });
+  // First every paired PR's comment, so the partners to confirm are known
+  // before one is asked about, and the sweep below knows whom to visit.
+  const read = [];
   for (const { number: self } of sides) {
     const own = await ownComments({ api, repo, self, tally });
     if (!own) continue;
     const existing = own.at(-1) ?? null;
     const prev = existing ? readComment(existing, ctx(self)) : null;
     if (prev && !prev.trusted) log(`#${self}: the overlap comment's entries did not validate — recomputed from this run`);
-    const plan = planOverlap(prev, await groupsFor(self, { live, prev, open, readable, failed, stateOf }));
+    read.push({ self, own, existing, prev });
+  }
+  const states = await confirmPartners(read.flatMap(({ prev }) => unconfirmed(prev, open)), { api, repo, base, max: maxLookups, seed: lookupSeed });
+  for (const { self, own, existing, prev } of read) {
+    const plan = planOverlap(prev, groupsFor(self, { live, prev, open, readable, failed, states }));
     const body = plan.action === "none" ? null : renderOverlap(plan, { base, baseSha });
     await writePlan({ api, repo, self, plan, existing, extras: own.slice(0, -1), body, dryRun, tally });
   }
-  // The open PRs this run does not pair: a comment one of them still carries
-  // from when it was paired is turned, once, into "no longer checked".
-  for (const { number: self } of pulls.filter((p) => !eligible(p))) {
+  // The open PRs this run does not pair, that a paired PR's comment still
+  // names as a partner: each was paired, overlapping, until now, so its own
+  // comment still says so and is turned, once, into "no longer checked". The
+  // partners' comments drop it in the same run, so the next run visits none —
+  // an unpaired PR nobody names costs no read at all.
+  //
+  // GIVEN UP: a PR whose only partners stop being paired in the same run as
+  // it (two PRs overlapping only each other, both retargeted or both newly
+  // ignored). Nobody paired names either, and both keep their last comment.
+  const named = new Set(read.flatMap(({ prev }) => (prev?.trusted ? prev.groups.map((g) => g.partner) : [])));
+  for (const { number: self } of pulls.filter((p) => !eligible(p) && named.has(p.number))) {
     const own = await ownComments({ api, repo, self, tally });
     if (!own?.length) continue;
     const existing = own.at(-1);
@@ -341,7 +377,9 @@ async function main() {
   const baseSha = revParse(process.env.BASE_SHA || `origin/${base}`) ?? revParse("HEAD");
   if (!repo || !base || !baseSha) throw new Error("needs GITHUB_REPOSITORY, a base branch and a checkout");
   const api = githubClient();
-  const result = await runOverlap({ api, repo, base, baseSha, config, overlap, dryRun: process.env.DRY_RUN === "true" });
+  // The run number rotates which partners are looked up first (confirmPartners).
+  const lookupSeed = Number(process.env.GITHUB_RUN_NUMBER) || 0;
+  const result = await runOverlap({ api, repo, base, baseSha, config, overlap, dryRun: process.env.DRY_RUN === "true", lookupSeed });
   console.log(overlapLogLine(result, { baseSha, stats: api.stats }));
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, overlapSummary(result, { base, baseSha }));
   if (result.tally.paired > 0 && result.tally.skipped.length === result.tally.paired) {
