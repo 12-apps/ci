@@ -1,0 +1,227 @@
+name: Post-merge regeneration (reusable)
+
+# Derive after the merge what every pull request used to derive for itself —
+# an index, a record number, a tightened budget — and land it as ONE
+# squash-merged PR that starts no workflow on the base, so it never deploys.
+# The token-holding halves are .github/actions/post-merge-regen (`prepare`,
+# `land`); this file wires them around the job that runs the caller's command.
+#
+# A consuming repo adds (see CONSUMING.md, "Consuming Post-merge regeneration"):
+#
+#   on:
+#     push:
+#       branches: [main]
+#     workflow_dispatch: {}
+#   permissions:
+#     contents: read
+#   jobs:
+#     regen:
+#       permissions:
+#         contents: write
+#         pull-requests: write
+#       uses: 12-apps/ci/.github/workflows/post-merge-regen.yml@v2
+#       with:
+#         command: node scripts/post-merge-regen.mjs
+#         title: 'chore(docs): regenerate after the merge (#123)'
+#         allow-paths: |
+#           docs/adr/**
+#       secrets:
+#         PR_TOKEN: ${{ secrets.SOME_PAT }}
+#
+# WHY THREE JOBS: the caller's command is repository code, and the PAT belongs
+# to a person. Code that runs in a step can reach every LATER step of its job:
+# it can write .git/config (an fsmonitor or a hook runs on the next git call),
+# rewrite the action's own files on disk, or read a parent process's
+# environment. So the command runs in a job of its own, with a read-only token
+# and no secret, and hands over only a patch. The PAT exists only in `land`,
+# on another runner, in a fresh checkout.
+#
+# RUNNERS: `generate` and `land` must not share a persistent host. Code the
+# command leaves behind on a runner that is reused (a process, a rewritten
+# tool cache or `_actions` copy) would run next to the PAT. Point CI_RUNNER at
+# ephemeral runners only (GitHub-hosted, or a fleet that recycles per job).
+#
+# WHY A PAT AND GITHUB_TOKEN: the PAT pushes the branch and opens the PR, so the
+# consumer's `pull_request` workflows run and its required checks can report.
+# GITHUB_TOKEN enables auto-merge, so the merge is caused by that token — and
+# GitHub starts no workflow run for an event GITHUB_TOKEN causes (except
+# `workflow_dispatch`/`repository_dispatch`): no deploy, no second regeneration.
+
+on:
+  workflow_call:
+    inputs:
+      command:
+        description: 'The shell that regenerates, run at the repository root on the base tip, in a job with a read-only token and no secret.'
+        type: string
+        required: true
+      title:
+        description: 'The PR title and commit header — include what your commit rules demand (a ticket reference).'
+        type: string
+        required: true
+      body:
+        description: 'The PR body and commit body.'
+        type: string
+        required: false
+        default: ''
+      base:
+        description: 'Base branch. Empty: the repository default branch.'
+        type: string
+        required: false
+        default: ''
+      branch-prefix:
+        description: 'Reserved head-branch prefix for regen PRs; the run appends the short sha.'
+        type: string
+        required: false
+        default: 'chore/post-merge-regen-'
+      allow-paths:
+        description: >-
+          Newline-separated globs (`**` spans directories, `*` does not) the
+          regeneration may write. Empty: any path outside `.github/`, which is
+          always refused. A path outside
+          the list turns the run red instead of landing.
+        type: string
+        required: false
+        default: ''
+      commit-author:
+        description: 'The commit author, as "Name <email>". A ruleset that holds "unattributed" commits wants the PAT user here.'
+        type: string
+        required: false
+        default: 'github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>'
+      node-version:
+        description: 'Node version the command and the scripts run on.'
+        type: string
+        required: false
+        default: '24'
+    secrets:
+      PR_TOKEN:
+        description: >-
+          A PAT with contents and pull-requests write. It pushes the regen
+          branch and opens the PR; a PR opened with GITHUB_TOKEN never gets its
+          checks, so it could never merge.
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# One run at a time, across all three jobs, never cancelled: a merge that lands
+# mid-run queues ONE more run (a newer pending one replaces an older), and that
+# run reads the live tip. Two interleaved runs could each close the PR the
+# other just opened. The group is distinct from anything a caller would name
+# its own job's group, so the two can never wait on each other.
+concurrency:
+  group: post-merge-regen-engine-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Pick the tip
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    # `contents: write`: the keep path enables auto-merge, and merges a PR that
+    # is already mergeable, and both need a token that can merge. This job runs
+    # no repository code.
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      action: ${{ steps.prepare.outputs.action }}
+      tip: ${{ steps.prepare.outputs.tip }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - id: prepare
+        uses: 12-apps/ci/.github/actions/post-merge-regen@v2
+        with:
+          mode: prepare
+          base: ${{ inputs.base }}
+          branch-prefix: ${{ inputs.branch-prefix }}
+
+  generate:
+    name: Run the regeneration
+    needs: prepare
+    if: needs.prepare.outputs.action == 'regen'
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    # Read-only, and no secret in this job: the command is repository code.
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.capture.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The consumer's generators may read history (the order records
+          # landed in).
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.tip }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Regenerate
+        shell: bash
+        env:
+          REGEN_COMMAND: ${{ inputs.command }}
+        run: bash -euo pipefail -c "$REGEN_COMMAND"
+      - name: Capture the change
+        id: capture
+        shell: bash
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git diff --cached --binary > "$RUNNER_TEMP/post-merge-regen.patch"
+            git diff --cached --stat
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.capture.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-merge-regen-patch
+          path: ${{ runner.temp }}/post-merge-regen.patch
+          retention-days: 1
+          if-no-files-found: error
+          # A FIXED name: "Re-run failed jobs" re-runs only `land`, and it must
+          # find the patch the earlier, successful `generate` uploaded.
+          # `overwrite` covers a re-run of every job.
+          overwrite: true
+
+  land:
+    name: Open and auto-merge the PR
+    needs: [prepare, generate]
+    # A failed command lands nothing: the superseded PRs stay open with
+    # auto-merge off until the next run replaces them.
+    if: needs.prepare.outputs.action == 'regen' && needs.generate.result == 'success'
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.tip }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - if: needs.generate.outputs.changed == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: post-merge-regen-patch
+          path: ${{ runner.temp }}/post-merge-regen
+      - uses: 12-apps/ci/.github/actions/post-merge-regen@v2
+        with:
+          mode: land
+          base: ${{ inputs.base }}
+          branch-prefix: ${{ inputs.branch-prefix }}
+          tip: ${{ needs.prepare.outputs.tip }}
+          patch: ${{ needs.generate.outputs.changed == 'true' && format('{0}/post-merge-regen/post-merge-regen.patch', runner.temp) || '' }}
+          title: ${{ inputs.title }}
+          body: ${{ inputs.body }}
+          commit-author: ${{ inputs.commit-author }}
+          allow-paths: ${{ inputs.allow-paths }}
+          pr-token: ${{ secrets.PR_TOKEN }}

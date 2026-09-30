@@ -2152,3 +2152,109 @@ A malformed config fails the step naming the file and the reason.
 A sync done by REBASE leaves no merge commit, so the report cannot count it.
 The culprits are candidates: base commits that touched the conflicted file,
 which is not proof they touched the conflicting lines.
+
+---
+
+# Consuming Post-merge regeneration
+
+Everything a repository can derive once a pull request has merged is derived
+ONCE, after the merge, instead of by every pull request. That covers an index
+table, the next record number and a tightened budget. Two open PRs deriving
+the same file conflict at the same line; one job deriving it after both have
+merged does not.
+
+The job runs the caller's `command` on the LIVE tip of the base. When the
+command changes anything, the job opens ONE pull request and squash-merges it
+through auto-merge. The merge starts no workflow on the base, so there is no
+deploy and no second regeneration.
+
+## A. Caller workflow (consumer `.github/workflows/post-merge-regen.yml`)
+
+```yaml
+name: Post-merge regeneration
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  regen:
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: 12-apps/ci/.github/workflows/post-merge-regen.yml@v2
+    with:
+      command: node scripts/post-merge-regen.mjs
+      title: 'chore(docs): regenerate after the merge (#123)'
+      allow-paths: |
+        docs/adr/**
+    secrets:
+      PR_TOKEN: ${{ secrets.SOME_PAT }}
+```
+
+- **`command`** runs at the repository root, on the base tip, in a job of its
+  own. That job has a read-only token and no secret. The command must be
+  idempotent: run it twice on one tree, and the second run changes nothing. It
+  may not change anything under `.github/`, and the land job refuses a patch
+  that does.
+- **`title`** is the PR title and the commit header. Put whatever your commit
+  rules demand in it, such as a ticket reference; the job cannot invent one.
+- **`PR_TOKEN`** is a PAT with contents and pull-requests write. It pushes the
+  branch and opens the PR, so the PR's `pull_request` checks run. A PR opened
+  with `GITHUB_TOKEN` has its runs held for approval and could never merge.
+- **`commit-author`** defaults to github-actions[bot]. If your ruleset holds
+  "unattributed" changes, set it to the PAT's user, because the push is made as
+  that user.
+- **`allow-paths`** (optional) lists the globs the regeneration may write. A
+  path outside the list turns the run red instead of landing with zero
+  approvals. All of `.github/` is always refused, and a file renamed out of it
+  counts as a change to it.
+- **Runners** must be ephemeral. Code the command leaves on a reused host
+  would run next to the PAT in `land`.
+- **Concurrency** is the engine's. The reusable workflow serializes whole runs
+  itself, so do not add a group of your own on the calling job.
+- **`workflow_dispatch`** is how you run it sooner. A regen merge starts
+  nothing, so without a dispatch the next regeneration waits for the next human
+  merge.
+
+## B. The three jobs
+
+1. **`prepare`** runs with `GITHUB_TOKEN` and checks nothing out.
+   - It reads the base tip.
+   - If an open regen PR already covers that tip, it re-arms that PR's
+     auto-merge and stops.
+   - Otherwise, it switches auto-merge OFF on every other open regen PR, then
+     reads the tip again, so a PR that merged in between is included.
+2. **`generate`** runs with read-only contents and no secret. It checks out that
+   tip, runs the command, and uploads `git diff --cached --binary` as an
+   artifact.
+3. **`land`** runs in a fresh checkout of the tip, and git runs there with
+   hooks and fsmonitor off.
+   1. It applies the patch and commits it on `<branch-prefix><sha7>`.
+   2. It pushes and opens a non-draft PR with the PAT. The PAT is sent as an
+      http extraheader, never inside a URL.
+   3. It enables squash auto-merge with `GITHUB_TOKEN`. If the PR is already
+      mergeable, it merges it directly.
+   4. It closes the superseded regen PRs.
+   - A branch left behind by an earlier attempt is reused when its tree matches
+     this regeneration, and refused, by name, when it does not.
+   - With no patch, `land` only closes the superseded PRs.
+
+If the command fails, nothing lands. The superseded PRs stay open with
+auto-merge off until the next run replaces them.
+
+## C. What it asks of the consumer
+
+- **Reserve the prefix.** The job closes any open PR whose head starts with
+  `branch-prefix`.
+- **Allow auto-merge on the repository.** A review-thread-resolution rule
+  still applies to the regen PR, like any other.
+- **Keep the regen PR out of your own automation.** A heal job that merges the
+  base into open PRs should skip the prefix: the job replaces those PRs rather
+  than updating them.
+- **Accept that a regen merge fires no push workflow.** Anything you run on
+  `push` to the base, such as a conflict probe or a heal, sees that commit at
+  the next human merge.
