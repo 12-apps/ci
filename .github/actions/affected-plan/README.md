@@ -44,8 +44,10 @@ behavior-preserving. The cost of that correction needs a new consumer run.
    Computed imports are unbounded. Their owners and dependent tests run, and
    those closures cannot produce reusable per-test hashes.
 
-Type-only imports are not edges — they are erased before any module graph
-exists, so a change cannot travel through one.
+Whole-statement `import type` / `export type` declarations are erased and are
+not runtime edges. Inline-only clauses such as `import { type Foo }` can still
+evaluate the target module (including under Node's TypeScript stripping), so
+they retain a module-evaluation edge even though they bind no runtime value.
 
 ## Failing safe
 

@@ -3,11 +3,10 @@
  *
  * Two decisions here decide whether the selection above it is sound.
  *
- * **Type-only imports are not edges.** `import type { X } from "./y"` is erased
- * by the transform before a bundler or vitest ever builds a module graph, so a
- * change to `y` cannot reach the importer through it. Counting it would widen
- * every selection with edges that do not exist at runtime. The parser therefore
- * classifies each statement and the graph drops the type-only ones.
+ * **Whole-statement type imports are not edges.** `import type { X } from
+ * "./y"` is erased. Inline type bindings, however, can leave a runtime import
+ * of the module even when every binding is erased (Node's TypeScript transform
+ * does this). Such statements retain a conservative side-effect edge.
  *
  * **An unresolvable specifier is not silently dropped.** A bare specifier that
  * is not a known workspace package is external (`react`, a published package)
@@ -237,25 +236,11 @@ export const stripComments = (source) => scan(source).code;
 const lineAt = (source, index) => source.slice(0, index).split("\n").length;
 
 /**
- * Is this `import`/`export` clause type-only?
- *
- * Two spellings erase: the statement form `import type { A } from …`, and the
- * inline form where EVERY named binding carries `type`. A mixed clause
- * (`import { type A, b }`) keeps a value edge, because `b` survives the
- * transform. A default or namespace binding alongside braces is always a value.
+ * Only a whole-statement `import type`/`export type` is certainly erased.
+ * Inline-only clauses can retain module evaluation after their bindings go.
  */
 export function isTypeOnlyClause(clause) {
-  const text = clause.trim();
-  if (/^type\b/.test(text)) return true;
-  const braces = text.match(/\{([\s\S]*)\}/);
-  if (!braces) return false;
-  const beforeBrace = text.slice(0, text.indexOf("{")).replace(/,/g, "").trim();
-  if (beforeBrace) return false; // default/namespace binding is a value
-  const names = braces[1]
-    .split(",")
-    .map((n) => n.trim())
-    .filter(Boolean);
-  return names.length > 0 && names.every((n) => /^type\s/.test(n));
+  return /^type(?:\s+(?=[A-Za-z_$])|\s*(?=[{*]))/.test(clause.trim());
 }
 
 /**
@@ -276,12 +261,12 @@ export function bindingsOf(clause) {
   const bindings = braces[1]
     .split(",")
     .map((n) => n.trim())
-    .filter((n) => n && !/^type\s/.test(n))
+    .filter((n) => n && !/^type\s+(?!as(?:\s|$))/.test(n))
     .map((n) => {
       const [name, local = name] = n.split(/\s+as\s+/).map((part) => part.trim());
       return [name, local];
     });
-  return { names: bindings.map(([name]) => name), bindings, wildcard: hasDefault };
+  return { names: bindings.map(([name]) => name), bindings, wildcard: hasDefault || bindings.length === 0 };
 }
 
 /**
@@ -302,7 +287,7 @@ export function parseImports(rawSource) {
     const line = lineAt(source, index);
     const typeOnly = forceValue ? false : isTypeOnlyClause(clause);
     const { names, wildcard, bindings = [] } = forceValue ? { names: [], wildcard: true } : bindingsOf(clause);
-    out.push({ spec, typeOnly, wildcard, names, bindings, line, position: index, text: (lines[line - 1] ?? "").trim() });
+    out.push({ spec, typeOnly, wildcard, names, bindings, clause, line, position: index, text: (lines[line - 1] ?? "").trim() });
   };
   /**
    * Match `re` where it is CODE, and read the specifier from the code.
@@ -321,11 +306,18 @@ export function parseImports(rawSource) {
   };
   for (const m of inCode(FROM_STATEMENT)) {
     push(m[3], m[2], m.index + m[0].indexOf(m[1]));
-    out[out.length - 1].statement = m[0].slice(m[0].indexOf(m[1]));
+    const record = out[out.length - 1];
+    record.statement = m[0].slice(m[0].indexOf(m[1]));
+    record.start = m.index + m[0].indexOf(m[1]);
+    record.end = record.start + record.statement.length;
   }
   for (const m of inCode(BARE_IMPORT)) {
-    push(m[1], "", m.index, true);
-    out[out.length - 1].statement = m[0].slice(m[0].indexOf("import"));
+    const start = m.index + m[0].indexOf("import");
+    push(m[1], "", start, true);
+    const record = out[out.length - 1];
+    record.statement = m[0].slice(m[0].indexOf("import"));
+    record.start = start;
+    record.end = start + record.statement.length;
   }
   for (const m of inCode(DYNAMIC_CALL)) {
     const literal = LITERAL_ARGUMENT.exec(source.slice(m.index + m[0].length));

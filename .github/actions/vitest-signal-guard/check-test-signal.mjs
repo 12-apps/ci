@@ -106,22 +106,42 @@ export function parseJUnitExecution(xml) {
   const skippedCases = cases.filter(([body]) => /<(?:skipped|disabled)\b/i.test(body)).length;
   let executed = cases.length ? cases.length - skippedCases : totals.tests;
 
-  const root = clean.match(/<testsuites\b[^>]*>/i)?.[0];
-  const summaries = root && /\btests=["']/.test(root)
-    ? [root]
-    : [...clean.matchAll(/<testsuite\b[^>]*>/gi)].map(([tag]) => tag);
-  let excluded = 0;
-  for (const tag of summaries) {
-    for (const attribute of ['skipped', 'disabled']) {
-      const value = tag.match(new RegExp(`\\b${attribute}=["']([^"']*)["']`, 'i'))?.[1];
-      if (value === undefined) continue;
-      if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) return null;
-      excluded += Number(value);
-    }
-  }
+  const excluded = summaryExclusions(clean);
+  if (excluded === null) return null;
   if (!Number.isSafeInteger(totals.tests) || excluded > totals.tests) return null;
   executed = Math.min(executed, totals.tests - excluded);
   return { ...totals, executed };
+}
+
+/**
+ * A root `tests` total does not erase its children's skip evidence. Nested
+ * suite summaries overlap, so take the maximum of a parent's declared count
+ * and its children's sum instead of counting the same skipped case twice.
+ */
+function summaryExclusions(xml) {
+  const stack = [{ name: '', declared: 0, children: 0 }];
+  const close = () => {
+    const current = stack.pop();
+    stack.at(-1).children += Math.max(current.declared, current.children);
+  };
+  for (const [tag, closing, rawName] of xml.matchAll(/<(\/?)(testsuites?)\b[^>]*>/gi)) {
+    const name = rawName.toLowerCase();
+    if (closing) {
+      if (stack.length === 1 || stack.at(-1).name !== name) return null;
+      close();
+      continue;
+    }
+    let declared = 0;
+    for (const attribute of ['skipped', 'disabled']) {
+      const value = tag.match(new RegExp(`\\s${attribute}\\s*=["']([^"']*)["']`, 'i'))?.[1];
+      if (value === undefined) continue;
+      if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) return null;
+      declared += Number(value);
+    }
+    stack.push({ name, declared, children: 0 });
+    if (/\/\s*>$/.test(tag)) close();
+  }
+  return stack.length === 1 ? stack[0].children : null;
 }
 
 /** Every *.xml under `target`, or `[target]` when it is a file. Missing → []. */

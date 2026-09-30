@@ -904,18 +904,21 @@ File-level selection ("does this test load the changed file?") collapses on any
 repo with a shared entry module: the entry is loaded by nearly everything, so
 touching it selects nearly everything — whether or not the code those tests
 execute is different afterwards. Measured on one consumer pull request of 13
-files, the unit lane ran 462 of 761 test files and the integration lane 65 of
-143; at symbol level the same diff needs 125 and 0.
+files, the original implementation reported 462 of 761 unit files versus 125,
+and 65 of 143 integration files versus 0. Those historical counts are not a
+coverage proof or a measurement of the corrected selector.
 
-Two properties do the work: each exported symbol's body is hashed with comments
-stripped, and those hashes are keyed by NAME across the whole diff, so code that
-MOVED with an identical body is recognised as unchanged. An importer is followed
-only when it imports a symbol that actually changed.
+Same-file deferred exports can narrow by the bindings that observe them.
+Literal bytes and module context participate: equal names/bodies in another
+file do not prove relocation harmless. Import rewrites and eager initialization
+propagate through all runtime importers. Resolved dependencies beyond the root
+inventory are followed; unbounded imports widen their owners and dependent
+tests, whose input hashes cannot be reused.
 
-Every uncertainty widens to `mode=full` — an unresolvable import, an unparseable
-declaration, a manifest change, a missing config. Pair it with a full run on the
-default branch; strict PR-time selection is only sound when something
-unconditional runs afterwards.
+Missing configuration or unavailable selection context produces `mode=full`
+with a positive shard count. Other uncertainty widens the affected module;
+unclassified paths stop the plan. Pair it with a full run on the default branch;
+strict PR-time selection still needs that unconditional safety net.
 
 ```yaml
 - uses: 12-apps/ci/.github/actions/fetch-base@v2

@@ -110,13 +110,43 @@ export function exportedSymbols(source) {
   return { symbols, moduleLevel, reexports, ok };
 }
 
-/** Static dependencies include bindings and order, not only their targets. */
+/** Runtime dependencies include binding names and order, not formatting. */
 export function importsChanged(baseSource, headSource) {
   const signature = (source) => JSON.stringify(
-    parseImports(source ?? "").filter((record) => !record.dynamic)
-      .map((record) => record.statement),
+    parseImports(source ?? "").filter((record) => !record.dynamic && !record.typeOnly)
+      .map((record) => {
+        // Tokenize only the clause. The specifier stays byte-exact separately,
+        // and quoted import names remain whole tokens (including whitespace).
+        const tokens = record.clause.match(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[A-Za-z_$][\w$]*|[^\s]/g) ?? [];
+        const brace = tokens.indexOf("{");
+        // bindingsOf already excludes erased inline `type` bindings. Keep any
+        // default binding before the braces, plus every runtime alias pair.
+        const clause = brace === -1 ? tokens : [tokens.slice(0, brace), record.bindings];
+        return [record.statement.startsWith("export") ? "export" : "import", record.spec, clause];
+      }),
   );
   return signature(baseSource) !== signature(headSource);
+}
+
+/**
+ * Dependency declarations are compared above. Remove their recognized spans
+ * before comparing executable module context, so a type-only import or an
+ * import's line wrapping cannot look like a new top-level side effect.
+ * Keep everything after the specifier (such as import attributes) verbatim.
+ */
+function withoutStaticImports(source) {
+  const clean = stripComments(source);
+  const records = parseImports(clean).filter((record) => !record.dynamic);
+  let out = "";
+  let from = 0;
+  for (const record of records) {
+    const suffix = /^[ \t]*;/.exec(clean.slice(record.end));
+    const end = record.end + (suffix?.[0].length ?? 0);
+    out += clean.slice(from, record.start);
+    out += clean.slice(record.start, end).replace(/[^\n]/g, " ");
+    from = end;
+  }
+  return out + clean.slice(from);
 }
 
 /**
@@ -126,14 +156,14 @@ export function importsChanged(baseSource, headSource) {
  * relocation preserves behavior. A new context must be tested by its callers.
  */
 export function affectedExports(baseSource, headSource) {
-  const head = exportedSymbols(headSource);
+  const head = exportedSymbols(withoutStaticImports(headSource));
   if (!head.ok || importsChanged(baseSource, headSource)) return new Set(["*"]);
   if (baseSource === null) {
     if (head.symbols.size === 0 || head.moduleLevel.length > 0) return new Set(["*"]);
     return new Set(head.symbols.keys());
   }
 
-  const base = exportedSymbols(baseSource);
+  const base = exportedSymbols(withoutStaticImports(baseSource));
   if (!base.ok) return new Set(["*"]);
   // Preserve ordering and multiplicity: moving or duplicating a top-level
   // effect can alter behavior even when every individual line already existed.

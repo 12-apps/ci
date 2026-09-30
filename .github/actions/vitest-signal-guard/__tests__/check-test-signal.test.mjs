@@ -180,9 +180,16 @@ test('JUnit tests includes skips: all-skipped summaries provide zero execution',
     '<testsuites tests="3" skipped="3"/>',
     '<testsuite tests="2" skipped="1" disabled="1"/>',
     '<testsuites><testsuite tests="1" skipped="1"/></testsuites>',
+    '<testsuites tests="3"><testsuite tests="3" skipped="3"/></testsuites>',
     '<testsuites tests="1"><testcase name="skip"><skipped/></testcase></testsuites>',
     '<testsuites><testcase name="skip"><skipped/></testcase></testsuites>',
   ]) assert.equal(parseJUnitExecution(xml).executed, 0, xml);
+});
+
+test('parent summaries do not erase or double-count nested skipped summaries', () => {
+  assert.equal(parseJUnitExecution('<testsuites tests="4"><testsuite tests="4" skipped="2"><testsuite tests="2" skipped="1"/><testsuite tests="2" skipped="1"/></testsuite></testsuites>').executed, 2);
+  assert.equal(parseJUnitExecution('<testsuites tests="4" skipped="2"><testsuite tests="2" skipped="1"/><testsuite tests="2" skipped="1"/></testsuites>').executed, 2);
+  assert.equal(parseJUnitExecution('<testsuites tests="4"><testsuite tests="2" skipped="1"/><testsuite tests="2" skipped="2"/></testsuites>').executed, 1);
 });
 
 test('real executed cases count once and never count comments or captured XML', () => {
@@ -210,6 +217,8 @@ test('CLI fails an all-skipped report and passes a report with one executed case
   const skipped = run();
   assert.equal(skipped.status, 1, skipped.stderr);
   assert.match(skipped.stderr, /zero tests/);
+  writeFileSync(join(root, 'report.xml'), '<testsuites tests="3"><testsuite tests="3" skipped="3"/></testsuites>');
+  assert.equal(run().status, 1, 'a root total cannot hide an all-skipped child summary');
   writeFileSync(join(root, 'report.xml'), '<testsuites tests="2" skipped="1"><testcase name="ran"/><testcase name="skip"><skipped/></testcase></testsuites>');
   const ran = run();
   assert.equal(ran.status, 0, ran.stderr);

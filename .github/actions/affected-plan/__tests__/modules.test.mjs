@@ -83,9 +83,9 @@ test("a query suffix selects a transform, not a different module", () => {
   assert.equal(resolveSpecifier(root, "./index.html?raw", "app/x.ts", {}).file, "app/index.html");
 });
 
-test("type-only imports are not edges, mixed clauses are", () => {
+test("whole-statement types erase but inline-only clauses retain module evaluation", () => {
   assert.equal(isTypeOnlyClause(" type { A } "), true);
-  assert.equal(isTypeOnlyClause(" { type A, type B } "), true);
+  assert.equal(isTypeOnlyClause(" { type A, type B } "), false);
   assert.equal(isTypeOnlyClause(" { type A, b } "), false, "`b` survives the transform");
   assert.equal(isTypeOnlyClause(" Thing, { type A } "), false, "a default binding is a value");
 });
@@ -94,6 +94,7 @@ test("bindings name what an importer can observe; wildcards take everything", ()
   assert.deepEqual(bindingsOf(" { a, b as c } ").names, ["a", "b"]);
   assert.equal(bindingsOf(" * as ns ").wildcard, true);
   assert.equal(bindingsOf(" Thing ").wildcard, true, "a default import is opaque here");
+  assert.equal(bindingsOf(" { type A } ").wildcard, true, "erased inline bindings leave a side-effect edge");
 });
 
 test("an import inside a comment is prose, not a dependency", () => {

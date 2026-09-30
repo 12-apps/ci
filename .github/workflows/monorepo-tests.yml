@@ -700,6 +700,7 @@ jobs:
         env:
           FP_CMD: ${{ inputs.unit-fingerprint-command }}
           BASE_SHA: ${{ steps.base.outputs.base-sha }}
+          MERGE_BASE: ${{ steps.base.outputs.merge-base }}
           STACK_BASE_SHA: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.sha || '' }}
           PLAN_CMD: ${{ inputs.unit-plan-command }}
           PLAN_CONFIG: ${{ inputs.affected-plan-config }}
@@ -723,7 +724,7 @@ jobs:
           # NOT `set -e`: every failure here must fall through to an empty
           # fingerprint, which disables the lookup and runs the lane. An
           # optimisation that cannot answer must answer "run it".
-          if [ -z "$EXECUTION_ID" ] || [ -z "$LANE_NODE" ] || [ -z "$BASE_SHA" ]; then
+          if [ -z "$EXECUTION_ID" ] || [ -z "$LANE_NODE" ] || [ -z "$BASE_SHA" ] || [ -z "$MERGE_BASE" ]; then
             echo "::warning::incomplete execution or selection identity — running the lane."
             echo "value=" >> "$GITHUB_OUTPUT"
             exit 0
@@ -744,7 +745,7 @@ jobs:
           fi
           lane="$(printf '%s\0' ci-lane-v2 \
             "$EXECUTION_ID" "$LANE_VARS" "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" "$FP_CMD" \
-            "$BASE_SHA" "$STACK_BASE_SHA" "$PLAN_CMD" "$PLAN_CONFIG" "$config_hash" \
+            "$BASE_SHA" "$MERGE_BASE" "$STACK_BASE_SHA" "$PLAN_CMD" "$PLAN_CONFIG" "$config_hash" \
             | sha256sum | cut -c1-16)"
           echo "value=${lane}-${fp}" >> "$GITHUB_OUTPUT"
           echo "unit lane verdict key: ${lane}-${fp}"
@@ -1626,6 +1627,7 @@ jobs:
         env:
           FP_CMD: ${{ inputs.integration-fingerprint-command }}
           BASE_SHA: ${{ steps.base.outputs.base-sha }}
+          MERGE_BASE: ${{ steps.base.outputs.merge-base }}
           STACK_BASE_SHA: ${{ (inputs.stack-aware && github.event.pull_request.stack != null) && github.event.pull_request.stack.base.sha || '' }}
           PLAN_CMD: ${{ inputs.integration-plan-command }}
           PLAN_CONFIG: ${{ inputs.affected-plan-config }}
@@ -1649,7 +1651,7 @@ jobs:
           # NOT `set -e`: every failure here must fall through to an empty
           # fingerprint, which disables the lookup and runs the lane. An
           # optimisation that cannot answer must answer "run it".
-          if [ -z "$EXECUTION_ID" ] || [ -z "$LANE_NODE" ] || [ -z "$BASE_SHA" ]; then
+          if [ -z "$EXECUTION_ID" ] || [ -z "$LANE_NODE" ] || [ -z "$BASE_SHA" ] || [ -z "$MERGE_BASE" ]; then
             echo "::warning::incomplete execution or selection identity — running the lane."
             echo "value=" >> "$GITHUB_OUTPUT"
             exit 0
@@ -1670,7 +1672,7 @@ jobs:
           fi
           lane="$(printf '%s\0' ci-lane-v2 \
             "$EXECUTION_ID" "$LANE_VARS" "$LANE_NODE" "$LANE_PRE" "$LANE_CMD" "$FP_CMD" \
-            "$BASE_SHA" "$STACK_BASE_SHA" "$PLAN_CMD" "$PLAN_CONFIG" "$config_hash" \
+            "$BASE_SHA" "$MERGE_BASE" "$STACK_BASE_SHA" "$PLAN_CMD" "$PLAN_CONFIG" "$config_hash" \
             | sha256sum | cut -c1-16)"
           echo "value=${lane}-${fp}" >> "$GITHUB_OUTPUT"
           echo "integration lane verdict key: ${lane}-${fp}"
