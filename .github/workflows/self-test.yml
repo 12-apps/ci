@@ -132,6 +132,15 @@ jobs:
         shell: bash
         run: node --test .github/actions/conflict-monitor/__tests__/*.test.mjs
 
+      # Post-merge regeneration over a real bare origin and a stubbed GitHub:
+      # the LIVE tip is regenerated (never the event's sha), auto-merge goes
+      # off on superseded PRs before the second fetch, the PR is opened with
+      # the PAT and auto-merge enabled with GITHUB_TOKEN (the no-deploy
+      # property), and no token reaches the consumer's command.
+      - name: post-merge-regen
+        shell: bash
+        run: node --test .github/actions/post-merge-regen/__tests__/*.test.mjs
+
       # Not an action's tests — the workflow FILES' own shape. A reusable
       # workflow that references an action by a relative path works in every
       # job above (same checkout, same directory) and breaks only in the

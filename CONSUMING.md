@@ -2152,3 +2152,85 @@ A malformed config fails the step naming the file and the reason.
 A sync done by REBASE leaves no merge commit, so the report cannot count it.
 The culprits are candidates: base commits that touched the conflicted file,
 which is not proof they touched the conflicting lines.
+
+---
+
+# Consuming Post-merge regeneration
+
+Everything a repository can derive once a pull request has merged — an index
+table, the next record number, a tightened budget — is derived ONCE, after the
+merge, instead of by every pull request. Two open PRs deriving the same file
+conflict at the same line; one job deriving it after both have merged does not.
+
+The job runs the caller's `command` on the LIVE tip of the base, and when that
+changes anything it opens ONE pull request and squash-merges it through
+auto-merge. The merge starts no workflow on the base: no deploy, no second
+regeneration.
+
+## A. Caller workflow (consumer `.github/workflows/post-merge-regen.yml`)
+
+```yaml
+name: Post-merge regeneration
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  regen:
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: 12-apps/ci/.github/workflows/post-merge-regen.yml@v2
+    with:
+      command: node scripts/post-merge-regen.mjs
+      title: 'chore(docs): regenerate after the merge (#123)'
+    secrets:
+      PR_TOKEN: ${{ secrets.SOME_PAT }}
+```
+
+- **`command`** runs at the repository root, on the base tip, with no token in
+  its environment. It must be idempotent: run twice on one tree, the second run
+  changes nothing.
+- **`title`** is the PR title and the commit header. Put whatever your commit
+  rules demand in it (a ticket reference); the job cannot invent one.
+- **`PR_TOKEN`** is a PAT with contents and pull-requests write. It pushes the
+  branch and opens the PR, so the PR's `pull_request` checks run. A PR opened
+  with `GITHUB_TOKEN` gets its runs held for approval and could never merge.
+- **`workflow_dispatch`** is how you run it sooner. A regen merge starts
+  nothing, so without a dispatch the next regeneration waits for the next human
+  merge.
+
+## B. What the run does, in order
+
+1. It fetches the base tip. If an open regen PR already regenerates exactly
+   that tip, it turns that PR's auto-merge back on and stops.
+2. It turns auto-merge OFF on every other open regen PR.
+3. It fetches the tip again, so a PR that merged before step 2 is included, and
+   runs the command there.
+4. **No change:** it closes the superseded regen PRs and deletes their branches.
+5. **A change:**
+   1. It commits on `<branch-prefix><sha7>` as `commit-author`.
+   2. It pushes that branch and opens a non-draft PR, both with the PAT.
+   3. It enables squash auto-merge with `GITHUB_TOKEN`. If the PR is already
+      clean, it merges it directly.
+   4. It closes the superseded regen PRs.
+
+There is one branch per run because a ruleset may refuse a non-fast-forward
+push to any branch.
+
+## C. What it asks of the consumer
+
+- **Reserve the prefix.** The job closes any open PR whose head starts with
+  `branch-prefix`.
+- **Allow auto-merge on the repository.** A review-thread-resolution rule
+  still applies to the regen PR like any other.
+- **Keep the regen PR out of your own automation.** A heal job that merges the
+  base into open PRs should skip the prefix, because the job replaces those PRs
+  rather than updating them.
+- **Accept that a regen merge fires no push workflow.** Anything you run on
+  `push` to the base, such as a conflict probe or a heal, sees that commit at
+  the next human merge.

@@ -1,0 +1,121 @@
+name: Post-merge regeneration (reusable)
+
+# Derive after the merge what every pull request used to derive for itself —
+# an index, a record number, a tightened budget — and land it as ONE
+# squash-merged PR that starts no workflow on the base, so it never deploys.
+# The mechanism is .github/actions/post-merge-regen (its action.yml and
+# regen.mjs argue the rules); this file is the checkout and the grant around it.
+#
+# A consuming repo adds (see CONSUMING.md, "Consuming Post-merge regeneration"):
+#
+#   on:
+#     push:
+#       branches: [main]
+#     workflow_dispatch: {}
+#   permissions:
+#     contents: read
+#   jobs:
+#     regen:
+#       permissions:
+#         contents: write
+#         pull-requests: write
+#       uses: 12-apps/ci/.github/workflows/post-merge-regen.yml@v2
+#       with:
+#         command: node scripts/post-merge-regen.mjs
+#         title: 'chore(docs): regenerate after the merge (#123)'
+#       secrets:
+#         PR_TOKEN: ${{ secrets.SOME_PAT }}
+#
+# WHY A PAT AND GITHUB_TOKEN: the PAT pushes the branch and opens the PR, so the
+# consumer's `pull_request` workflows run and its required checks can report.
+# GITHUB_TOKEN enables auto-merge, so the merge is caused by that token — and
+# GitHub starts no workflow run for an event GITHUB_TOKEN causes (except
+# `workflow_dispatch`/`repository_dispatch`): no deploy, no second regeneration.
+#
+# WHY `workflow_dispatch` ON THE CALLER: a regen merge starts nothing, so the
+# next regeneration waits for the next human merge. Dispatching is the way to
+# run it sooner.
+
+on:
+  workflow_call:
+    inputs:
+      command:
+        description: 'The shell that regenerates, run at the repository root on the base tip with no token in its env.'
+        type: string
+        required: true
+      title:
+        description: 'The PR title and commit header — include what your commit rules demand (a ticket reference).'
+        type: string
+        required: true
+      body:
+        description: 'The PR body and commit body.'
+        type: string
+        required: false
+        default: ''
+      base:
+        description: 'Base branch. Empty: the repository default branch.'
+        type: string
+        required: false
+        default: ''
+      branch-prefix:
+        description: 'Reserved head-branch prefix for regen PRs; the run appends the short sha.'
+        type: string
+        required: false
+        default: 'chore/post-merge-regen-'
+      commit-author:
+        description: 'The commit author, as "Name <email>".'
+        type: string
+        required: false
+        default: 'github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>'
+      node-version:
+        description: 'Node version the command and the scripts run on.'
+        type: string
+        required: false
+        default: '24'
+    secrets:
+      PR_TOKEN:
+        description: >-
+          A PAT with contents and pull-requests write. It pushes the regen
+          branch and opens the PR; a PR opened with GITHUB_TOKEN never gets its
+          checks, so it could never merge.
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  regen:
+    name: Regenerate and open the PR
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+    # One at a time, never cancelled: a merge that lands mid-run queues ONE
+    # more run, and that run regenerates the newer tip (it fetches the live
+    # tip, never the event's sha — a regen merge starts no run of its own).
+    concurrency:
+      group: post-merge-regen-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The consumer's generators may read history (the order records
+          # landed in); `persist-credentials: false` so the push below is
+          # authenticated by the PAT, not by a stored GITHUB_TOKEN header.
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.base || github.event.repository.default_branch }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - uses: 12-apps/ci/.github/actions/post-merge-regen@v2
+        with:
+          command: ${{ inputs.command }}
+          title: ${{ inputs.title }}
+          body: ${{ inputs.body }}
+          base: ${{ inputs.base }}
+          branch-prefix: ${{ inputs.branch-prefix }}
+          commit-author: ${{ inputs.commit-author }}
+          pr-token: ${{ secrets.PR_TOKEN }}
