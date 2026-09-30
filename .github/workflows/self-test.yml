@@ -260,6 +260,23 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/declared-inputs.test.mjs
 
+      # skip-green decides what a lane does NOT run, so its failure direction
+      # is a green lane on a test nobody executed. The filter may only ever
+      # skip less than the manifest allows, and only a green lane may record;
+      # both are asserted directly, with mutation-checked cases.
+      - name: skip-green
+        shell: bash
+        run: node --test .github/actions/skip-green/__tests__/*.test.mjs
+
+      # Where skip-green filters (the plan job, before the matrix, before the
+      # plan upload) and records (the verdict job, after the matrix). Both are
+      # placement rules whose wrong answer is silent — a filter after the
+      # upload rewrites a document nobody runs, a record inside a shard makes a
+      # lane-level claim a shard did not earn.
+      - name: skip-green wiring
+        shell: bash
+        run: node --test .github/workflows/__tests__/skip-green-wiring.test.mjs
+
       # The cost report's own script, lifted out of cost-report.yml and run
       # against a fake GitHub. Its failure is a number that looks right: with the
       # jobs on the self-hosted fleet it read "$0.00" for runs that cost real AWS
