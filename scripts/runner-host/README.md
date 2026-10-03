@@ -82,6 +82,28 @@ GITHUB_TOKEN=… node scripts/runner-host/usage-report.mjs --repo owner/name --s
   [--until …] [--label future-pay-ci] [--slots 2] [--idle-minutes 2]
 ```
 
+### The week on one page
+
+`daily-report.mjs` is what the daily CI-monitor routine runs: the last N UTC
+days of merges, PR pushes, CI cost (account − Tax − Route 53 − a baseline,
+with the AWS category breakdown and the tagged fleet cost beside it), cost per
+merge and per push, per-job p50 / IO wait / disk MiB/s and the paid slot-time
+split over a sampled window of hours (one log read per job, so a whole week of
+whole days would spend a token's hourly allowance), every full suite
+dispatched, the disk each region's launch template hands a host with the
+default-version changes CloudTrail saw, and the readings that look wrong:
+
+```bash
+GITHUB_TOKEN=… node scripts/runner-host/daily-report.mjs --repo owner/name \
+  [--days 7] [--until YYYY-MM-DD] [--window 14-17] [--regions …] [--template …] \
+  [--budget 100] [--baseline 0.69] [--out dir] [--pdf]
+```
+
+It writes `report.json`, `report.html` and, with `--pdf`, `report.pdf` through
+a headless Chromium, and prints one finding per line. Needs
+`ce:GetCostAndUsage`, `ec2:DescribeLaunchTemplateVersions` and
+`cloudtrail:LookupEvents`.
+
 ### What each workflow and lane costs, in USD
 
 `fleet-cost.mjs` turns the same jobs into dollars. It rebuilds every host's

@@ -273,7 +273,7 @@ async function pool(items, n, fn) {
   return out;
 }
 
-async function collect({ repo, since, until, label }) {
+export async function collect({ repo, since, until, label }) {
   const runs = [];
   for (let page = 1; ; page++) {
     const r = await gh(`/repos/${repo}/actions/runs?created=${since}..${until}&per_page=100&page=${page}`);
