@@ -31,7 +31,8 @@ on:
       #   rate   0.1045 / 0.61 / 60 = $0.0029 per job-minute
       # Egress is left out: a job downloads far more than it uploads, and
       # inbound traffic is free. Re-measure when the fleet's types, disk or
-      # slots change.
+      # slots change: scripts/runner-host/fleet-cost.mjs prints the measured
+      # all-in rate per job-minute, ready to pass as the caller's runner-rates.
       runner-rates:
         description: >-
           JSON map of runner class -> USD per minute. Keys are matched
@@ -67,6 +68,18 @@ on:
         type: number
         required: false
         default: 5
+      lane-rules:
+        description: >-
+          Optional JSON array of `{"lane": "...", "match": "<regex>"}` rules,
+          tried in order against each job's group, `<workflow> / <job>` with
+          every number folded to `#` (`CI / Tests / Unit Tests · shard #/#`),
+          case insensitive. When set, the comment adds a per-lane table; jobs no
+          rule matches are `other`. Empty (the default) leaves the comment as
+          it was. The same rules drive scripts/runner-host/fleet-cost.mjs, so
+          a lane means the same thing in the PR comment and the daily report.
+        type: string
+        required: false
+        default: ''
     outputs:
       billed-minutes:
         description: 'Cumulative billed minutes across every workflow run on this PR.'
@@ -107,6 +120,7 @@ jobs:
           COMMENT_MARKER: ${{ inputs.comment-marker }}
           REPORT_TITLE: ${{ inputs.title }}
           MAX_RUN_PAGES: ${{ inputs.max-run-pages }}
+          LANE_RULES: ${{ inputs.lane-rules }}
         with:
           script: |
             const marker = process.env.COMMENT_MARKER;
@@ -127,6 +141,34 @@ jobs:
             }
             const prNumber = pr.number;
             const headRef = pr.head.ref;
+
+            // Lanes are optional; a rule that does not parse fails the job
+            // rather than posting a table that silently files everything
+            // under `other`.
+            let laneOf = null;
+            if ((process.env.LANE_RULES ?? '').trim()) {
+              try {
+                const rules = JSON.parse(process.env.LANE_RULES);
+                if (!Array.isArray(rules)) throw new Error('not an array');
+                const compiled = rules.map((r, i) => {
+                  if (typeof r?.lane !== 'string' || typeof r?.match !== 'string') {
+                    throw new Error(`rule ${i} needs a string "lane" and a string "match"`);
+                  }
+                  return { lane: r.lane, re: new RegExp(r.match, 'i') };
+                });
+                laneOf = (group) => compiled.find((r) => r.re.test(group))?.lane ?? 'other';
+              } catch (e) {
+                core.setFailed(`lane-rules is not a valid rule list: ${e.message}`);
+                return;
+              }
+            }
+            // A job's group, as fleet-cost.mjs › costGroup: `<workflow> / <job>`
+            // with every standalone number folded (`E2E` stays), so
+            // `Unit Tests · shard 3/4` and `Unit Tests · shard 1/4` are one line,
+            // and a commit in a run-name folds to `<sha>`.
+            const groupOf = (workflow, name) =>
+              `${workflow ?? ''} / ${name ?? ''}`.replace(/\b[0-9a-f]{40}\b/g, '<sha>').replace(/\b\d+\b/g, '#');
+            const lanes = new Map(); // lane -> { jobs, raw, cost, unpriced }
 
             let rates;
             try {
@@ -237,6 +279,7 @@ jobs:
                 per_page: 100,
               });
               const billable = {};
+              const ran = [];
               for (const j of jobs) {
                 // A skipped job never occupies a runner and is never billed.
                 // A job still running has no completed_at; counting a partial
@@ -263,10 +306,11 @@ jobs:
                 // inverted) for a very short job, and a bare ceil() would score
                 // that as free.
                 billable[label].job_runs.push({ job_id: j.id, duration_ms: Math.max(ms, 1) });
+                ran.push({ label, ms, group: groupOf(run.name, j.name) });
               }
               // Flagged so the comment can say which runs were reconstructed
               // rather than read from the billing endpoint.
-              return { billable, derived: true };
+              return { billable, derived: true, ran };
             };
 
             const totalMsOf = (t) =>
@@ -284,6 +328,21 @@ jobs:
               let timing;
               try {
                 timing = await usageFromJobs(run);
+                // Lanes always come from the jobs themselves: the billing
+                // endpoint has no job names.
+                if (laneOf) {
+                  for (const r of timing.ran) {
+                    const rate = rateFor(r.label);
+                    const min = (perSecond(r.label) ? r.ms : Math.ceil(Math.max(r.ms, 1) / 60000) * 60000) / 60000;
+                    const lane = laneOf(r.group);
+                    const t = lanes.get(lane) ?? { jobs: 0, raw: 0, cost: 0, unpriced: false };
+                    t.jobs += 1;
+                    if (rate === null) t.unpriced = true;
+                    t.raw += r.ms / 60000;
+                    t.cost += min * (rate ?? 0);
+                    lanes.set(lane, t);
+                  }
+                }
                 if (!inFlight) {
                   // Prefer the authoritative billed figure — but only if it has
                   // one. An all-zero response means "not reported", not "free".
@@ -435,6 +494,27 @@ jobs:
               );
             }
             lines.push('', '</details>', '');
+            if (laneOf && lanes.size) {
+              lines.push(
+                '<details><summary>Per lane</summary>',
+                '',
+                '| Lane | Jobs | Wall-clock min | Est. cost |',
+                '|---|---:|---:|---:|',
+              );
+              for (const [lane, t] of [...lanes.entries()].sort((a, b) => b[1].cost - a[1].cost)) {
+                // Unpriced is never shown as free (see rateFor).
+                const cost = t.unpriced ? `${money(t.cost)} + unpriced` : money(t.cost);
+                lines.push(`| ${String(lane).replace(/\\/g, '\\\\').replace(/\|/g, '\\|')} | ${t.jobs} | ${mins(t.raw)} | ${cost} |`);
+              }
+              lines.push(
+                '',
+                'Lanes are priced from each job\'s start and end times, so where the ' +
+                  'billing endpoint answered for a run the Total above can differ slightly.',
+                '',
+                '</details>',
+                '',
+              );
+            }
 
             // Every caveat that would otherwise make this number quietly wrong.
             const notes = [
