@@ -164,8 +164,10 @@ jobs:
             }
             // A job's group, as fleet-cost.mjs › costGroup: `<workflow> / <job>`
             // with every standalone number folded (`E2E` stays), so
-            // `Unit Tests · shard 3/4` and `Unit Tests · shard 1/4` are one line.
-            const groupOf = (workflow, name) => `${workflow ?? ''} / ${name ?? ''}`.replace(/\b\d+\b/g, '#');
+            // `Unit Tests · shard 3/4` and `Unit Tests · shard 1/4` are one line,
+            // and a commit in a run-name folds to `<sha>`.
+            const groupOf = (workflow, name) =>
+              `${workflow ?? ''} / ${name ?? ''}`.replace(/\b[0-9a-f]{40}\b/g, '<sha>').replace(/\b\d+\b/g, '#');
             const lanes = new Map(); // lane -> { jobs, raw, cost, unpriced }
 
             let rates;

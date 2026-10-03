@@ -62,7 +62,7 @@ test("rules that do not parse fail the job instead of posting a wrong table", as
 
 test("the comment groups a job exactly as fleet-cost.mjs does, so one rule means one lane in both", async () => {
   const { costGroup } = await import("../../../scripts/runner-host/fleet-cost.mjs");
-  const names = ["Tests / Unit Tests · shard 3/4", "SPA E2E (3)", "Gherkin Journeys · shard 1/2", "Lint"];
+  const names = ["Tests / Unit Tests · shard 3/4", "SPA E2E (3)", "Gherkin Journeys · shard 1/2", "Lint", `Smoke @ ${"a1".repeat(20)}`];
   const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const exact = JSON.stringify(names.map((n, i) => ({ lane: `l${i}`, match: `^${escape(costGroup("CI", n))}$` })));
   const { body } = await report({ laneRules: exact, runs: [run(2)], jobs: { 2: names.map((n, i) => named(i + 1, 60, n)) } });

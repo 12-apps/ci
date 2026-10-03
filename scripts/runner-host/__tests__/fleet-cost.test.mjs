@@ -64,6 +64,7 @@ test("a cost group folds every number: shards, matrix legs and a PR-named workfl
   assert.equal(costGroup("Code Quality: PR #2123", "Analyze (javascript-typescript)"), "Code Quality: PR ## / Analyze (javascript-typescript)");
   assert.equal(costGroup("CI", "Lint"), "CI / Lint");
   assert.equal(costGroup("CI", "SPA E2E (3)"), "CI / SPA E2E (#)", "a digit inside a word is part of the name");
+  assert.equal(costGroup(`Post-CD Tests — prod @ ${"a1".repeat(20)}`, "Smoke"), "Post-CD Tests — prod @ <sha> / Smoke");
 });
 
 test("lanes: first matching rule wins, unmatched is other, a bad rule is refused", () => {
@@ -352,4 +353,17 @@ test("collection reads the day before `since`, and every log of a lifetime with 
   } finally {
     globalThis.fetch = saved;
   }
+});
+
+test("the counts the report prints are the window's, not the day collected before it", () => {
+  const before = { ...job("us-east-2a-ip-10-0-0-7", 1, 0, 0), started_at: "2026-09-28T10:00:00Z", completed_at: "2026-09-28T10:10:00Z" };
+  const r = report([job(H, 1, 0, 10), before], {
+    costs: ce({ "2026-09-29": { "us-east-2": 1 } }), since: "2026-09-29", until: "2026-09-29",
+  });
+  assert.equal(r.jobs, 1);
+  assert.equal(r.hosts, 1);
+  const edge = { ...job("us-east-2b-ip-10-0-0-8", 1, 0, 0), started_at: "2026-09-29T00:00:00Z", completed_at: "2026-09-29T00:00:00Z" };
+  const e = report([edge], { costs: ce({ "2026-09-29": { "us-east-2": 1 } }), since: "2026-09-29", until: "2026-09-29" });
+  assert.equal(e.jobs, 1, "a zero-length job at the window's first instant is in the header and the tables alike");
+  assert.equal(rollup(e.rows, ["lane"])[0].jobs, 1);
 });

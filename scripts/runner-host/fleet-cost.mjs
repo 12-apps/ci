@@ -76,7 +76,9 @@ const DAY = 86_400_000;
  * folds the same way, so a lane rule means the same in both.
  */
 export function costGroup(workflow, name) {
-  return `${workflow ?? ""} / ${name ?? ""}`.replace(/\b\d+\b/g, "#");
+  // A run-name may carry the commit it ran for (`Post-CD Tests — prod @ <sha>`);
+  // folded too, or every deploy is a group of its own.
+  return `${workflow ?? ""} / ${name ?? ""}`.replace(/\b[0-9a-f]{40}\b/g, "<sha>").replace(/\b\d+\b/g, "#");
 }
 
 /**
@@ -677,13 +679,20 @@ export function report(jobs, { costs, spot, untagged, lanes, since, until, idleM
   const result = attribute(pieces, costsByDayRegion(costs), { lane: compileLanes(lanes), days });
   const history = Array.isArray(spot) ? spot.flatMap((x) => x.SpotPriceHistory ?? [x]) : spot?.SpotPriceHistory;
   const bottom = spot ? bottomUp(hosts, spotPricer(history), { types }) : null;
+  // The collection reaches a day before the window (a run created then has
+  // jobs in it); the counts printed are the window's alone.
+  const from = Date.parse(`${since}T00:00:00Z`);
+  const to = Date.parse(`${until}T00:00:00Z`) + DAY;
+  // `>=`: a zero-length job at the window's first instant has a piece in it.
+  const inWindow = hosts.filter((h) => h.end >= from && h.start < to);
+  const windowJobs = fleet.filter((j) => j.end >= from && j.start < to);
   return {
     ...result,
-    hosts: hosts.length,
-    hostsWithBoot: hosts.filter((h) => h.startKnown).length,
+    hosts: inWindow.length,
+    hostsWithBoot: inWindow.filter((h) => h.startKnown).length,
     startupMs,
-    jobs: fleet.length,
-    unknownRegionJobs: fleet.filter((j) => j.region === "unknown").length,
+    jobs: windowJobs.length,
+    unknownRegionJobs: windowJobs.filter((j) => j.region === "unknown").length,
     bottom: bottom?.byDayRegion,
     unpricedHours: bottom?.unpricedHours ?? 0,
     untagged: untagged ? untaggedByDay(untagged) : null,
