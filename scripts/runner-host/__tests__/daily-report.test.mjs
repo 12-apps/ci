@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { anomalies, category, costByDay, offHours, reduceUsage, regionOf, renderHtml, taggedByDay, windowDays } from "../daily-report.mjs";
+import { anomalies, category, disksInEffect, costByDay, offHours, reduceUsage, regionOf, renderHtml, taggedByDay, windowDays } from "../daily-report.mjs";
 
 // The report is read as a phone notification and turned into tickets. A day
 // off by one, a cost filed under the wrong category or a rule that never fires
@@ -69,33 +69,34 @@ test("a quiet week inside the budget flags nothing", () => {
   assert.deepEqual(keys(r), []);
 });
 
-test("the rules fire on the week of 2026-09-26: run rate, spot growth, IOPS, disk change, night dispatches", () => {
+test("the rules fire on the week of 2026-09-26: run rate, spot growth, IOPS, disk raise, night dispatches", () => {
   const spot = [5.7, 6, 6.5, 6, 17, 18, 18.9];
   const dates = windowDays("2026-10-03", 7);
   const days = spot.map((s, i) =>
     day(dates[i], {
-      cost: { ci: s + 5, categories: { spot: s, "ebs-iops": i === 5 ? 1.2 : 0 } },
+      cost: { ci: s + 5, categories: { spot: s, "ebs-iops": i === 4 ? 1.2 : 0 } },
       perPush: i === 2 ? 0.6 : 0.2,
       usage: {
-        jobs: [{ group: "CI / Unit", runs: 30, p50: i === 6 ? 5 : 3, ioWaitP95: 20, mibpsP95: i === 5 ? 340 : 240, oom: 0 }],
+        jobs: [{ group: "CI / Unit", runs: 30, p50: i === 6 ? 5 : 3, ioWaitP95: 20, mibpsP95: i === 4 ? 340 : 240, oom: 0 }],
         idle: { paidHours: i === 5 ? 320 : 150, runningHours: i === 5 ? 100 : 75, runningShare: i === 5 ? 0.31 : 0.5, shares: {} },
       },
     }),
   );
+  // 3000/250 from before the window; raised on the last day.
   const changes = [
-    { at: "2026-09-30T15:50:53Z", version: 15, by: "refresh", disk: { iops: 3000, throughput: 250 }, previousDisk: { iops: 6000, throughput: 500 } },
-    { at: "2026-09-30T17:13:38Z", version: 16, by: "provisioner", disk: { iops: 6000, throughput: 500 }, previousDisk: { iops: 3000, throughput: 250 } },
+    { at: "2026-09-25T15:50:53Z", version: 15, by: "refresh", disk: { iops: 3000, throughput: 250 }, previousDisk: { iops: 6000, throughput: 500 } },
+    { at: "2026-10-02T17:13:38Z", version: 16, by: "provisioner", disk: { iops: 6000, throughput: 500 }, previousDisk: { iops: 3000, throughput: 250 } },
   ];
   const dispatches = [1, 2, 3].map((i) => ({ id: i, branch: "ci/hang", actor: "a", started: `2026-10-02T0${i + 2}:44:00Z`, conclusion: "failure", jobMinutes: 240, wallMinutes: 60 }));
-  const found = keys({ days, templates: [tpl("us-east-1"), tpl("eu-north-1", 3000, 250, changes)], dispatches });
+  const found = keys({ days, templates: [tpl("us-east-1"), tpl("eu-north-1", 6000, 500, changes)], dispatches });
   for (const k of [
     "ticket:budget",
     "ticket:per-push-2026-09-28",
     "ticket:growth-spot",
-    "ticket:iops-2026-10-01",
+    "ticket:iops-unprovisioned",
     "ticket:throughput-above-template",
-    "ticket:template-disk-changed",
-    "ticket:utilization-2026-10-01",
+    "ticket:template-disk-raised",
+    "ticket:utilization",
     "watch:slot-hours-2026-10-01",
     "watch:slower-jobs",
     "ticket:night-dispatch",
@@ -104,6 +105,32 @@ test("the rules fire on the week of 2026-09-26: run rate, spot growth, IOPS, dis
     assert.ok(found.includes(k), `${k} missing from ${found.join(", ")}`);
   }
   assert.ok(found.indexOf("watch:slower-jobs") > found.indexOf("ticket:budget"), "tickets come first");
+});
+
+test("a disk the template provisioned that day explains its IOPS and throughput", () => {
+  const changes = [
+    { at: "2026-09-25T00:00:00Z", version: 1, by: "x", disk: { iops: 3000, throughput: 250 }, previousDisk: { iops: 3000, throughput: 125 } },
+    { at: "2026-10-01T17:13:00Z", version: 2, by: "x", disk: { iops: 6000, throughput: 500 }, previousDisk: { iops: 3000, throughput: 250 } },
+    { at: "2026-10-02T18:06:00Z", version: 3, by: "x", disk: { iops: 3000, throughput: 250 }, previousDisk: { iops: 6000, throughput: 500 } },
+  ];
+  const t = [tpl("eu-north-1", 3000, 250, changes)];
+  assert.deepEqual(disksInEffect(t, "2026-09-30").map((d) => d.iops), [3000]);
+  assert.deepEqual(disksInEffect(t, "2026-10-01").map((d) => d.iops), [3000, 6000]);
+  assert.deepEqual(disksInEffect(t, "2026-10-02").map((d) => d.iops), [6000, 3000]);
+  assert.equal(disksInEffect([tpl("x", 3000, 250, [changes[1]].map((c) => ({ ...c, previousDisk: null })))], "2026-09-30"), null, "unknown before the first change");
+  const d = day("2026-10-02", { cost: { ci: 1, categories: { "ebs-iops": 2 } }, usage: { jobs: [{ group: "g", runs: 9, mibpsP95: 480 }], idle: { paidHours: 0 } } });
+  const found = keys({ days: [d], templates: t, dispatches: [] });
+  assert.ok(!found.includes("ticket:iops-unprovisioned") && !found.includes("ticket:throughput-above-template"), found.join(", "));
+  assert.ok(found.includes("ticket:template-disk-raised"));
+});
+
+test("weekend per-push cost and egress that already stopped are not findings", () => {
+  const dates = windowDays("2026-10-03", 7);
+  const days = dates.map((d, i) =>
+    day(d, { pushes: i < 2 ? 70 : 190, perPush: i < 2 ? 0.3 : 0.12, cost: { ci: 20, categories: { spot: 15, egress: i < 4 ? 8 : 0 } } }),
+  );
+  const found = keys({ days, templates: [tpl("us-east-1")], dispatches: [] });
+  assert.ok(!found.some((k) => k.startsWith("ticket:per-push") || k === "ticket:egress"), found.join(", "));
 });
 
 test("regions handing out different disks is drift", () => {

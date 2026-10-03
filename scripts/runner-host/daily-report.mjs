@@ -129,6 +129,30 @@ export const offHours = (iso, { offset = -3, from = 22, to = 7 } = {}) => {
 // ── the rules ───────────────────────────────────────────────────────────────
 
 /**
+ * The disks the regions' templates handed out at any moment of `day`, from
+ * each template's default-version changes; null when a template changed
+ * inside the window and nothing says what it handed out before the first
+ * change.
+ */
+export function disksInEffect(templates, day) {
+  const from = `${day}T00:00:00Z`;
+  const to = `${day}T23:59:59Z`;
+  const out = [];
+  for (const t of templates) {
+    const changes = t.changes ?? [];
+    if (!changes.length) {
+      if (t.disk) out.push(t.disk);
+      continue;
+    }
+    const before = changes.filter((c) => c.at < from).pop();
+    const start = before ? before.disk : changes[0].previousDisk;
+    if (!start) return null;
+    out.push(start, ...changes.filter((c) => c.at >= from && c.at <= to && c.disk).map((c) => c.disk));
+  }
+  return out;
+}
+
+/**
  * What looks wrong. `r` is the report (see `main`). Each finding:
  * { severity: "ticket" | "watch", key, title, evidence }.
  */
@@ -152,11 +176,13 @@ export function anomalies(r, { budget = 100, offset = -3 } = {}) {
     }
   }
 
-  // 2. A day that cost far more per push than the week.
+  // 2. A day that cost far more per push than the week. Quiet days (weekends)
+  // carry the fixed cost over few pushes, so only busy days count.
   const perPush = days.map((d) => d.perPush);
   const mPush = median(perPush);
+  const busy = 0.6 * (median(days.map((d) => d.pushes)) ?? 0);
   for (const d of days) {
-    if (mPush && d.perPush > 1.5 * mPush && d.pushes >= 20) {
+    if (mPush && d.perPush > 1.5 * mPush && d.pushes >= Math.max(20, busy)) {
       add("ticket", `per-push-${d.day}`, `${d.day} cost ${money(d.perPush)} per push`, `week median ${money(mPush)}; ${d.pushes} pushes, CI ${money(d.cost.ci)}`);
     }
   }
@@ -174,34 +200,45 @@ export function anomalies(r, { budget = 100, offset = -3 } = {}) {
     }
   }
 
-  // 4. Provisioned disk performance billed above what the templates provision.
-  const maxIops = Math.max(0, ...r.templates.map((t) => t.disk?.iops ?? 0));
-  const maxTp = Math.max(0, ...r.templates.map((t) => t.disk?.throughput ?? 0));
+  // 4. Disk performance billed or measured above what any template in effect
+  // that day provisioned. A day whose template history is unknown is skipped.
+  const iopsDays = [];
+  const fastDays = [];
   for (const d of days) {
+    const disks = disksInEffect(r.templates, d.day);
+    if (!disks) continue;
+    const maxIops = Math.max(0, ...disks.map((x) => x.iops ?? 0));
+    const maxTp = Math.max(0, ...disks.map((x) => x.throughput ?? 0));
     const iops = d.cost?.categories?.["ebs-iops"] ?? 0;
-    if (iops > 0.1 && maxIops <= 3000) {
-      add("ticket", `iops-${d.day}`, `${d.day}: ${money(iops)} of provisioned IOPS while every template provisions ${maxIops}`, "gp3 bills IOPS only above 3000: some host ran on a disk no current template describes");
-    }
+    if (iops > 0.1 && maxIops <= 3000) iopsDays.push(`${d.day.slice(5)} ${money(iops)}`);
+    // 25% of slack: the probe samples one-second peaks, and on a 250 MiB/s
+    // volume busy days read 270–290 at the p95 with no host on another disk.
+    const fast = (d.usage?.jobs ?? []).filter((j) => j.runs >= 5 && maxTp && j.mibpsP95 > maxTp * 1.25);
+    if (fast.length) fastDays.push(`${d.day.slice(5)} ${fast.length} jobs above ${maxTp} (max ${Math.max(...fast.map((j) => j.mibpsP95))} MiB/s)`);
   }
-  const tooFast = days.flatMap((d) => (d.usage?.jobs ?? []).filter((j) => j.runs >= 5 && j.mibpsP95 > maxTp * 1.1).map((j) => `${d.day.slice(5)} ${j.group} ${j.mibpsP95} MiB/s`));
-  if (maxTp && tooFast.length) {
-    add("ticket", "throughput-above-template", `Jobs read faster than the ${maxTp} MiB/s the templates provision`, tooFast.slice(0, 6).join("; "));
-  }
+  if (iopsDays.length) add("ticket", "iops-unprovisioned", "Provisioned IOPS billed on days no template provisioned over 3000", `${iopsDays.join(", ")}; gp3 bills IOPS only above 3000, so some host ran on a disk no template in effect describes`);
+  if (fastDays.length) add("ticket", "throughput-above-template", "Jobs read faster than the templates in effect provision", fastDays.join("; "));
 
   // 5. Template changes and drift between regions.
   const disks = new Set(r.templates.map((t) => (t.disk ? `${t.disk.iops}/${t.disk.throughput}/${t.disk.size}` : "none")));
   if (disks.size > 1) add("ticket", "template-drift", "Regions hand hosts different disks", r.templates.map((t) => `${t.region} ${t.disk ? `${t.disk.iops}/${t.disk.throughput}` : "no template"}`).join("; "));
   const changes = r.templates.flatMap((t) => (t.changes ?? []).map((c) => ({ ...c, region: t.region })));
-  const diskChanges = changes.filter((c) => c.disk && c.previousDisk && (c.disk.iops !== c.previousDisk.iops || c.disk.throughput !== c.previousDisk.throughput));
-  if (diskChanges.length) {
-    add("ticket", "template-disk-changed", "A template's default disk changed inside the window", diskChanges.map((c) => `${c.region} ${c.at} v${c.version} ${c.previousDisk.iops}/${c.previousDisk.throughput} → ${c.disk.iops}/${c.disk.throughput} by ${c.by}`).join("; "));
+  // A raise costs money on every host from then on; a cut is the usual,
+  // deliberate direction and only shows in the table.
+  const raised = changes.filter((c) => c.disk && c.previousDisk && ((c.disk.iops ?? 0) > (c.previousDisk.iops ?? 0) || (c.disk.throughput ?? 0) > (c.previousDisk.throughput ?? 0)));
+  if (raised.length) {
+    const fmt = (c) => {
+      const back = changes.find((x) => x.region === c.region && x.at > c.at && x.disk && x.disk.iops === c.previousDisk.iops && x.disk.throughput === c.previousDisk.throughput);
+      return `${c.region} ${c.at.slice(0, 16)}Z v${c.version} ${c.previousDisk.iops}/${c.previousDisk.throughput} → ${c.disk.iops}/${c.disk.throughput} by ${c.by}${back ? `, back at ${back.at.slice(0, 16)}Z` : ", still in effect"}`;
+    };
+    add("ticket", "template-disk-raised", "A template's default disk was raised inside the window", raised.map(fmt).join("; "));
   }
 
   // 6. Paid slot time that ran no job.
   const util = days.filter((d) => d.usage?.idle?.paidHours > 0);
-  for (const d of util) {
-    const u = d.usage.idle;
-    if (u.runningShare < 0.35) add("ticket", `utilization-${d.day}`, `${d.day}: ${(100 * u.runningShare).toFixed(0)}% of paid slot time ran a job`, `${u.paidHours.toFixed(1)} paid slot-hours, ${u.runningHours.toFixed(1)} running, in the sampled window`);
+  const low = util.filter((d) => d.usage.idle.runningShare < 0.35);
+  if (low.length) {
+    add("ticket", "utilization", `Under 35% of paid slot time ran a job on ${low.length} day(s)`, low.map((d) => `${d.day.slice(5)} ${(100 * d.usage.idle.runningShare).toFixed(0)}% of ${d.usage.idle.paidHours.toFixed(0)} slot-h`).join(", ") + " (sampled window)");
   }
   const perJobHour = util.map((d) => d.usage.idle.paidHours / Math.max(d.usage.idle.runningHours, 0.1));
   const mRatio = median(perJobHour);
@@ -245,14 +282,39 @@ export function anomalies(r, { budget = 100, offset = -3 } = {}) {
     if (xs.length >= 3) add("ticket", `dispatch-loop-${k}`, `${xs.length} full suites on ${k}`, `${red} red; ${Math.round(xs.reduce((a, x) => a + x.jobMinutes, 0))} job-min`);
   }
 
-  // 10. On-demand fallback, egress and NAT.
-  for (const d of days) {
+  // 10. On-demand fallback, egress and NAT — only while it is still happening
+  // (any of the last three days); one that stopped earlier is in the table.
+  const recent = days.slice(-3);
+  const od = recent.filter((d) => {
     const c = d.cost?.categories ?? {};
     const compute = (c.spot ?? 0) + (c["on-demand"] ?? 0);
-    if (compute > 1 && (c["on-demand"] ?? 0) > 0.15 * compute) add("ticket", `on-demand-${d.day}`, `${d.day}: on-demand was ${money(c["on-demand"])} of ${money(compute)} compute`, "the fleet asks for spot; on-demand is the fallback");
-    const net = (c.egress ?? 0) + (c.nat ?? 0);
-    if (net > 1) add("ticket", `egress-${d.day}`, `${d.day}: ${money(net)} of egress and NAT`, "cache and registry traffic should stay inside the region");
+    return compute > 1 && (c["on-demand"] ?? 0) > 0.15 * compute;
+  });
+  if (od.length) add("ticket", "on-demand", "On-demand over 15% of compute", `${od.map((d) => `${d.day.slice(5)} ${money(d.cost.categories["on-demand"])}`).join(", ")}; the fleet asks for spot, on-demand is the fallback`);
+  const net = recent.filter((d) => (d.cost?.categories?.egress ?? 0) + (d.cost?.categories?.nat ?? 0) > 1);
+  if (net.length) add("ticket", "egress", "Egress and NAT over $1 a day", `${net.map((d) => `${d.day.slice(5)} ${money((d.cost.categories.egress ?? 0) + (d.cost.categories.nat ?? 0))}`).join(", ")}; cache and registry traffic should stay inside the region`);
+
+  // 11. The daily full suite red day after day (the suite routine owns the
+  // ticket; the cost here is every red run re-dispatched).
+  let streak = 0;
+  const mainDays = [...new Set(r.dispatches.filter((x) => x.branch === "main").map((x) => x.started.slice(0, 10)))].sort();
+  for (const d of mainDays.reverse()) {
+    if (r.dispatches.filter((x) => x.branch === "main" && x.started.startsWith(d)).some((x) => x.conclusion === "success")) break;
+    streak++;
   }
+  const firstRed = (() => {
+    let run = [];
+    for (const d of [...mainDays].sort()) {
+      const ok = r.dispatches.filter((x) => x.branch === "main" && x.started.startsWith(d)).some((x) => x.conclusion === "success");
+      run = ok ? [] : [...run, d];
+      if (run.length >= 2) return run[0];
+    }
+    return null;
+  })();
+  if (streak >= 2) add("watch", "suite-red", `The full suite on main has been red ${streak} days running`, "the daily-suite routine owns the ticket");
+  else if (firstRed) add("watch", "suite-was-red", "The full suite on main was red two or more days in a row inside the window", `from ${firstRed}; green again since`);
+
+  // 12. Memory kills and queue waits.
 
   // 11. Memory kills and queue waits.
   const ooms = days.flatMap((d) => (d.usage?.jobs ?? []).filter((j) => j.oom > 0).map((j) => `${d.day.slice(5)} ${j.group} ×${j.oom}`));
@@ -267,9 +329,11 @@ export function anomalies(r, { budget = 100, offset = -3 } = {}) {
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const n1 = (x) => (Number.isFinite(x) ? x.toFixed(1) : "–");
 const n2 = (x) => (Number.isFinite(x) ? x.toFixed(2) : "–");
+// Numbers right-aligned on one line; words left-aligned and wrapping.
+const isNum = (c) => typeof c === "number" || /^[-–$\d.,%\s/]+$/.test(String(c ?? ""));
 const table = (head, rows) =>
   `<table><thead><tr>${head.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rows
-    .map((r) => `<tr>${r.map((c, i) => `<td${i ? ' class="n"' : ""}>${esc(c)}</td>`).join("")}</tr>`)
+    .map((r) => `<tr>${r.map((c) => `<td${isNum(c) ? ' class="n"' : ""}>${esc(c)}</td>`).join("")}</tr>`)
     .join("")}</tbody></table>`;
 
 /** One printable page set. Pure: the report in, HTML out. */
@@ -291,7 +355,7 @@ body { font: 10px/1.35 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; 
 h1 { font-size: 18px; margin: 0 0 2px; } h2 { font-size: 13px; margin: 14px 0 4px; border-bottom: 1px solid #ccc; }
 .sub { color: #666; margin-bottom: 8px; } table { border-collapse: collapse; width: 100%; margin-bottom: 6px; }
 th, td { border: 1px solid #ddd; padding: 2px 4px; vertical-align: top; } th { background: #f3f3f3; text-align: left; }
-td.n { text-align: right; white-space: nowrap; } .ticket { color: #b00020; font-weight: 600; } .watch { color: #8a6d00; font-weight: 600; }
+td { overflow-wrap: anywhere; } td.n { text-align: right; white-space: nowrap; } .ticket { color: #b00020; font-weight: 600; white-space: nowrap; } .watch { color: #8a6d00; font-weight: 600; white-space: nowrap; }
 .kpi { display: inline-block; margin: 0 18px 6px 0; } .kpi b { font-size: 15px; display: block; }
 .note { color: #666; font-size: 9px; } .brk { page-break-before: always; }
 </style></head><body>
@@ -318,7 +382,14 @@ ${table(["category", ...days.map(short), "total"], cats.map((c) => [c, ...days.m
 <h2>Disk the launch templates hand a host</h2>
 ${table(
   ["region", "default version", "type", "IOPS", "MiB/s", "GiB", "changes in the window"],
-  r.templates.map((t) => [t.region, t.version ?? "–", t.disk?.type ?? "–", t.disk?.iops ?? "–", t.disk?.throughput ?? "–", t.disk?.size ?? "–", (t.changes ?? []).map((c) => `${c.at.slice(5, 16)} v${c.version} ${c.disk ? `${c.disk.iops}/${c.disk.throughput}` : ""} (${c.by})`).join("; ")]),
+  r.templates.map((t) => {
+    const changes = t.changes ?? [];
+    const moved = changes.filter((c) => c.disk && c.previousDisk && (c.disk.iops !== c.previousDisk.iops || c.disk.throughput !== c.previousDisk.throughput));
+    const rest = changes.length - moved.length;
+    const text = moved.map((c) => `${c.at.slice(5, 16).replace("T", " ")} v${c.version} ${c.previousDisk.iops}/${c.previousDisk.throughput} → ${c.disk.iops}/${c.disk.throughput} (${c.by})`);
+    if (rest) text.push(`${rest} other default change(s), same disk`);
+    return [t.region, t.version ?? "–", t.disk?.type ?? "–", t.disk?.iops ?? "–", t.disk?.throughput ?? "–", t.disk?.size ?? "–", text.join("; ") || "none"];
+  }),
 )}
 
 <h2 class="brk">Job duration p50 (min) — sampled window</h2>
@@ -334,7 +405,7 @@ ${table(["job", ...days.map(short)], top.map((g) => [g, ...days.map((d) => cell(
 ${table(
   ["day", "runs", "jobs", "host boots", "paid slot-h", "running", "startup", "between", "tail", "never used", "queue p50 s", "p90 s"],
   days.map((d) => {
-    const u = d.usage?.idle;
+    const u = d.usage?.idle?.paidHours ? d.usage.idle : null;
     const pct = (k) => (u ? `${(100 * u.shares[k]).toFixed(0)}%` : "–");
     return [short(d), d.usage?.runs ?? "–", d.usage?.jobsCount ?? "–", u?.hosts ?? "–", n1(u?.paidHours), pct("busy"), pct("startup"), pct("between"), pct("tail"), pct("unused"), d.usage?.queueP50s ?? "–", d.usage?.queueP90s ?? "–"];
   }),
