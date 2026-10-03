@@ -332,7 +332,7 @@ jobs:
       # money, because self-hosted time was priced at zero.
       - name: Cost report pricing
         shell: bash
-        run: node --test .github/workflows/__tests__/cost-report.test.mjs
+        run: node --test .github/workflows/__tests__/cost-report.test.mjs .github/workflows/__tests__/cost-report-lanes.test.mjs
 
       # setup-node's pnpm cache stands down where the host has a warm store.
       # Its wrong spelling is silent: `cond && '' || 'pnpm'` always says pnpm.

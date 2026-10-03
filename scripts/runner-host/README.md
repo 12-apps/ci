@@ -82,6 +82,48 @@ GITHUB_TOKEN=… node scripts/runner-host/usage-report.mjs --repo owner/name --s
   [--until …] [--label future-pay-ci] [--slots 2] [--idle-minutes 2]
 ```
 
+### What each workflow and lane costs, in USD
+
+`fleet-cost.mjs` turns the same jobs into dollars. It rebuilds every host's
+lifetime from the runner names, cuts each slot into running a job, startup,
+between jobs, tail and never used, and spreads each UTC day and region's
+**tagged** AWS cost over those paid slot-minutes. A job gets its own minutes at
+that rate; the overhead kinds get theirs. AWS data comes in as the JSON the
+`aws` CLI prints, so the script needs no SDK and runs with the operator's own
+read-only credentials (`ce:GetCostAndUsage`, `ec2:DescribeSpotPriceHistory`):
+
+```bash
+GITHUB_TOKEN=… node scripts/runner-host/fleet-cost.mjs --repo owner/name \
+  --since 2026-09-24 --until 2026-09-30 --costs ce-region.json \
+  [--spot spot.json] [--untagged ce-untagged.json] [--lanes lanes.json] \
+  [--label future-pay-ci] [--idle-minutes 2] [--margin-minutes 3] [--slots 2] \
+  [--types m7a.2xlarge,…] [--cache .fleet-cost] [--csv out.csv] [--jobs jobs.json]
+```
+
+`--spot` takes one `describe-spot-price-history` answer, or a list of them
+(one per region, merged with `jq -s '{SpotPriceHistory: map(.SpotPriceHistory[])}'`).
+`--types` limits the bottom-up price to the fleet's own types. `--jobs` reads
+a job list already fetched instead of the Actions API. The API is read slowly
+(eight at a time). Once less than 40% of the token's allowance is left, the
+script pauses until the allowance resets, so whatever else uses the token
+(the scaler did) keeps its share.
+
+- **The spread adds up to the tagged total by construction.** On its own it
+  proves nothing. The check is the **bottom-up** cost: every host-hour at the
+  mean spot price of the fleet's types in its zone, plus disk and address. The
+  **gap** (tagged − bottom-up) holds what the jobs cannot show: hosts that never
+  got a job, the on-demand fallback, images and snapshots, and the type mix.
+- **A runner name is not a host.** Private addresses are recycled. Jobs on one
+  name are split where their usage lines report different boots, or where the
+  name sat idle past `--idle-minutes` + `--margin-minutes`.
+- **Cost Explorer days are UTC** and the last day or two are incomplete; report
+  complete days only.
+- **The last section prints the all-in rate per job-minute** (tagged ÷ minutes
+  running a job), which is what `cost-report.yml`'s `self_hosted` rate means,
+  ready to paste as the caller's `runner-rates`. The same `--lanes` rules can
+  be passed to `cost-report.yml` as `lane-rules`, so a lane means the same in
+  the PR comment and in the daily report.
+
 **Where:** anything that runs Ubuntu 24.04 with a public IPv4 and no
 inbound ports. A dedicated server (Hetzner AX line or its server auction, OVH)
 is far cheaper per core than a cloud VM. On DigitalOcean the equivalent droplet
