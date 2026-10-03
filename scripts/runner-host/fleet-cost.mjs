@@ -76,9 +76,16 @@ const DAY = 86_400_000;
  * folds the same way, so a lane rule means the same in both.
  */
 export function costGroup(workflow, name) {
-  // A run-name may carry the commit it ran for (`Post-CD Tests — prod @ <sha>`);
-  // folded too, or every deploy is a group of its own.
-  return `${workflow ?? ""} / ${name ?? ""}`.replace(/\b[0-9a-f]{40}\b/g, "<sha>").replace(/\b\d+\b/g, "#");
+  return foldName(`${workflow ?? ""} / ${name ?? ""}`);
+}
+
+/**
+ * A name with its varying parts folded: a commit (a run-name may carry the
+ * one it ran for, `Post-CD Tests — prod @ <sha>`) and every standalone number
+ * (`Code Quality: PR #`). Without it every deploy and every PR is a line.
+ */
+export function foldName(s) {
+  return String(s ?? "").replace(/\b[0-9a-f]{40}\b/g, "<sha>").replace(/\b\d+\b/g, "#");
 }
 
 /**
@@ -148,7 +155,7 @@ export function fleetJob(j) {
   const zone = zoneOf(hs.host);
   return {
     id: j.id,
-    workflow: j.workflow ?? "",
+    workflow: foldName(j.workflow),
     name: j.name ?? "",
     group: costGroup(j.workflow, j.name),
     host: hs.host,

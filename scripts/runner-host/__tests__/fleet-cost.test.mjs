@@ -367,3 +367,15 @@ test("the counts the report prints are the window's, not the day collected befor
   assert.equal(e.jobs, 1, "a zero-length job at the window's first instant is in the header and the tables alike");
   assert.equal(rollup(e.rows, ["lane"])[0].jobs, 1);
 });
+
+test("the per-workflow roll-up folds a PR number or a commit out of the workflow's name", () => {
+  const jobs = [
+    job(H, 1, 0, 10, { workflow: "Code Quality: PR #2123" }),
+    job(H, 2, 0, 10, { workflow: "Code Quality: PR #2124" }),
+    job(H, 1, 11, 15, { workflow: `Post-CD Tests — prod @ ${"b2".repeat(20)}` }),
+  ];
+  const r = report(jobs, { costs: ce({ "2026-09-29": { "us-east-2": 1 } }), since: "2026-09-29", until: "2026-09-29" });
+  assert.deepEqual(rollup(r.rows, ["workflow"]).map((x) => [x.workflow, x.jobs]).sort(), [
+    ["Code Quality: PR ##", 2], ["Post-CD Tests — prod @ <sha>", 1],
+  ]);
+});
