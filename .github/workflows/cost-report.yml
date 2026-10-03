@@ -504,7 +504,7 @@ jobs:
               for (const [lane, t] of [...lanes.entries()].sort((a, b) => b[1].cost - a[1].cost)) {
                 // Unpriced is never shown as free (see rateFor).
                 const cost = t.unpriced ? `${money(t.cost)} + unpriced` : money(t.cost);
-                lines.push(`| ${String(lane).replace(/\|/g, '\\|')} | ${t.jobs} | ${mins(t.raw)} | ${cost} |`);
+                lines.push(`| ${String(lane).replace(/\\/g, '\\\\').replace(/\|/g, '\\|')} | ${t.jobs} | ${mins(t.raw)} | ${cost} |`);
               }
               lines.push(
                 '',

@@ -86,3 +86,10 @@ test("an event with no pull request skips quietly, whatever the lane rules say",
   const { body } = await report({ laneRules: "{", pullRequest: false, runs: [run(2)], jobs: { 2: [named(1, 60, "Lint")] } });
   assert.equal(body, undefined, "nothing posted, nothing failed");
 });
+
+test("a lane name's backslash and pipe are both escaped in the table", async () => {
+  const { body } = await report({
+    laneRules: JSON.stringify([{ lane: "a\\|b", match: "." }]), runs: [run(2)], jobs: { 2: [named(1, 60, "Lint")] },
+  });
+  assert.ok(body.includes("| a\\\\\\|b | 1 |"), body);
+});

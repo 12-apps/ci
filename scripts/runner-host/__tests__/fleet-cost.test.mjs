@@ -296,6 +296,14 @@ test("cost under no region is unattributed on every day, pooled or not", () => {
   }
 });
 
+test("a lane name with a backslash before a pipe cannot unescape it", () => {
+  const r = report([job(H, 1, 0, 10)], {
+    costs: ce({ "2026-09-29": { "us-east-2": 1 } }), lanes: [{ lane: "a\\|b", match: "unit" }],
+    since: "2026-09-29", until: "2026-09-29",
+  });
+  assert.ok(render(r, { repo: "o/r", since: "2026-09-29", until: "2026-09-29", label: "fleet" }).includes("| a\\\\\\|b | 1 |"));
+});
+
 test("a lane name with a pipe does not break the table", () => {
   const r = report([job(H, 1, 0, 10)], {
     costs: ce({ "2026-09-29": { "us-east-2": 1 } }), lanes: [{ lane: "a|b", match: "unit" }],

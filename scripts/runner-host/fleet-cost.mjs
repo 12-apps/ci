@@ -454,7 +454,8 @@ export function untaggedByDay(ce, pattern = UNTAGGED_CI) {
 // ── rendering ───────────────────────────────────────────────────────────────
 
 const usd = (n) => `$${n.toFixed(2)}`;
-const cell = (v) => String(v || "–").replace(/\|/g, "\\|");
+// A table cell: a backslash first, so the escape of a pipe cannot be undone by one.
+const cell = (v) => String(v || "–").replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
 const h1 = (ms) => (ms / HOUR).toFixed(1);
 const pct = (a, b) => (b ? `${((100 * a) / b).toFixed(1)}%` : "–");
 
