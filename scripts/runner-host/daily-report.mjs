@@ -154,36 +154,39 @@ export function disksInEffect(templates, day) {
 
 /**
  * What looks wrong. `r` is the report (see `main`). Each finding:
- * { severity: "ticket" | "watch", key, title, evidence }.
+ * { severity: "ticket" | "watch", key, title, why, evidence }, worded in
+ * pt-BR for the team that reads the PDF and the Slack post.
  */
 export function anomalies(r, { budget = 100, offset = -3 } = {}) {
   const out = [];
-  const add = (severity, key, title, evidence) => out.push({ severity, key, title, evidence });
+  const add = (severity, key, title, why, evidence = "") => out.push({ severity, key, title, why, evidence });
   const days = r.days;
-  const money = (n) => `$${n.toFixed(2)}`;
+  const when = (iso) => localTime(iso, offset);
 
   // 1. Run rate against the monthly budget.
   const ci = days.map((d) => d.cost?.ci).filter(Number.isFinite);
   if (ci.length) {
     const monthly = mean(ci) * 30;
     if (monthly > budget) {
+      const week = ci.reduce((a, b) => a + b, 0);
+      const machines = days.reduce((a, d) => a + (d.cost?.categories?.spot ?? 0) + (d.cost?.categories?.["on-demand"] ?? 0), 0);
       add(
         monthly > 1.5 * budget ? "ticket" : "watch",
         "budget",
-        `Run rate ${money(monthly)}/month against a ${money(budget)} target`,
-        `mean CI cost ${money(mean(ci))}/day over ${ci.length} days`,
+        `Gasto no ritmo de ${usd(monthly, 0)}/mês — ${br(monthly / budget, 1)}× a meta de ${usd(budget, 0)}`,
+        `Média de ${usd(mean(ci))} por dia nos últimos ${ci.length} dias.`,
+        `Máquinas são ${usd(machines)} dos ${usd(week)} da semana.`,
       );
     }
   }
 
   // 2. A day that cost far more per push than the week. Quiet days (weekends)
   // carry the fixed cost over few pushes, so only busy days count.
-  const perPush = days.map((d) => d.perPush);
-  const mPush = median(perPush);
+  const mPush = median(days.map((d) => d.perPush));
   const busy = 0.6 * (median(days.map((d) => d.pushes)) ?? 0);
   for (const d of days) {
     if (mPush && d.perPush > 1.5 * mPush && d.pushes >= Math.max(20, busy)) {
-      add("ticket", `per-push-${d.day}`, `${d.day} cost ${money(d.perPush)} per push`, `week median ${money(mPush)}; ${d.pushes} pushes, CI ${money(d.cost.ci)}`);
+      add("ticket", `per-push-${d.day}`, `${dm(d.day)} custou ${usd(d.perPush)} por push`, `A mediana da semana é ${usd(mPush)}.`, `${d.pushes} pushes, ${usd(d.cost.ci)} no dia.`);
     }
   }
 
@@ -195,7 +198,7 @@ export function anomalies(r, { budget = 100, offset = -3 } = {}) {
       const early = mean(v.slice(0, days.length - 3));
       const late = mean(v.slice(-3));
       if (late > 1 && late > 2 * Math.max(early, 0.01)) {
-        add("ticket", `growth-${c}`, `${c} cost grew from ${money(early)} to ${money(late)} a day`, v.map((x, i) => `${days[i].day.slice(5)} ${x.toFixed(2)}`).join(", "));
+        add("ticket", `growth-${c}`, `Custo de ${CATEGORY_LABEL[c] ?? c} subiu de ${usd(early)} para ${usd(late)} por dia`, "Últimos 3 dias contra os anteriores.", v.map((x, i) => `${dm(days[i].day)} ${br(x, 2)}`).join(" · "));
       }
     }
   }
@@ -210,40 +213,43 @@ export function anomalies(r, { budget = 100, offset = -3 } = {}) {
     const maxIops = Math.max(0, ...disks.map((x) => x.iops ?? 0));
     const maxTp = Math.max(0, ...disks.map((x) => x.throughput ?? 0));
     const iops = d.cost?.categories?.["ebs-iops"] ?? 0;
-    if (iops > 0.1 && maxIops <= 3000) iopsDays.push(`${d.day.slice(5)} ${money(iops)}`);
+    if (iops > 0.1 && maxIops <= 3000) iopsDays.push(`${dm(d.day)} ${usd(iops)}`);
     // 25% of slack: the probe samples one-second peaks, and on a 250 MiB/s
     // volume busy days read 270–290 at the p95 with no host on another disk.
     const fast = (d.usage?.jobs ?? []).filter((j) => j.runs >= 5 && maxTp && j.mibpsP95 > maxTp * 1.25);
-    if (fast.length) fastDays.push(`${d.day.slice(5)} ${fast.length} jobs above ${maxTp} (max ${Math.max(...fast.map((j) => j.mibpsP95))} MiB/s)`);
+    if (fast.length) fastDays.push(`${dm(d.day)}: ${fast.length} jobs acima de ${maxTp} MiB/s (máx. ${Math.max(...fast.map((j) => j.mibpsP95))})`);
   }
-  if (iopsDays.length) add("ticket", "iops-unprovisioned", "Provisioned IOPS billed on days no template provisioned over 3000", `${iopsDays.join(", ")}; gp3 bills IOPS only above 3000, so some host ran on a disk no template in effect describes`);
-  if (fastDays.length) add("ticket", "throughput-above-template", "Jobs read faster than the templates in effect provision", fastDays.join("; "));
+  if (iopsDays.length) add("ticket", "iops-unprovisioned", "IOPS extra cobrado sem nenhum template pedindo", "O gp3 só cobra IOPS acima de 3000: alguma máquina rodou com um disco que nenhum template descrevia.", iopsDays.join(" · "));
+  if (fastDays.length) add("ticket", "throughput-above-template", "Jobs lendo o disco mais rápido do que o template permite", "Sinal de máquina rodando com outro disco.", fastDays.join(" · "));
 
   // 5. Template changes and drift between regions.
   const disks = new Set(r.templates.map((t) => (t.disk ? `${t.disk.iops}/${t.disk.throughput}/${t.disk.size}` : "none")));
-  if (disks.size > 1) add("ticket", "template-drift", "Regions hand hosts different disks", r.templates.map((t) => `${t.region} ${t.disk ? `${t.disk.iops}/${t.disk.throughput}` : "no template"}`).join("; "));
-  const changes = r.templates.flatMap((t) => (t.changes ?? []).map((c) => ({ ...c, region: t.region })));
+  if (disks.size > 1) add("ticket", "template-drift", "Regiões entregando discos diferentes", "Todas deveriam ter o mesmo disco.", r.templates.map((t) => `${t.region} ${t.disk ? `${t.disk.iops}/${t.disk.throughput}` : "sem template"}`).join(" · "));
   // A raise costs money on every host from then on; a cut is the usual,
   // deliberate direction and only shows in the table.
-  const raised = changes.filter((c) => c.disk && c.previousDisk && ((c.disk.iops ?? 0) > (c.previousDisk.iops ?? 0) || (c.disk.throughput ?? 0) > (c.previousDisk.throughput ?? 0)));
+  const raised = diskChanges(r.templates).filter((c) => c.raised);
   if (raised.length) {
-    const fmt = (c) => {
-      const back = changes.find((x) => x.region === c.region && x.at > c.at && x.disk && x.disk.iops === c.previousDisk.iops && x.disk.throughput === c.previousDisk.throughput);
-      return `${c.region} ${c.at.slice(0, 16)}Z v${c.version} ${c.previousDisk.iops}/${c.previousDisk.throughput} → ${c.disk.iops}/${c.disk.throughput} by ${c.by}${back ? `, back at ${back.at.slice(0, 16)}Z` : ", still in effect"}`;
-    };
-    add("ticket", "template-disk-raised", "A template's default disk was raised inside the window", raised.map(fmt).join("; "));
+    const fmt = (c) => `${c.regions.join(", ")}: ${when(c.at)} subiu para ${c.disk.iops} IOPS / ${c.disk.throughput} MiB/s (${c.by})${c.back ? `; voltou em ${when(c.back)}` : "; ainda em vigor"}`;
+    add("ticket", "template-disk-raised", "O disco do template foi aumentado", "Toda máquina nova passa a custar mais. O padrão é 3000 IOPS / 250 MiB/s.", raised.map(fmt).join(" · "));
   }
 
   // 6. Paid slot time that ran no job.
   const util = days.filter((d) => d.usage?.idle?.paidHours > 0);
   const low = util.filter((d) => d.usage.idle.runningShare < 0.35);
   if (low.length) {
-    add("ticket", "utilization", `Under 35% of paid slot time ran a job on ${low.length} day(s)`, low.map((d) => `${d.day.slice(5)} ${(100 * d.usage.idle.runningShare).toFixed(0)}% of ${d.usage.idle.paidHours.toFixed(0)} slot-h`).join(", ") + " (sampled window)");
+    const normal = median(util.filter((d) => d.usage.idle.runningShare >= 0.35).map((d) => d.usage.idle.runningShare));
+    add(
+      "ticket",
+      "utilization",
+      "Máquinas ligadas sem rodar job",
+      `Só ${low.map((d) => `${pct(d.usage.idle.runningShare)} em ${dm(d.day)}`).join(", ")} do tempo pago rodou job${normal ? ` (nos outros dias, ${pct(normal)})` : ""}.`,
+      low.map((d) => `${dm(d.day)}: ${br(d.usage.idle.paidHours, 0)} h pagas, ${br(d.usage.idle.runningHours, 0)} h rodando`).join(" · ") + " — janela amostrada",
+    );
   }
   const perJobHour = util.map((d) => d.usage.idle.paidHours / Math.max(d.usage.idle.runningHours, 0.1));
   const mRatio = median(perJobHour);
   util.forEach((d, i) => {
-    if (mRatio && perJobHour[i] > 1.4 * mRatio) add("watch", `slot-hours-${d.day}`, `${d.day}: ${perJobHour[i].toFixed(2)} paid slot-hours per job-hour`, `week median ${mRatio.toFixed(2)}`);
+    if (mRatio && perJobHour[i] > 1.4 * mRatio) add("watch", `slot-hours-${d.day}`, `${dm(d.day)}: ${br(perJobHour[i], 1)} h pagas por hora de job`, `O normal da semana é ${br(mRatio, 1)}.`);
   });
 
   // 7. Jobs that got slower: the last day against each job's week median.
@@ -257,20 +263,20 @@ export function anomalies(r, { budget = 100, offset = -3 } = {}) {
     .filter((j) => j.base && j.p50 > 1.3 * j.base && j.p50 - j.base > 0.5)
     .sort((a, b) => b.p50 / b.base - a.p50 / a.base);
   if (slower.length) {
-    add("watch", "slower-jobs", `${slower.length} jobs ran over 30% slower on ${last.day}`, slower.slice(0, 5).map((j) => `${j.group} ${j.base.toFixed(1)} → ${j.p50.toFixed(1)} min`).join("; "));
+    add("watch", "slower-jobs", `${slower.length} job(s) mais de 30% mais lentos em ${dm(last.day)}`, "", slower.slice(0, 5).map((j) => `${jobName(j.group)} ${br(j.base, 1)} → ${br(j.p50, 1)} min`).join(" · "));
   }
 
   // 8. IO wait creeping up across the heaviest jobs.
   const io = days.map((d) => median((d.usage?.jobs ?? []).slice(0, 15).map((j) => j.ioWaitP95)));
   const firstIo = io.find(Number.isFinite);
   const lastIo = [...io].reverse().find(Number.isFinite);
-  if (firstIo && lastIo > 1.5 * firstIo) add("watch", "io-wait", `IO wait p95 of the heaviest jobs went from ${firstIo.toFixed(0)}% to ${lastIo.toFixed(0)}%`, "median over the 15 jobs with the most job-minutes");
+  if (firstIo && lastIo > 1.5 * firstIo) add("watch", "io-wait", `Espera por disco subiu de ${br(firstIo, 0)}% para ${br(lastIo, 0)}%`, "p95 dos 15 jobs mais pesados.");
 
   // 9. Full suites dispatched off-hours, and the same branch dispatched again and again.
   const night = r.dispatches.filter((x) => offHours(x.started, { offset }));
   if (night.length) {
     const min = night.reduce((a, x) => a + x.jobMinutes, 0);
-    add("ticket", "night-dispatch", `${night.length} full suites dispatched off-hours (${Math.round(min)} job-min)`, night.map((x) => `${x.started.slice(0, 16)}Z ${x.branch} ${x.conclusion ?? x.status} #${x.id}`).join("; "));
+    add("ticket", "night-dispatch", `${night.length} suíte(s) completa(s) disparada(s) de madrugada`, `${br(min, 0)} minutos de job fora do horário comercial.`, night.map((x) => `${when(x.started)} ${x.branch} (${RESULT[x.conclusion] ?? x.status})`).join(" · "));
   }
   const byBranchDay = new Map();
   for (const x of r.dispatches) {
@@ -279,7 +285,9 @@ export function anomalies(r, { budget = 100, offset = -3 } = {}) {
   }
   for (const [k, xs] of byBranchDay) {
     const red = xs.filter((x) => x.conclusion === "failure").length;
-    if (xs.length >= 3) add("ticket", `dispatch-loop-${k}`, `${xs.length} full suites on ${k}`, `${red} red; ${Math.round(xs.reduce((a, x) => a + x.jobMinutes, 0))} job-min`);
+    // Mostly at night: the night finding above already names these runs.
+    const covered = xs.filter((x) => night.includes(x)).length * 2 >= xs.length;
+    if (xs.length >= 3 && !covered) add("ticket", `dispatch-loop-${k}`, `${xs.length} suítes completas no mesmo dia em ${xs[0].branch} (${dm(k.slice(0, 10))})`, `${red} falharam.`, `${br(xs.reduce((a, x) => a + x.jobMinutes, 0), 0)} minutos de job.`);
   }
 
   // 10. On-demand fallback, egress and NAT — only while it is still happening
@@ -290,129 +298,314 @@ export function anomalies(r, { budget = 100, offset = -3 } = {}) {
     const compute = (c.spot ?? 0) + (c["on-demand"] ?? 0);
     return compute > 1 && (c["on-demand"] ?? 0) > 0.15 * compute;
   });
-  if (od.length) add("ticket", "on-demand", "On-demand over 15% of compute", `${od.map((d) => `${d.day.slice(5)} ${money(d.cost.categories["on-demand"])}`).join(", ")}; the fleet asks for spot, on-demand is the fallback`);
+  if (od.length) add("ticket", "on-demand", "Máquinas on-demand acima de 15% do custo de máquina", "A frota pede spot; on-demand é o plano B e custa cerca de 3×.", od.map((d) => `${dm(d.day)} ${usd(d.cost.categories["on-demand"])}`).join(" · "));
   const net = recent.filter((d) => (d.cost?.categories?.egress ?? 0) + (d.cost?.categories?.nat ?? 0) > 1);
-  if (net.length) add("ticket", "egress", "Egress and NAT over $1 a day", `${net.map((d) => `${d.day.slice(5)} ${money((d.cost.categories.egress ?? 0) + (d.cost.categories.nat ?? 0))}`).join(", ")}; cache and registry traffic should stay inside the region`);
+  if (net.length) add("ticket", "egress", "Tráfego de saída (egress e NAT) acima de US$ 1 por dia", "Cache e registry deveriam ficar dentro da região.", net.map((d) => `${dm(d.day)} ${usd((d.cost.categories.egress ?? 0) + (d.cost.categories.nat ?? 0))}`).join(" · "));
 
   // 11. The daily full suite red day after day (the suite routine owns the
   // ticket; the cost here is every red run re-dispatched).
-  let streak = 0;
   const mainDays = [...new Set(r.dispatches.filter((x) => x.branch === "main").map((x) => x.started.slice(0, 10)))].sort();
-  for (const d of mainDays.reverse()) {
-    if (r.dispatches.filter((x) => x.branch === "main" && x.started.startsWith(d)).some((x) => x.conclusion === "success")) break;
+  const green = (d) => r.dispatches.some((x) => x.branch === "main" && x.started.startsWith(d) && x.conclusion === "success");
+  let streak = 0;
+  for (const d of [...mainDays].reverse()) {
+    if (green(d)) break;
     streak++;
   }
-  const firstRed = (() => {
-    let run = [];
-    for (const d of [...mainDays].sort()) {
-      const ok = r.dispatches.filter((x) => x.branch === "main" && x.started.startsWith(d)).some((x) => x.conclusion === "success");
-      run = ok ? [] : [...run, d];
-      if (run.length >= 2) return run[0];
-    }
-    return null;
-  })();
-  if (streak >= 2) add("watch", "suite-red", `The full suite on main has been red ${streak} days running`, "the daily-suite routine owns the ticket");
-  else if (firstRed) add("watch", "suite-was-red", "The full suite on main was red two or more days in a row inside the window", `from ${firstRed}; green again since`);
+  let run = [];
+  let firstRed = null;
+  for (const d of mainDays) {
+    run = green(d) ? [] : [...run, d];
+    if (run.length >= 2 && !firstRed) firstRed = run[0];
+  }
+  if (streak >= 2) add("watch", "suite-red", `A suíte completa no main está vermelha há ${streak} dias`, "A rotina diária da suíte cuida do ticket.");
+  else if (firstRed) add("watch", "suite-was-red", "A suíte completa no main ficou vermelha dias seguidos", `Desde ${dm(firstRed)}; já voltou a passar.`);
 
   // 12. Memory kills and queue waits.
-
-  // 11. Memory kills and queue waits.
-  const ooms = days.flatMap((d) => (d.usage?.jobs ?? []).filter((j) => j.oom > 0).map((j) => `${d.day.slice(5)} ${j.group} ×${j.oom}`));
-  if (ooms.length) add("watch", "oom", "Jobs killed for memory", ooms.slice(0, 6).join("; "));
-  for (const d of days) if (d.usage?.queueP90s > 60) add("watch", `queue-${d.day}`, `${d.day}: queue p90 ${d.usage.queueP90s}s`, "jobs waited for a runner");
+  const ooms = days.flatMap((d) => (d.usage?.jobs ?? []).filter((j) => j.oom > 0).map((j) => `${dm(d.day)} ${jobName(j.group)} ×${j.oom}`));
+  if (ooms.length) add("watch", "oom", "Jobs mortos por falta de memória", "", ooms.slice(0, 6).join(" · "));
+  for (const d of days) if (d.usage?.queueP90s > 60) add("watch", `queue-${d.day}`, `${dm(d.day)}: jobs esperaram ${d.usage.queueP90s}s por máquina (p90)`, "");
 
   return out.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "ticket" ? -1 : 1));
 }
 
+/**
+ * Default-disk changes that moved IOPS or throughput, one entry per minute
+ * and disk across regions (a deploy changes every region at once), with
+ * whether it raised the disk and when the earlier disk came back.
+ */
+export function diskChanges(templates) {
+  const all = templates.flatMap((t) => (t.changes ?? []).map((c) => ({ ...c, region: t.region })));
+  const moved = all.filter((c) => c.disk && c.previousDisk && (c.disk.iops !== c.previousDisk.iops || c.disk.throughput !== c.previousDisk.throughput));
+  // One deploy reaches the regions a minute or two apart.
+  const groups = [];
+  for (const c of moved.sort((x, y) => x.at.localeCompare(y.at))) {
+    const back = all.find((x) => x.region === c.region && x.at > c.at && x.disk && x.disk.iops === c.previousDisk.iops && x.disk.throughput === c.previousDisk.throughput);
+    let g = groups.find((x) => x.by === c.by && x.disk.iops === c.disk.iops && x.disk.throughput === c.disk.throughput && Date.parse(c.at) - Date.parse(x.at) <= 10 * 60_000);
+    if (!g) {
+      g = { at: c.at, by: c.by, disk: c.disk, previousDisk: c.previousDisk, regions: [], back: null };
+      g.raised = (c.disk.iops ?? 0) > (c.previousDisk.iops ?? 0) || (c.disk.throughput ?? 0) > (c.previousDisk.throughput ?? 0);
+      groups.push(g);
+    }
+    if (!g.regions.includes(c.region)) g.regions.push(c.region);
+    if (back && (!g.back || back.at > g.back)) g.back = back.at;
+  }
+  return groups;
+}
+
 // ── HTML ────────────────────────────────────────────────────────────────────
 
+const CATEGORY_LABEL = {
+  spot: "máquinas spot",
+  "on-demand": "máquinas on-demand",
+  "ebs-storage": "disco (espaço)",
+  "ebs-iops": "disco (IOPS extra)",
+  "ebs-throughput": "disco (MiB/s extra)",
+  "snapshots-images": "imagens e snapshots",
+  egress: "tráfego de saída",
+  nat: "NAT",
+  "public-ip": "IPs públicos",
+  other: "outros",
+};
+// The daily chart folds the categories into four a reader can tell apart.
+const GROUPS = [
+  { label: "Máquinas", color: "#2a78d6", cats: ["spot", "on-demand"] },
+  { label: "Disco e imagens", color: "#eb6834", cats: ["ebs-storage", "ebs-iops", "ebs-throughput", "snapshots-images"] },
+  { label: "Rede", color: "#1baf7a", cats: ["egress", "nat", "public-ip"] },
+  { label: "Outros", color: "#eda100", cats: ["other"] },
+];
+const RESULT = { success: "passou", failure: "falhou", cancelled: "cancelada", timed_out: "estourou o tempo" };
+
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
-const n1 = (x) => (Number.isFinite(x) ? x.toFixed(1) : "–");
-const n2 = (x) => (Number.isFinite(x) ? x.toFixed(2) : "–");
-// Numbers right-aligned on one line; words left-aligned and wrapping.
-const isNum = (c) => typeof c === "number" || /^[-–$\d.,%\s/]+$/.test(String(c ?? ""));
-const table = (head, rows) =>
-  `<table><thead><tr>${head.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rows
-    .map((r) => `<tr>${r.map((c) => `<td${isNum(c) ? ' class="n"' : ""}>${esc(c)}</td>`).join("")}</tr>`)
+/** A number the Brazilian way: 1.234,5. */
+const br = (x, digits = 2) => (Number.isFinite(x) ? x.toLocaleString("pt-BR", { minimumFractionDigits: digits, maximumFractionDigits: digits }) : "–");
+const usd = (x, digits = 2) => (Number.isFinite(x) ? `US$ ${br(x, digits)}` : "–");
+const pct = (x) => (Number.isFinite(x) ? `${Math.round(100 * x)}%` : "–");
+const dm = (day) => `${day.slice(8, 10)}/${day.slice(5, 7)}`;
+/** `2026-10-02T03:44Z` at UTC-3 → `02/10 00:44`. */
+export const localTime = (iso, offsetHours) => {
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return String(iso ?? "");
+  const t = new Date(ms + offsetHours * HOUR).toISOString();
+  return `${t.slice(8, 10)}/${t.slice(5, 7)} ${t.slice(11, 16)}`;
+};
+/** `CI / Tests / Unit Tests · shard 1/4` → `Tests / Unit Tests · shard 1/4`. */
+const jobName = (group) => group.replace(/^CI \/ /, "");
+const groupCost = (d, g) => g.cats.reduce((a, c) => a + (d.cost?.categories?.[c] ?? 0), 0);
+
+const table = (head, rows, { num = [] } = {}) =>
+  `<table><thead><tr>${head.map((h, i) => `<th${num.includes(i) ? ' class="n"' : ""}>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rows
+    .map((r) => `<tr>${r.map((c, i) => `<td${num.includes(i) ? ' class="n"' : ""}>${c?.html ?? esc(c)}</td>`).join("")}</tr>`)
     .join("")}</tbody></table>`;
 
-/** One printable page set. Pure: the report in, HTML out. */
+/** A rect whose top corners are rounded (the data end of a column). */
+const topRounded = (x, y, w, h, r) => {
+  const k = Math.min(r, h, w / 2);
+  return `<path d="M${x},${y + h}V${y + k}Q${x},${y} ${x + k},${y}H${x + w - k}Q${x + w},${y} ${x + w},${y + k}V${y + h}Z"`;
+};
+
+/** Columns per day; `segments(d)` returns [{value, color}] bottom-up. */
+function columns(days, segments, { height = 170, label = (v) => br(v, 2) } = {}) {
+  const width = 680;
+  const top = 18;
+  const bottom = 22;
+  const plotH = height - top - bottom;
+  const totals = days.map((d) => segments(d).reduce((a, s) => a + s.value, 0));
+  const max = Math.max(...totals, 0.01) * 1.08;
+  const slot = width / days.length;
+  const bar = Math.min(56, slot * 0.6);
+  const y = (v) => top + plotH - (v / max) * plotH;
+  const grid = [0.5, 1].map((f) => `<line x1="0" x2="${width}" y1="${y(max * f / 1.08)}" y2="${y(max * f / 1.08)}" class="grid"/>`).join("");
+  const cols = days
+    .map((d, i) => {
+      const x = i * slot + (slot - bar) / 2;
+      let base = 0;
+      const segs = segments(d).filter((s) => s.value > 0);
+      const shapes = segs
+        .map((s, j) => {
+          const y0 = y(base);
+          base += s.value;
+          const y1 = y(base);
+          const h = Math.max(0, y0 - y1 - (j < segs.length - 1 ? 2 : 0));
+          const top1 = j < segs.length - 1 ? y1 + 2 : y1;
+          return j === segs.length - 1
+            ? `${topRounded(x, top1, bar, h, 4)} fill="${s.color}"/>`
+            : `<rect x="${x}" y="${top1}" width="${bar}" height="${h}" fill="${s.color}"/>`;
+        })
+        .join("");
+      return `${shapes}<text x="${x + bar / 2}" y="${y(totals[i]) - 5}" class="val">${esc(label(totals[i]))}</text><text x="${x + bar / 2}" y="${height - 6}" class="day">${dm(d.day)}</text>`;
+    })
+    .join("");
+  return `<svg viewBox="0 0 ${width} ${height}" class="chart" role="img">${grid}<line x1="0" x2="${width}" y1="${y(0)}" y2="${y(0)}" class="axis"/>${cols}</svg>`;
+}
+
+/** One horizontal bar per day: share of paid time that ran a job. */
+function utilizationBars(days) {
+  const rows = days.filter((d) => d.usage?.idle?.paidHours > 0);
+  if (!rows.length) return "<p class=\"muted\">Sem medição de uso nesta semana.</p>";
+  const width = 680;
+  const rowH = 22;
+  const labelW = 54;
+  const barW = width - labelW - 150;
+  const body = rows
+    .map((d, i) => {
+      const u = d.usage.idle;
+      const y = i * rowH + 4;
+      const run = barW * u.runningShare;
+      return `<text x="0" y="${y + 12}" class="lbl">${dm(d.day)}</text>
+<rect x="${labelW}" y="${y}" width="${Math.max(run - 1, 0)}" height="14" fill="#2a78d6"/>
+<rect x="${labelW + run + 1}" y="${y}" width="${Math.max(barW - run - 1, 0)}" height="14" fill="#d9d8d3"/>
+<text x="${labelW + barW + 8}" y="${y + 12}" class="lbl"><tspan class="strong">${pct(u.runningShare)}</tspan> de ${br(u.paidHours, 0)} h pagas</text>`;
+    })
+    .join("");
+  return `<svg viewBox="0 0 ${width} ${rows.length * rowH + 6}" class="chart" role="img">${body}</svg>`;
+}
+
+/** The report as printable pages: summary first, detail after. Pure. */
 export function renderHtml(r) {
   const days = r.days;
-  const short = (d) => d.day.slice(8, 10) + "/" + d.day.slice(5, 7);
-  const sum = (k) => days.reduce((a, d) => a + (d[k] ?? 0), 0);
-  const ciTotal = days.reduce((a, d) => a + (d.cost?.ci ?? 0), 0);
-  const cats = [...new Set(days.flatMap((d) => Object.keys(d.cost?.categories ?? {})))].sort(
-    (a, b) => days.reduce((s, d) => s + (d.cost.categories[b] ?? 0), 0) - days.reduce((s, d) => s + (d.cost.categories[a] ?? 0), 0),
-  );
-  const top = [...new Map(days.flatMap((d) => (d.usage?.jobs ?? []).slice(0, 15).map((j) => [j.group, j]))).keys()].slice(0, 18);
-  const cell = (d, g, k) => d.usage?.jobs?.find((j) => j.group === g)?.[k];
-  const sev = { ticket: "Ticket", watch: "Watch" };
+  const offset = r.offset ?? -3;
+  const sum = (f) => days.reduce((a, d) => a + (f(d) ?? 0), 0);
+  const ciTotal = sum((d) => d.cost?.ci);
+  const merges = sum((d) => d.merges);
+  const pushes = sum((d) => d.pushes);
+  const monthly = (ciTotal / Math.max(days.length, 1)) * 30;
+  const estimated = days.filter((d) => d.cost?.estimated).map((d) => dm(d.day));
+  const tickets = r.anomalies.filter((a) => a.severity === "ticket");
+  const watch = r.anomalies.filter((a) => a.severity === "watch");
+  const last = days[days.length - 1];
 
-  return `<!doctype html><html><head><meta charset="utf-8"><title>CI fleet report ${esc(r.until)}</title><style>
-@page { size: A4 landscape; margin: 12mm; }
-body { font: 10px/1.35 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color: #1d1d1f; }
-h1 { font-size: 18px; margin: 0 0 2px; } h2 { font-size: 13px; margin: 14px 0 4px; border-bottom: 1px solid #ccc; }
-.sub { color: #666; margin-bottom: 8px; } table { border-collapse: collapse; width: 100%; margin-bottom: 6px; }
-th, td { border: 1px solid #ddd; padding: 2px 4px; vertical-align: top; } th { background: #f3f3f3; text-align: left; }
-td { overflow-wrap: anywhere; } td.n { text-align: right; white-space: nowrap; } .ticket { color: #b00020; font-weight: 600; white-space: nowrap; } .watch { color: #8a6d00; font-weight: 600; white-space: nowrap; }
-.kpi { display: inline-block; margin: 0 18px 6px 0; } .kpi b { font-size: 15px; display: block; }
-.note { color: #666; font-size: 9px; } .brk { page-break-before: always; }
+  const kpi = (value, label, note = "") => `<div class="kpi"><div class="kv">${esc(value)}</div><div class="kl">${esc(label)}</div>${note ? `<div class="kn">${esc(note)}</div>` : ""}</div>`;
+  const legend = GROUPS.map((g) => `<span class="key"><i style="background:${g.color}"></i>${esc(g.label)}</span>`).join("");
+  const finding = (a, i) => `<li><div class="ft"><b>${i + 1}.</b> ${esc(a.title)}</div>${a.why ? `<div class="fw">${esc(a.why)}</div>` : ""}${a.evidence ? `<div class="fe">${esc(a.evidence)}</div>` : ""}</li>`;
+
+  // Jobs: the heaviest of the last measured day, against their own week.
+  const measured = [...days].reverse().find((d) => d.usage?.jobs?.length);
+  const jobRows = (measured?.usage?.jobs ?? []).slice(0, 12).map((j) => {
+    const prior = days.filter((d) => d !== measured).map((d) => d.usage?.jobs?.find((x) => x.group === j.group)?.p50).filter(Number.isFinite);
+    const base = median(prior);
+    const delta = base ? (j.p50 - base) / base : null;
+    const deltaCell = delta === null ? "–" : { html: `<span class="${delta > 0.3 ? "up" : delta < -0.1 ? "down" : ""}">${delta > 0 ? "+" : ""}${Math.round(100 * delta)}%</span>` };
+    return [jobName(j.group), j.runs, br(base, 1), br(j.p50, 1), deltaCell, `${br(j.ioWaitP95, 0)}%`, j.mibpsP95 ?? "–"];
+  });
+
+  const disks = new Set(r.templates.map((t) => (t.disk ? `${t.disk.type} ${t.disk.size} GB, ${t.disk.iops} IOPS, ${t.disk.throughput} MiB/s` : "sem template")));
+  const diskNow =
+    disks.size === 1
+      ? `<p>Hoje as ${r.templates.length} regiões entregam o mesmo disco: <b>${esc([...disks][0])}</b>.</p>`
+      : table(["região", "disco"], r.templates.map((t) => [t.region, t.disk ? `${t.disk.type} ${t.disk.size} GB, ${t.disk.iops} IOPS, ${t.disk.throughput} MiB/s` : "sem template"]));
+  const moves = diskChanges(r.templates);
+
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Frota de CI ${esc(r.until)}</title><style>
+@page { size: A4; margin: 14mm 14mm 12mm; }
+:root { --ink: #1d1d1b; --ink2: #52514e; --muted: #8a8984; --line: #e4e3df; --soft: #f6f5f2; --red: #c62828; --amber: #9a6700; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #fff; color: var(--ink); font: 11px/1.45 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 13px; margin: 18px 0 6px; }
+.sub, .muted { color: var(--ink2); }
+.note { color: var(--muted); font-size: 9.5px; margin: 4px 0 0; }
+.kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 14px 0 4px; }
+.kpi { background: var(--soft); border-radius: 8px; padding: 10px 12px; }
+.kv { font-size: 19px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.kl { color: var(--ink2); }
+.kn { color: var(--muted); font-size: 9.5px; margin-top: 2px; }
+.legend { display: flex; gap: 14px; margin: 2px 0 4px; color: var(--ink2); }
+.key i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.chart { width: 100%; height: auto; display: block; }
+.chart .grid { stroke: var(--line); stroke-width: 1; }
+.chart .axis { stroke: #b9b8b3; stroke-width: 1; }
+.chart text { font: 10px -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; fill: var(--ink2); }
+.chart .val { text-anchor: middle; fill: var(--ink); font-weight: 600; }
+.chart .day { text-anchor: middle; }
+.chart .strong { fill: var(--ink); font-weight: 600; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+ol.findings { list-style: none; padding: 0; margin: 0; }
+ol.findings li { border-left: 3px solid var(--red); background: #fdf6f5; padding: 7px 10px; margin-bottom: 6px; border-radius: 0 6px 6px 0; page-break-inside: avoid; }
+ol.watch li { border-left-color: #c9a227; background: #fdfaf0; }
+.ft { font-weight: 600; } .fw { color: var(--ink2); } .fe { color: var(--muted); font-size: 9.5px; margin-top: 2px; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th { text-align: left; font-weight: 600; color: var(--ink2); border-bottom: 1px solid #c9c8c3; padding: 4px 6px; }
+td { border-bottom: 1px solid var(--line); padding: 4px 6px; vertical-align: top; }
+th.n, td.n { text-align: right; white-space: nowrap; }
+.up { color: var(--red); font-weight: 600; } .down { color: #2e7d32; }
+.tag { display: inline-block; font-size: 9px; padding: 0 5px; border-radius: 8px; background: #fde8e6; color: var(--red); margin-left: 4px; }
+.page { page-break-before: always; }
+ul.plain { margin: 4px 0; padding-left: 16px; }
 </style></head><body>
-<h1>CI fleet — ${esc(r.repo)}</h1>
-<div class="sub">${esc(days[0]?.day)} → ${esc(days[days.length - 1]?.day)} (UTC days) · generated ${esc(r.generated)} · usage sampled ${esc(r.window)} UTC</div>
-<div><span class="kpi"><b>$${ciTotal.toFixed(2)}</b>CI cost, ${days.length} days</span>
-<span class="kpi"><b>$${(ciTotal / Math.max(days.length, 1) * 30).toFixed(0)}/mo</b>run rate (target $${r.budget})</span>
-<span class="kpi"><b>${sum("merges")}</b>merges</span><span class="kpi"><b>${sum("pushes")}</b>PR pushes</span>
-<span class="kpi"><b>$${n2(ciTotal / Math.max(sum("merges"), 1))}</b>per merge</span><span class="kpi"><b>$${n2(ciTotal / Math.max(sum("pushes"), 1))}</b>per push</span></div>
 
-<h2>What looks wrong</h2>
-${r.anomalies.length ? table(["", "finding", "evidence"], r.anomalies.map((a) => [sev[a.severity], a.title, a.evidence])).replace(/<td>(Ticket|Watch)<\/td>/g, (_, s) => `<td class="${s.toLowerCase()}">${s}</td>`) : "<p>Nothing out of pattern.</p>"}
+<h1>Frota de CI — ${esc(r.repo)}</h1>
+<div class="sub">Semana de ${dm(days[0].day)} a ${dm(last.day)} · gerado em ${esc(localTime(r.generated, offset))} (Brasília)</div>
 
-<h2>Cost, merges and pushes per day</h2>
+<div class="kpis">
+${kpi(usd(ciTotal), "gasto em 7 dias")}
+${kpi(`${usd(monthly, 0)}/mês`, "ritmo de gasto", `meta ${usd(r.budget, 0)} · ${br(monthly / r.budget, 1)}× acima`)}
+${kpi(usd(ciTotal / Math.max(merges, 1)), "por merge", `${merges} merges`)}
+${kpi(usd(ciTotal / Math.max(pushes, 1)), "por push de PR", `${pushes} pushes`)}
+</div>
+
+<h2>Gasto por dia (US$)</h2>
+<div class="legend">${legend}</div>
+${columns(days, (d) => GROUPS.map((g) => ({ value: groupCost(d, g), color: g.color })), { label: (v) => br(v, 0) })}
+${estimated.length ? `<p class="note">${estimated.join(" e ")}: valores provisórios da AWS, ainda podem mudar.</p>` : ""}
+
+<h2>O que investigar</h2>
+${tickets.length ? `<ol class="findings">${tickets.map(finding).join("")}</ol>` : '<p class="muted">Nada fora do padrão.</p>'}
+${watch.length ? `<h2>Para observar</h2><ol class="findings watch">${watch.map(finding).join("")}</ol>` : ""}
+
+<div class="page"></div>
+<h2>Dia a dia</h2>
 ${table(
-  ["day", "CI $", "fleet tagged $", "account $", "merges", "PR pushes", "$/merge", "$/push", ""],
-  days.map((d) => [short(d), n2(d.cost?.ci), n2(d.tagged), n2(d.cost?.account), d.merges, d.pushes, n2(d.perMerge), n2(d.perPush), d.cost?.estimated ? "estimated" : ""]),
+  ["dia", "merges", "pushes de PR", "gasto", "por merge", "por push"],
+  days.map((d) => [dm(d.day) + (d.cost?.estimated ? " *" : ""), d.merges, d.pushes, usd(d.cost?.ci), usd(d.perMerge), usd(d.perPush)]),
+  { num: [1, 2, 3, 4, 5] },
 )}
-<p class="note">CI $ = account − Tax − Route 53 − $${r.baseline}/day baseline. Merges: pull requests merged that UTC day. PR pushes: ${esc(r.workflow)} runs started by a pull_request event.</p>
+<p class="note">Gasto = conta AWS menos impostos, Route 53 e ${usd(r.baseline)}/dia que a conta custa sem CI. Merges = PRs mesclados no dia (UTC). Pushes = execuções do ${esc(r.workflow)} disparadas por PR.${estimated.length ? " * provisório." : ""}</p>
 
-<h2>AWS CI cost by category ($/day)</h2>
-${table(["category", ...days.map(short), "total"], cats.map((c) => [c, ...days.map((d) => n2(d.cost?.categories?.[c] ?? 0)), n2(days.reduce((a, d) => a + (d.cost?.categories?.[c] ?? 0), 0))]))}
+<h2>Custo por merge (US$)</h2>
+${columns(days, (d) => [{ value: d.perMerge ?? 0, color: "#2a78d6" }], { height: 130 })}
 
-<h2>Disk the launch templates hand a host</h2>
+<h2>Para onde foi o dinheiro (US$ por dia)</h2>
 ${table(
-  ["region", "default version", "type", "IOPS", "MiB/s", "GiB", "changes in the window"],
-  r.templates.map((t) => {
-    const changes = t.changes ?? [];
-    const moved = changes.filter((c) => c.disk && c.previousDisk && (c.disk.iops !== c.previousDisk.iops || c.disk.throughput !== c.previousDisk.throughput));
-    const rest = changes.length - moved.length;
-    const text = moved.map((c) => `${c.at.slice(5, 16).replace("T", " ")} v${c.version} ${c.previousDisk.iops}/${c.previousDisk.throughput} → ${c.disk.iops}/${c.disk.throughput} (${c.by})`);
-    if (rest) text.push(`${rest} other default change(s), same disk`);
-    return [t.region, t.version ?? "–", t.disk?.type ?? "–", t.disk?.iops ?? "–", t.disk?.throughput ?? "–", t.disk?.size ?? "–", text.join("; ") || "none"];
-  }),
-)}
-
-<h2 class="brk">Job duration p50 (min) — sampled window</h2>
-${table(["job", ...days.map(short)], top.map((g) => [g, ...days.map((d) => n1(cell(d, g, "p50")))]))}
-
-<h2>IO wait p95 (%)</h2>
-${table(["job", ...days.map(short)], top.map((g) => [g, ...days.map((d) => n1(cell(d, g, "ioWaitP95")))]))}
-
-<h2 class="brk">Disk read/write p95 (MiB/s)</h2>
-${table(["job", ...days.map(short)], top.map((g) => [g, ...days.map((d) => cell(d, g, "mibpsP95") ?? "–")]))}
-
-<h2>Paid slot time — sampled window</h2>
-${table(
-  ["day", "runs", "jobs", "host boots", "paid slot-h", "running", "startup", "between", "tail", "never used", "queue p50 s", "p90 s"],
-  days.map((d) => {
-    const u = d.usage?.idle?.paidHours ? d.usage.idle : null;
-    const pct = (k) => (u ? `${(100 * u.shares[k]).toFixed(0)}%` : "–");
-    return [short(d), d.usage?.runs ?? "–", d.usage?.jobsCount ?? "–", u?.hosts ?? "–", n1(u?.paidHours), pct("busy"), pct("startup"), pct("between"), pct("tail"), pct("unused"), d.usage?.queueP50s ?? "–", d.usage?.queueP90s ?? "–"];
-  }),
+  ["", ...days.map((d) => dm(d.day)), "semana"],
+  Object.keys(CATEGORY_LABEL)
+    .map((c) => [c, sum((d) => d.cost?.categories?.[c])])
+    .filter(([, total]) => total >= 0.05)
+    .sort((a, b) => b[1] - a[1])
+    .map(([c, total]) => [CATEGORY_LABEL[c], ...days.map((d) => br(d.cost?.categories?.[c] ?? 0, 2)), br(total, 2)]),
+  { num: days.map((_, i) => i + 1).concat(days.length + 1) },
 )}
 
-<h2>Full suites dispatched</h2>
-${r.dispatches.length ? table(["started (UTC)", "local", "branch", "actor", "result", "wall min", "job-min", "run"], r.dispatches.map((x) => [x.started.slice(0, 16).replace("T", " "), `${String(localHour(x.started, r.offset)).padStart(2, "0")}h${offHours(x.started, { offset: r.offset }) ? " off-hours" : ""}`, x.branch, x.actor, x.conclusion ?? x.status, n1(x.wallMinutes), Math.round(x.jobMinutes), x.id])) : "<p>None.</p>"}
+<h2>Quanto do tempo pago das máquinas rodou job</h2>
+<div class="legend"><span class="key"><i style="background:#2a78d6"></i>rodando job</span><span class="key"><i style="background:#d9d8d3"></i>ligada sem job (subindo, entre jobs, esperando desligar)</span></div>
+${utilizationBars(days)}
+<p class="note">Medido das ${esc(r.window)} UTC de cada dia (amostra: ler o log de cada job do dia inteiro estouraria o limite da API do GitHub).</p>
+
+<div class="page"></div>
+<h2>Jobs mais pesados em ${measured ? dm(measured.day) : "–"}</h2>
+${jobRows.length ? table(["job", "execuções", "duração típica (min)", "neste dia (min)", "variação", "espera de disco", "disco MiB/s"], jobRows, { num: [1, 2, 3, 4, 5, 6] }) : '<p class="muted">Sem medição de uso.</p>'}
+<p class="note">Duração típica = mediana dos outros dias da semana. Espera de disco e MiB/s = p95. Mesma janela amostrada.</p>
+
+<h2>Disco das máquinas</h2>
+${diskNow}
+${moves.length ? `<ul class="plain">${moves.map((c) => `<li>${esc(localTime(c.at, offset))}: ${esc(c.regions.join(", "))} ${c.raised ? "<b>subiu</b>" : "desceu"} de ${c.previousDisk.iops}/${c.previousDisk.throughput} para ${c.disk.iops}/${c.disk.throughput} (IOPS/MiB/s), por ${esc(c.by)}</li>`).join("")}</ul>` : '<p class="muted">Nenhuma mudança de disco na semana.</p>'}
+
+<h2>Suítes completas disparadas</h2>
+${
+  r.dispatches.length
+    ? table(
+        ["quando (Brasília)", "branch", "quem", "resultado", "duração", "minutos de job"],
+        r.dispatches.map((x) => [
+          { html: `${esc(localTime(x.started, offset))}${offHours(x.started, { offset }) ? '<span class="tag">madrugada</span>' : ""}` },
+          x.branch,
+          x.actor === "github-actions[bot]" ? "agendada" : x.actor,
+          RESULT[x.conclusion] ?? x.status,
+          `${br(x.wallMinutes, 0)} min`,
+          br(x.jobMinutes, 0),
+        ]),
+        { num: [4, 5] },
+      )
+    : '<p class="muted">Nenhuma.</p>'
+}
 </body></html>`;
 }
 
@@ -630,7 +823,7 @@ async function main() {
     execFileSync(chrome(), ["--headless", "--no-sandbox", "--disable-gpu", "--no-pdf-header-footer", `--print-to-pdf=${pdf}`, pathToFileURL(path.resolve(html)).href], { stdio: "ignore" });
     console.error(`wrote ${pdf}`);
   }
-  for (const a of report.anomalies) console.log(`${a.severity.toUpperCase()}\t${a.title}\t${a.evidence}`);
+  for (const a of report.anomalies) console.log(`${a.severity.toUpperCase()}\t${a.title}\t${[a.why, a.evidence].filter(Boolean).join(" ")}`);
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {

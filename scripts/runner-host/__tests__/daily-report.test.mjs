@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { anomalies, category, disksInEffect, costByDay, offHours, reduceUsage, regionOf, renderHtml, taggedByDay, windowDays } from "../daily-report.mjs";
+import { anomalies, category, diskChanges, disksInEffect, costByDay, offHours, reduceUsage, regionOf, renderHtml, taggedByDay, windowDays } from "../daily-report.mjs";
 
 // The report is read as a phone notification and turned into tickets. A day
 // off by one, a cost filed under the wrong category or a rule that never fires
@@ -100,11 +100,13 @@ test("the rules fire on the week of 2026-09-26: run rate, spot growth, IOPS, dis
     "watch:slot-hours-2026-10-01",
     "watch:slower-jobs",
     "ticket:night-dispatch",
-    "ticket:dispatch-loop-2026-10-02 ci/hang",
   ]) {
     assert.ok(found.includes(k), `${k} missing from ${found.join(", ")}`);
   }
   assert.ok(found.indexOf("watch:slower-jobs") > found.indexOf("ticket:budget"), "tickets come first");
+  assert.ok(!found.includes("ticket:dispatch-loop-2026-10-02 ci/hang"), "night runs are named once, by the night finding");
+  const day3 = [10, 13, 16].map((h, i) => ({ id: i, branch: "ci/hang", actor: "a", started: `2026-10-02T${h}:00:00Z`, conclusion: "failure", jobMinutes: 100, wallMinutes: 30 }));
+  assert.ok(keys({ days, templates: [tpl("us-east-1")], dispatches: day3 }).includes("ticket:dispatch-loop-2026-10-02 ci/hang"), "three daytime runs on one branch are a loop");
 });
 
 test("a disk the template provisioned that day explains its IOPS and throughput", () => {
@@ -146,11 +148,27 @@ test("reduceUsage keeps what the report shows, and renderHtml prints every secti
   assert.equal(u.queueP50s, 4);
   assert.ok(u.idle.paidHours > 0 && u.idle.runningShare > 0 && u.idle.runningShare < 1);
 
-  const r = { repo: "o/r", until: "2026-10-03", generated: "now", window: "14:00–17:00", workflow: "ci.yml", baseline: 0.69, budget: 100, offset: -3, templates: [tpl("us-east-1")], days: [day("2026-10-02", { usage: u })], dispatches: [], anomalies: [{ severity: "ticket", key: "k", title: "<b>x</b>", evidence: "e" }] };
+  const dispatches = [{ id: 1, branch: "main", actor: "a", started: "2026-10-02T03:44:00Z", conclusion: "failure", jobMinutes: 200, wallMinutes: 40 }];
+  const r = { repo: "o/r", until: "2026-10-03", generated: "2026-10-03T19:23:00Z", window: "14:00–17:00", workflow: "ci.yml", baseline: 0.69, budget: 100, offset: -3, templates: [tpl("us-east-1")], days: [day("2026-10-02", { usage: u })], dispatches, anomalies: [{ severity: "ticket", key: "k", title: "<b>x</b>", why: "porque", evidence: "e" }] };
   const html = renderHtml(r);
-  for (const h of ["What looks wrong", "Cost, merges and pushes per day", "AWS CI cost by category", "launch templates", "Job duration p50", "IO wait p95", "MiB/s", "Paid slot time", "Full suites dispatched"]) {
+  for (const h of ["gasto em 7 dias", "Gasto por dia", "O que investigar", "Dia a dia", "Custo por merge", "Para onde foi o dinheiro", "tempo pago das máquinas", "Jobs mais pesados", "Disco das máquinas", "Suítes completas disparadas"]) {
     assert.ok(html.includes(h), h);
   }
   assert.ok(html.includes("&lt;b&gt;x&lt;/b&gt;") && !html.includes("<b>x</b>"), "finding text is escaped");
-  assert.ok(html.includes('class="ticket"'));
+  assert.ok(html.includes("porque"), "the finding's why is printed");
+  assert.ok(html.includes("gerado em 03/10 16:23"), "times are local");
+  assert.ok(html.includes("02/10 00:44") && html.includes("madrugada"), "an off-hours dispatch is marked");
+  assert.ok(html.includes("US$ 20,00"), "money is written the Brazilian way");
+});
+
+test("diskChanges folds one deploy across regions and finds when it was undone", () => {
+  const up = (region) => ({ at: region === "us-east-1" ? "2026-09-30T17:13:38Z" : "2026-09-30T17:14:51Z", version: 16, by: "provisioner", disk: { iops: 6000, throughput: 500 }, previousDisk: { iops: 3000, throughput: 250 } });
+  const down = { at: "2026-10-01T18:06:40Z", version: 15, by: "provisioner", disk: { iops: 3000, throughput: 250 }, previousDisk: { iops: 6000, throughput: 500 } };
+  const t = ["us-east-1", "eu-north-1"].map((region) => tpl(region, 3000, 250, [up(region), down]));
+  const moves = diskChanges(t);
+  assert.equal(moves.length, 2);
+  assert.deepEqual(moves[0].regions, ["us-east-1", "eu-north-1"]);
+  assert.equal(moves[0].raised, true);
+  assert.equal(moves[0].back, "2026-10-01T18:06:40Z");
+  assert.equal(moves[1].raised, false);
 });
