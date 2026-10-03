@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { anomalies, category, diskChanges, disksInEffect, costByDay, offHours, reduceUsage, regionOf, renderHtml, taggedByDay, windowDays } from "../daily-report.mjs";
+import { anomalies, category, diskChanges, disksInEffect, costByDay, offHours, reduceUsage, regionOf, renderHtml, taggedByDay, windowDays, windowUtilization } from "../daily-report.mjs";
 
 // The report is read as a phone notification and turned into tickets. A day
 // off by one, a cost filed under the wrong category or a rule that never fires
@@ -142,7 +142,7 @@ test("regions handing out different disks is drift", () => {
 
 test("reduceUsage keeps what the report shows, and renderHtml prints every section", () => {
   const usage = { runner: "eu-north-1b-ip-1-2-3-4-1-1790575022", hostBootS: 1000, startMs: 1_060_000, wallMs: 600_000, peakWorkingSetMiB: 1000, ioWaitPct: 12, peakDiskMiBps: 200, oomKills: 0 };
-  const u = reduceUsage({ runs: 1, jobs: 1, records: [{ group: "CI / Unit", usage, queuedMs: 4000 }], waiting: [] });
+  const u = reduceUsage({ runs: 1, jobs: 1, records: [{ group: "CI / Unit", usage, startedMs: 1_060_000, queuedMs: 4000 }] }, { from: 0, to: 10_000_000 });
   assert.equal(u.jobs[0].p50, 10);
   assert.equal(u.jobs[0].mibpsP95, 200);
   assert.equal(u.queueP50s, 4);
@@ -159,6 +159,23 @@ test("reduceUsage keeps what the report shows, and renderHtml prints every secti
   assert.ok(html.includes("gerado em 03/10 16:23"), "times are local");
   assert.ok(html.includes("02/10 00:44") && html.includes("madrugada"), "an off-hours dispatch is marked");
   assert.ok(html.includes("US$ 20,00"), "money is written the Brazilian way");
+});
+
+test("windowUtilization cuts hosts and jobs to the window, so a host busy all morning is not idle", () => {
+  const H = 3_600_000;
+  const at = (h) => Date.parse("2026-10-01T00:00:00Z") + h * H;
+  const job = (slot, start, hours, boot = at(9)) => ({ usage: { runner: `eu-north-1b-ip-1-2-3-4-${slot}-1790575022`, hostBootS: boot / 1000, startMs: start, wallMs: hours * H } });
+  // Booted at 09:00, both slots busy 09:00–17:00 in back-to-back one-hour jobs.
+  const records = [1, 2].flatMap((slot) => Array.from({ length: 8 }, (_, i) => job(slot, at(9 + i), 1)));
+  const inWindow = windowUtilization(records, at(14), at(17));
+  assert.equal(inWindow.paidHours, 6, "2 slots × 3 h of window, not 2 × 8 h since boot");
+  assert.ok(Math.abs(inWindow.runningShare - 1) < 0.01, "busy the whole window");
+  // The same host as the old sampling saw it: only jobs from runs created in the window.
+  const sampled = records.filter((r) => r.usage.startMs >= at(14));
+  assert.ok(windowUtilization(sampled, at(14), at(17)).runningShare > 0.99, "the cut no longer charges the morning to the window");
+  // Half idle: one slot ran nothing after 15:00, the host stayed up for the other.
+  const half = [job(1, at(14), 1), job(2, at(14), 3)];
+  assert.equal(Math.round(100 * windowUtilization(half, at(14), at(17)).runningShare), 67);
 });
 
 test("diskChanges folds one deploy across regions and finds when it was undone", () => {

@@ -48,7 +48,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { collect, fetchRetrying, idleBreakdown, percentile, summarizeJobs } from "./usage-report.mjs";
+import { collect, fetchRetrying, hostAndSlot, percentile, summarizeJobs } from "./usage-report.mjs";
 
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
@@ -578,7 +578,7 @@ ${table(
 <h2>Quanto do tempo pago das máquinas rodou job</h2>
 <div class="legend"><span class="key"><i style="background:#2a78d6"></i>rodando job</span><span class="key"><i style="background:#d9d8d3"></i>ligada sem job (subindo, entre jobs, esperando desligar)</span></div>
 ${utilizationBars(days)}
-<p class="note">Medido das ${esc(r.window)} UTC de cada dia (amostra: ler o log de cada job do dia inteiro estouraria o limite da API do GitHub).</p>
+<p class="note">Medido das ${esc(r.window)} UTC de cada dia, com o tempo de cada máquina e de cada job cortado nessa janela (amostra: ler o log de cada job do dia inteiro estouraria o limite da API do GitHub). Máquina que ligou e não rodou nenhum job não aparece, então o ocioso real é um pouco maior.</p>
 
 <div class="page"></div>
 <h2>Jobs mais pesados em ${measured ? dm(measured.day) : "–"}</h2>
@@ -726,18 +726,53 @@ async function dispatches(repo, workflow, days, until) {
   return out.sort((a, b) => a.started.localeCompare(b.started));
 }
 
-/** The sampled window's usage, reduced to what the report shows. */
-export function reduceUsage({ runs, jobs, records, waiting }, { slots = 2, idleMinutes = 2 } = {}) {
-  const rows = summarizeJobs(records);
-  const t = idleBreakdown(
-    records.map((r) => r.usage),
-    { slots, idleMinutes, waiting },
-  );
-  const waits = records.map((r) => r.queuedMs).filter(Number.isFinite);
-  const share = (ms) => (t.paid ? ms / t.paid : 0);
+/**
+ * How much of the paid slot time inside [from, to) ran a job.
+ *
+ * Every host is paid per slot from its boot until IDLE minutes after its last
+ * job; both that stretch and every job are CUT to the window before they are
+ * summed. Counting a host from its boot instead charges the window with the
+ * hours it spent, before the window, running jobs the window never read
+ * (2026-10-03: that made a long-lived fleet look 27% busy). `records` must
+ * hold every job that ran in the window, so the collection starts before it.
+ * A host that ran no job at all never shows up: idle is a slight UNDER-count.
+ */
+export function windowUtilization(records, from, to, { slots = 2, idleMinutes = 2 } = {}) {
+  const clip = (a, b) => Math.max(0, Math.min(b, to) - Math.max(a, from));
+  const hosts = new Map();
+  let busy = 0;
+  for (const { usage: u } of records) {
+    const hs = hostAndSlot(u.runner);
+    if (!hs || !Number.isFinite(u.hostBootS) || !Number.isFinite(u.startMs)) continue;
+    const key = `${hs.host}@${u.hostBootS}`;
+    const h = hosts.get(key) ?? { boot: u.hostBootS * 1000, end: 0, slots: new Set() };
+    h.end = Math.max(h.end, u.startMs + u.wallMs);
+    h.slots.add(hs.slot);
+    hosts.set(key, h);
+    busy += clip(u.startMs, u.startMs + u.wallMs);
+  }
+  let paid = 0;
+  let live = 0;
+  for (const h of hosts.values()) {
+    const p = clip(h.boot, h.end + idleMinutes * 60_000);
+    if (p > 0) live++;
+    paid += p * Math.max(slots, h.slots.size);
+  }
+  return { hosts: live, paidHours: paid / HOUR, runningHours: busy / HOUR, runningShare: paid ? busy / paid : 0 };
+}
+
+/**
+ * The window's usage, reduced to what the report shows. `records` reach back
+ * before `from` (see windowUtilization); job statistics count only the jobs
+ * that started inside the window.
+ */
+export function reduceUsage({ runs, jobs, records }, { from, to, slots = 2, idleMinutes = 2 } = {}) {
+  const inside = records.filter((r) => r.startedMs >= from && r.startedMs < to);
+  const rows = summarizeJobs(inside);
+  const waits = inside.map((r) => r.queuedMs).filter(Number.isFinite);
   return {
     runs,
-    jobsCount: jobs,
+    jobsCount: inside.length,
     jobs: rows.map((j) => ({
       group: j.group,
       runs: j.runs,
@@ -747,13 +782,7 @@ export function reduceUsage({ runs, jobs, records, waiting }, { slots = 2, idleM
       mibpsP95: j.peakDiskMiBpsP95,
       oom: j.oomKills,
     })),
-    idle: {
-      hosts: t.hosts,
-      paidHours: t.paid / HOUR,
-      runningHours: t.busy / HOUR,
-      runningShare: share(t.busy),
-      shares: { busy: share(t.busy), startup: share(t.startup), between: share(t.between), tail: share(t.tail), unused: share(t.unused) },
-    },
+    idle: windowUtilization(records, from, to, { slots, idleMinutes }),
     queueP50s: waits.length ? Math.round(percentile(waits, 50) / 1000) : null,
     queueP90s: waits.length ? Math.round(percentile(waits, 90) / 1000) : null,
   };
@@ -807,7 +836,13 @@ async function main() {
     await spare(reserve);
     console.error(`${day}: usage ${fromH}–${toH} UTC…`);
     const hh = (h) => String(h).padStart(2, "0");
-    const usage = reduceUsage(await collect({ repo, since: `${day}T${hh(fromH)}:00:00Z`, until: `${day}T${hh(toH)}:00:00Z`, label }));
+    // Runs created up to an hour before the window still run jobs inside it,
+    // and a host's last job may come from a run created just after it.
+    const from = Date.parse(`${day}T${hh(fromH)}:00:00Z`);
+    const to = Date.parse(`${day}T${hh(toH)}:00:00Z`);
+    const iso = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+    const collected = await collect({ repo, since: iso(from - HOUR), until: iso(to + 15 * 60_000), label });
+    const usage = reduceUsage(collected, { from, to, slots: Number(args.slots ?? 2), idleMinutes: Number(args["idle-minutes"] ?? 2) });
     const c = cost.all[day];
     report.days.push({ day, pushes, merges, cost: c, tagged: cost.tagged[day], perPush: c && pushes ? c.ci / pushes : null, perMerge: c && merges ? c.ci / merges : null, usage });
   }
