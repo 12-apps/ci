@@ -649,7 +649,8 @@ function ce(args) {
 
 function costs(days, until, baseline) {
   const period = `Start=${days[0]},End=${until}`;
-  const base = ["ce", "get-cost-and-usage", "--time-period", period, "--granularity", "DAILY", "--metrics", "UnblendedCost"];
+  // Cost Explorer answers only in us-east-1; say so, since the environment may set no region.
+  const base = ["ce", "get-cost-and-usage", "--region", "us-east-1", "--time-period", period, "--granularity", "DAILY", "--metrics", "UnblendedCost"];
   const all = costByDay(ce([...base, "--group-by", "Type=DIMENSION,Key=SERVICE", "Type=DIMENSION,Key=USAGE_TYPE"]), { baseline });
   const tagged = taggedByDay(ce([...base, "--filter", '{"Tags":{"Key":"Project","Values":["ci-runner"]}}', "--group-by", "Type=DIMENSION,Key=REGION"]));
   return { all, tagged };
