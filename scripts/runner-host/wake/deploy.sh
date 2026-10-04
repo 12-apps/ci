@@ -43,6 +43,13 @@
 # (/ci-runner/budget-alert, a JSON SecureString {"url", "headers"}) once.
 # SPOT_STRATEGY (capacity-optimized): the EC2 Fleet spot allocation strategy.
 # IDLE_MINUTES (2): a host powers itself off after this long without a job.
+# SETTLE_SECONDS (30): a job queued with no free slot waits this long for one
+# before the scaler launches a host for it (scale.mjs, settling). Most fleet
+# jobs last under a minute, so most such jobs get a slot without a launch.
+# ALLOW_STALE (0): deploy.sh refuses to run from a checkout behind origin/main,
+# since every setting it does not read from the live fleet comes from this
+# checkout's defaults. On 2026-09-30 a deploy from an older checkout put the
+# fleet back on 6000/500 disks and 4xlarge hosts for a day. 1 skips the check.
 # PNPM_STORE (off): `on` mounts the image's warm pnpm store into every job.
 # PRUNE_IMAGES (1): after a deploy, delete each region's older fleet images and
 # their snapshots, keeping the image in use, the one before it and any a live
@@ -51,6 +58,13 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
+if [[ "${ALLOW_STALE:-0}" != 1 ]]; then
+  git -C "$here" fetch -q origin main 2>/dev/null || { echo "deploy: cannot fetch origin/main to check this checkout is current (ALLOW_STALE=1 skips)" >&2; exit 1; }
+  git -C "$here" merge-base --is-ancestor origin/main HEAD || {
+    echo "deploy: this checkout is behind origin/main; its defaults are not the fleet's. Update it (or ALLOW_STALE=1)." >&2
+    exit 1
+  }
+fi
 region="${AWS_REGION:?set AWS_REGION to the home region of the fleet}"
 repo="${REPOSITORY:?set REPOSITORY to the owner/repo whose jobs the fleet runs}"
 label="${RUNNER_LABEL:?set RUNNER_LABEL to the runs-on label of its jobs}"
@@ -65,6 +79,7 @@ budget_utc_offset="${BUDGET_UTC_OFFSET:--3}"
 alert_param="${ALERT_PARAMETER:-/ci-runner/budget-alert}"
 spot_strategy="${SPOT_STRATEGY:-capacity-optimized}"
 idle_minutes="${IDLE_MINUTES:-2}"
+settle_seconds="${SETTLE_SECONDS:-30}"
 pnpm_store="${PNPM_STORE:-off}"
 [[ "$pnpm_store" == on || "$pnpm_store" == off ]] || { echo "deploy: PNPM_STORE must be on or off" >&2; exit 1; }
 # Boot-time settings, applied to the image's /etc/ci-runner/env by cloud-init's
@@ -303,9 +318,11 @@ trap 'rm -rf "$work"' EXIT
 (umask 077; jq -n --rawfile s "$secret_file" --arg l "$label" --arg r "$repo" --arg t "$template" \
   --arg p "$param" --arg types "$types" --arg regions "$live_regions" --arg slots "$slots" --arg max "$max_hosts" \
   --arg budget "$daily_budget" --arg degraded "$degraded_max_hosts" --arg offset "$budget_utc_offset" --arg alert "$alert_param" --arg strategy "$spot_strategy" \
+  --arg settle "$settle_seconds" \
   '{Variables: {MODE: "scale", WEBHOOK_SECRET: ($s | rtrimstr("\n")), RUNNER_LABEL: $l, REPOSITORY: $r,
     LAUNCH_TEMPLATE: $t, TOKEN_PARAMETER: $p, INSTANCE_TYPES: $types, REGIONS: $regions, SLOTS_PER_HOST: $slots, MAX_HOSTS: $max,
-    DAILY_BUDGET: $budget, DEGRADED_MAX_HOSTS: $degraded, BUDGET_UTC_OFFSET: $offset, ALERT_PARAMETER: $alert, SPOT_STRATEGY: $strategy}}' > "$work/env.json")
+    DAILY_BUDGET: $budget, DEGRADED_MAX_HOSTS: $degraded, BUDGET_UTC_OFFSET: $offset, ALERT_PARAMETER: $alert, SPOT_STRATEGY: $strategy,
+    SETTLE_SECONDS: $settle}}' > "$work/env.json")
 cp "$here/wake.mjs" "$here/scale.mjs" "$here/budget.mjs" "$here/github.mjs" "$here/queue.mjs" "$here/index.mjs" "$work/"
 (cd "$work" && python3 -m zipfile -c fn.zip wake.mjs scale.mjs budget.mjs github.mjs queue.mjs index.mjs)
 if aws lambda get-function --function-name "$fn" >/dev/null 2>&1; then

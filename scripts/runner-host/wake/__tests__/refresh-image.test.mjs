@@ -74,6 +74,8 @@ esac
     INSTANCE_PROFILE_ARN: "arn:aws:iam::1:instance-profile/x",
     RUNNER_LABEL: "future-pay-ci",
     FUNCTION_NAME: "ci-runner-scale",
+    // deploy.sh's stale-checkout check fetches origin; deploy-guard.test.mjs covers it.
+    ALLOW_STALE: "1",
   };
   for (const [k, v] of Object.entries(overrides)) {
     if (v === undefined) delete env[k];
