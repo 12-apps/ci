@@ -15,6 +15,7 @@
 
 const JOB = "j#";
 const RECONCILE = "#reconcile";
+const SETTLE = "#settle";
 
 /**
  * @param {object} cfg
@@ -63,6 +64,23 @@ export function makeQueue({ client, commands, table, now = () => Date.now(), ttl
           ConditionExpression: "attribute_not_exists(#at) OR #at < :due",
           ExpressionAttributeNames: { "#at": "at" },
           ExpressionAttributeValues: { ":now": { N: String(now()) }, ":due": { N: String(now() - reconcileSeconds * 1000) } },
+        }));
+        return true;
+      } catch (e) {
+        if (e.name === "ConditionalCheckFailedException") return false;
+        throw e;
+      }
+    },
+    // True for the one evaluation that waits `seconds` before launching
+    // (scale.mjs, settling); the others leave the launch to it.
+    async claimSettle(seconds) {
+      try {
+        await client.send(new UpdateItemCommand({
+          TableName: table, Key: { id: { S: SETTLE } },
+          UpdateExpression: "SET #at = :now",
+          ConditionExpression: "attribute_not_exists(#at) OR #at < :due",
+          ExpressionAttributeNames: { "#at": "at" },
+          ExpressionAttributeValues: { ":now": { N: String(now()) }, ":due": { N: String(now() - seconds * 1000) } },
         }));
         return true;
       } catch (e) {

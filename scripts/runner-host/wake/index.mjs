@@ -4,6 +4,7 @@
 //   WEBHOOK_SECRET, RUNNER_LABEL, REPOSITORY          both modes
 //   INSTANCE_ID                                       wake
 //   LAUNCH_TEMPLATE, REGIONS, INSTANCE_TYPES, TOKEN_PARAMETER, SLOTS_PER_HOST, MAX_HOSTS   scale
+//   SETTLE_SECONDS (0: launch at once; see scale.mjs, settling)                       scale
 //   DAILY_BUDGET, DEGRADED_MAX_HOSTS, BUDGET_UTC_OFFSET, SPEND_PARAMETER, ALERT_PARAMETER   scale (budget.mjs)
 import {
   CreateFleetCommand, DescribeInstanceTypeOfferingsCommand, DescribeInstancesCommand, DescribeSubnetsCommand,
@@ -441,6 +442,7 @@ const serve = (env.MODE ?? "scale") === "wake"
   : makeScaler({
       secret: env.WEBHOOK_SECRET, label: env.RUNNER_LABEL, repo: env.REPOSITORY, github, ec2: fleet,
       slotsPerHost: Number(env.SLOTS_PER_HOST ?? 2), maxHosts: currentCap,
+      settleSeconds: Number(env.SETTLE_SECONDS ?? 0),
       allowance: () => github.allowance(),
       queue,
     });

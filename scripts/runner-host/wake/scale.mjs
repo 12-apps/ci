@@ -89,6 +89,7 @@ export function regionOrder(regions, scores) {
 export function makeScaler({
   secret, label, repo, github, ec2, slotsPerHost = 3, maxHosts = 30, bootSeconds = 180, now = () => Date.now(),
   refreshSeconds = 15, reserve = 0.2, allowance = () => undefined, queue,
+  settleSeconds = 0, sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
 }) {
   let evaluatedAt = -Infinity;
   // The queue kept from the webhooks (queue.mjs). A failed call returns
@@ -142,7 +143,17 @@ export function makeScaler({
   // `delivered` is the job this delivery announces: GitHub can deliver it a
   // few seconds before its jobs API lists it as queued, so a `queued`
   // delivery counts as at least one job waiting.
-  async function evaluate(delivered) {
+  //
+  // Settling. Most fleet jobs last under a minute, so a job queued with no
+  // free slot usually finds one within seconds: on 2026-10-02 the median wait
+  // was 3 s and the p90 39 s. Launching at once for it bought a host that
+  // booted for two minutes, ran a few short jobs and powered off: 798 hosts
+  // that day, 8 minutes median, 23% of the billed hours outside any job. With
+  // `settleSeconds`, an evaluation that would launch waits that long, reads
+  // the queue again and launches only what is still missing. One evaluation
+  // settles at a time (the queue table's claim); the others return, since the
+  // settling one counts their jobs when it reads the queue again.
+  async function evaluate(delivered, settled = false) {
     // A function when the cap moves (the daily budget, budget.mjs).
     const cap = typeof maxHosts === "function" ? await maxHosts() : maxHosts;
     const [listed, idle, hosts] = await Promise.all([waiting(), github.idleRunners(label), ec2.hosts()]);
@@ -154,6 +165,18 @@ export function makeScaler({
     const deficit = queued - idle - booting.length * slotsPerHost;
     const room = Math.max(0, cap - live.length);
     const launch = Math.min(room, Math.max(0, Math.ceil(deficit / slotsPerHost)));
+    if (launch > 0 && settleSeconds > 0 && !settled) {
+      // A queue that cannot be claimed (no table, a failed call) settles here.
+      const mine = queue ? await kept("settle", () => queue.claimSettle(settleSeconds)) : true;
+      if (mine === false) {
+        const waiting = { queued, idle, hosts: live.length, booting: booting.length, launched: 0, settling: "elsewhere", cap };
+        console.log(JSON.stringify(waiting));
+        return waiting;
+      }
+      console.log(JSON.stringify({ queued, idle, hosts: live.length, booting: booting.length, wouldLaunch: launch, settling: settleSeconds }));
+      await sleep(settleSeconds * 1000);
+      return evaluate(0, true);
+    }
     const parked = hosts.filter((h) => h.pool && h.state === "stopped").slice(0, launch).map((h) => h.id);
     const started = parked.length ? await startPool(parked) : [];
     const rest = launch - started.length;
