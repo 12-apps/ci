@@ -24,7 +24,7 @@ export function git(args, { cwd = process.cwd(), ok = [0], input, env } = {}) {
   if (!ok.includes(res.status)) {
     throw new Error(`git ${args.join(" ")} exited ${res.status}: ${res.stderr.trim()}`);
   }
-  return { out: res.stdout, status: res.status };
+  return { out: res.stdout, status: res.status, err: res.stderr };
 }
 
 export const lines = (text) => text.split("\n").filter(Boolean);

@@ -35,6 +35,12 @@ name: Conflict probe (reusable)
 #       with:
 #         pr: ${{ github.event.pull_request.number || '' }}
 #
+# With conflict-restack.yml, the probe job `needs: restack`, keeps its own
+# condition under `always()`, and passes `restacked:
+# ${{ needs.restack.outputs.pushed }}` (CONSUMING.md, "Consuming the Conflict
+# monitor's re-stack"). A stacked PR's comment then lists only the conflicts
+# no merge base removes, with the command that takes the base in.
+#
 # WHY `pull_request: synchronize` AS WELL AS `push`: a push to the base is what
 # makes a PR conflict, but the push that FIXES it lands on the PR branch — the
 # author's merge, or a heal job's. Probing just that PR on its own push turns
@@ -65,6 +71,14 @@ on:
         type: boolean
         required: false
         default: false
+      restacked:
+        description: >-
+          conflict-restack.yml's `pushed` output. A PR it lists is not fetched
+          again (refs/pull/N/head lags a push) and counts as clean against the
+          base it was merged with. Empty: none.
+        type: string
+        required: false
+        default: ''
       node-version:
         description: 'Node version the scripts run on.'
         type: string
@@ -111,3 +125,4 @@ jobs:
           base: ${{ inputs.base }}
           pr: ${{ inputs.pr }}
           dry-run: ${{ inputs.dry-run }}
+          restacked: ${{ inputs.restacked }}

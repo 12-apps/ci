@@ -25,11 +25,31 @@
  *
  *   code: stacked            the branch already held commits of a PR that
  *                            caused the conflict — a child meeting its own
- *                            squash-merged parent
+ *                            squash-merged parent — and the file merges
+ *                            cleanly once that parent's pre-squash head is a
+ *                            merge base: a person resolved by hand what the
+ *                            re-stack (lib/restack.mjs) does
  *   code: duplicated scope   add/add: both sides created the file
  *   code: append point       insert/insert: both sides added at the same spot
  *   code: moved or deleted   modify/delete, rename, file location
  *   code: concurrent edit    edit/edit: the same lines, changed twice
+ *
+ * RE-STACK-AWARE. A stacked sync is replayed a second time against the
+ * re-stack base Z (the sync's base side, with each stacked parent's held head
+ * as an extra parent). A file that still conflicts there is a real conflict
+ * and is grouped by its shape IN THAT MERGE; a file Z resolves is `stacked`
+ * — unless the sync is the tool's own merge: `Restack-Base`/`Restack-Parent`
+ * trailers naming exactly the pOlds and parents this replay computes, and the
+ * committed blob equal to Z's. Then the file is not counted at all, and the
+ * sync is listed as "re-stacked by the tool" (or "redone at push", with
+ * `Restack-Redo`). A copied trailer names another pOld or parent and is
+ * refused; a forged one can hide only a blob byte-identical to the tool's.
+ *
+ * LEGACY. Each file also keeps the group today's rule gives it (the default
+ * merge, the held test), and the summary prints those columns next to the
+ * re-stack-aware ones. Both map a culprit to its PR through the PR list's
+ * `merge_commit_sha` first and the subject's `(#N)` second: a squash whose
+ * title had no `(#N)`, or the wrong one, is still its PR's.
  */
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -38,8 +58,10 @@ import { analyzeMerge } from "./lib/analyze.mjs";
 import { codeOf } from "./lib/comment.mjs";
 import { DEFAULT_BUCKET, loadConfig, ticketsIn } from "./lib/config.mjs";
 import { isMain } from "./lib/entry.mjs";
-import { git, lines, revParse } from "./lib/git.mjs";
+import { blobAt, git, lines, mergeTree, revParse } from "./lib/git.mjs";
 import { githubClient } from "./lib/github.mjs";
+import { blobId, heldHead, revertOf, toolMade, trailersOf, virtualBase } from "./lib/restack.mjs";
+import { fileShape } from "./lib/shape.mjs";
 import { heldCommitsOf as holdsCommits } from "./lib/stack.mjs";
 
 const log = (msg) => console.log(`[conflict-monitor] ${msg}`);
@@ -103,10 +125,38 @@ function heldCommitsOf(culpritPr, { mainSide, branchSide, cwd, cache }) {
   return holdsCommits(head, { mainSide, branchSide, cwd, cache });
 }
 
+/**
+ * A stacked sync replayed against the re-stack base: the parents with a held
+ * head, the merge with Z, and whether the commit is the tool's own merge.
+ * `culpritOf(n)` is the base commit that squash-merged PR n (for the revert
+ * skip). A parent the base reverted, or whose head's first-parent chain the
+ * branch does not hold, is left out of Z, as the bot leaves it out.
+ */
+function restackReplay({ commit, mainSide, branchSide, stackedOn, culpritOf, cwd }) {
+  const parents = [];
+  for (const n of stackedOn) {
+    const head = revParse(PR_REF(n), cwd);
+    if (!head) continue;
+    const sha = culpritOf(n);
+    if (sha && revertOf({ base: mainSide, child: branchSide, sha, pr: n, cwd })) continue;
+    const pOld = heldHead({ head, base: mainSide, child: branchSide, cwd });
+    if (pOld) parents.push({ pr: n, pOld });
+  }
+  if (!parents.length) return { parents, merge: null, tool: false, redo: false };
+  const merge = mergeTree(branchSide, virtualBase({ base: mainSide, pOlds: parents.map((p) => p.pOld), cwd }), cwd);
+  const trailers = trailersOf(commit, cwd);
+  const tool = toolMade(trailers, parents);
+  return { parents, merge, tool, redo: tool && trailers.redo };
+}
+
 export function replay({ prs, base, baseTip, config, until = null, cwd = process.cwd(), onProgress = () => {} }) {
   const untilMs = until ? instant(until, "until") : null;
   const line = baseLine({ prs, base, baseTip, cwd });
   const byNumber = new Map(prs.map((p) => [p.number, p]));
+  // The PR a squash landed is the one whose merge commit it IS; the subject's
+  // `(#N)` is only the fallback (a rewritten base keeps the subject, not the
+  // commit the PR list names).
+  const bySquash = new Map(prs.filter((p) => p.mergedAt && p.mergeCommit).map((p) => [p.mergeCommit, p.number]));
   const syncs = [];
   let otherMerges = 0;
   const cache = new Map();
@@ -130,9 +180,20 @@ export function replay({ prs, base, baseTip, config, until = null, cwd = process
         syncs.push({ pr: pr.number, commit, date, conflicted: false, files: [] });
         continue;
       }
+      for (const r of records) for (const c of r.culprits) c.pr = bySquash.get(c.sha) ?? c.pr;
       const culpritPrs = new Set(records.flatMap((r) => r.culprits.map((c) => c.pr)).filter((n) => n && n !== pr.number));
       const stackedOn = [...culpritPrs].filter((n) => heldCommitsOf(n, { mainSide, branchSide, cwd, cache }));
       const stacked = stackedOn.length > 0;
+      // The squash of PR n among the culprits: its own merge commit when the
+      // PR list names it, else the oldest commit mapped to n (a revert that
+      // quotes `(#n)` comes after the squash it reverts).
+      const culpritOf = (n) => {
+        const mine = records.flatMap((r) => r.culprits).filter((c) => c.pr === n);
+        const own = byNumber.get(n)?.mergeCommit;
+        return mine.find((c) => c.sha === own)?.sha ?? mine.at(-1)?.sha ?? null;
+      };
+      const rs = stacked ? restackReplay({ commit, mainSide, branchSide, stackedOn, culpritOf, cwd }) : null;
+      const committed = `${commit}^{tree}`;
       const mine = ticketsOf(pr, config);
       const files = records.map((r) => {
         const prsTouching = [...new Set(r.culprits.map((c) => c.pr).filter(Boolean))];
@@ -145,9 +206,30 @@ export function replay({ prs, base, baseTip, config, until = null, cwd = process
             const theirs = ticketsOf(other, config);
             return [...mine].some((t) => theirs.has(t));
           });
-        return { file: r.file, shape: r.shape, bucket: r.bucket, group: groupOf(r, { stacked }), culprits: prsTouching, sameTicket };
+        const legacyGroup = groupOf(r, { stacked });
+        let group = legacyGroup;
+        let resolvedBy = null;
+        if (rs?.merge) {
+          const residual = rs.merge.conflicted && rs.merge.files.includes(r.file);
+          if (!residual && rs.tool && blobId(committed, r.file, cwd) === blobId(rs.merge.tree, r.file, cwd)) {
+            group = null;
+            resolvedBy = rs.redo ? "redone" : "tool";
+          } else if (r.bucket === DEFAULT_BUCKET && residual) {
+            const shape = fileShape(rs.merge.kinds.get(r.file) ?? new Set(), blobAt(rs.merge.tree, r.file, cwd));
+            group = groupOf({ bucket: r.bucket, shape }, { stacked: false });
+          }
+        } else if (rs) {
+          // Stacked by the held test, but no parent has a head the branch
+          // holds on its first-parent chain: there is nothing to re-stack
+          // with, so the file is the conflict its shape says.
+          group = groupOf(r, { stacked: false });
+        }
+        return { file: r.file, shape: r.shape, bucket: r.bucket, group, legacyGroup, resolvedBy, culprits: prsTouching, sameTicket };
       });
-      syncs.push({ pr: pr.number, commit, date, conflicted: true, stackedOn, files });
+      const restack = rs
+        ? { parents: rs.parents, clean: rs.merge ? !rs.merge.conflicted : null, residual: rs.merge?.conflicted ? rs.merge.files.length : 0, tool: rs.tool, redo: rs.redo }
+        : null;
+      syncs.push({ pr: pr.number, commit, date, conflicted: true, stackedOn, restack, files });
     }
   });
   return { syncs, otherMerges };
@@ -174,24 +256,36 @@ export function aggregate({ syncs, otherMerges }, { since, config }) {
   const inWindow = (s) => Date.parse(s.date) >= sinceMs;
   const declared = new Set(config.rules.map((r) => r.name));
   const groups = new Map();
+  const legacy = new Map();
   const shapes = new Map();
   const files = { all: new Map(), window: new Map() };
   const culprits = new Map();
+  const restack = { tool: [], redone: [], stacked: [] };
   let entries = 0;
   let windowEntries = 0;
+  const count = (map, name, w) => {
+    const g = map.get(name) ?? { all: 0, window: 0 };
+    g.all += 1;
+    if (w) g.window += 1;
+    map.set(name, g);
+  };
   for (const s of conflicted) {
     const w = inWindow(s);
     for (const f of s.files) {
+      count(legacy, f.legacyGroup ?? f.group, w);
+      // A file the tool's own merge resolved is not a conflict anybody had.
+      if (f.group === null) continue;
       entries += 1;
       if (w) windowEntries += 1;
-      const g = groups.get(f.group) ?? { all: 0, window: 0 };
-      g.all += 1;
-      if (w) g.window += 1;
-      groups.set(f.group, g);
+      count(groups, f.group, w);
       bump(shapes, f.shape);
       bump(files.all, f.file);
       if (w) bump(files.window, f.file);
     }
+    const ref = { pr: s.pr, commit: s.commit, date: s.date, window: w };
+    if (s.files.some((f) => f.resolvedBy === "redone")) restack.redone.push(ref);
+    else if (s.files.some((f) => f.resolvedBy === "tool")) restack.tool.push(ref);
+    if (s.files.some((f) => f.group === GROUPS.stacked)) restack.stacked.push({ ...ref, files: s.files.filter((f) => f.group === GROUPS.stacked).length });
     for (const n of new Set(s.files.flatMap((f) => f.culprits))) bump(culprits, n);
   }
   const mechanicalOnly = conflicted.filter((s) => s.files.every((f) => declared.has(f.bucket))).length;
@@ -213,9 +307,19 @@ export function aggregate({ syncs, otherMerges }, { since, config }) {
       otherMerges,
     },
     files: { total: entries, inWindow: windowEntries },
-    groups: [...groups.entries()]
-      .map(([name, v]) => ({ name, declared: declared.has(name), ...v }))
+    groups: [...new Set([...groups.keys(), ...legacy.keys()])]
+      .map((name) => ({
+        name,
+        declared: declared.has(name),
+        ...(groups.get(name) ?? { all: 0, window: 0 }),
+        legacy: legacy.get(name) ?? { all: 0, window: 0 },
+      }))
       .sort((a, b) => b.window - a.window || b.all - a.all || a.name.localeCompare(b.name)),
+    restack: {
+      tool: { all: restack.tool.length, window: restack.tool.filter((x) => x.window).length, syncs: restack.tool },
+      redone: { all: restack.redone.length, window: restack.redone.filter((x) => x.window).length, syncs: restack.redone },
+      stacked: { all: restack.stacked.length, window: restack.stacked.filter((x) => x.window).length, syncs: restack.stacked },
+    },
     shapes: top(shapes, 50).map(([shape, count]) => ({ shape, count })),
     duplicatedScopeSameTicket: duplicates.filter((f) => f.sameTicket).length,
     topFiles: top(files.all, 20).map(([file, count]) => ({ file, count, inWindow: files.window.get(file) ?? 0 })),
@@ -225,6 +329,28 @@ export function aggregate({ syncs, otherMerges }, { since, config }) {
 }
 
 const cell = (s) => String(s).replace(/[&<>|`\\_*[\]]/g, (c) => `&#${c.charCodeAt(0)};`);
+
+/** The stacked syncs of the window, named: a bypass is a PR and a commit, never just a count. */
+function restackSection(r) {
+  const since = r.since.slice(0, 10);
+  const { tool, redone, stacked } = r.restack;
+  const named = (list) => list.syncs.filter((x) => x.window).map((x) => `#${x.pr} ${codeOf(x.commit.slice(0, 7))}`);
+  const out = [
+    `### Stacked syncs since ${since}`,
+    "",
+    "| | all | since |",
+    "|---|---|---|",
+    `| re-stacked by the tool | ${tool.all} | ${tool.window} |`,
+    `| redone at push | ${redone.all} | ${redone.window} |`,
+    `| left in \`code: stacked\` | ${stacked.all} | ${stacked.window} |`,
+    "",
+  ];
+  for (const [label, list] of [["Re-stacked by the tool", tool], ["Redone at push", redone], ["Left in `code: stacked`", stacked]]) {
+    const items = named(list);
+    if (items.length) out.push(`${label} since ${since}: ${items.join(", ")}.`, "");
+  }
+  return out;
+}
 
 export function renderReport(r, { repo, base }) {
   const pct = (a, b) => (b ? `${Math.round((100 * a) / b)}%` : "—");
@@ -237,12 +363,15 @@ export function renderReport(r, { repo, base }) {
     `* ${r.files.total} conflicted files in total, **${r.files.inWindow} since ${r.since.slice(0, 10)}**.`,
     `* ${r.syncs.mechanicalOnly} conflicted syncs (${pct(r.syncs.mechanicalOnly, r.syncs.conflicted)}) touched ONLY declared groups; ${r.syncs.stacked} were a stacked branch meeting its parent.`,
     "",
-    `| group | all | since ${r.since.slice(0, 10)} |`,
-    "|---|---|---|",
-    ...r.groups.map((g) => `| ${g.declared ? cell(g.name) : `_${cell(g.name)}_`} | ${g.all} | ${g.window} |`),
+    `| group | all | since ${r.since.slice(0, 10)} | legacy all | legacy since ${r.since.slice(0, 10)} |`,
+    "|---|---|---|---|---|",
+    ...r.groups.map((g) => `| ${g.declared ? cell(g.name) : `_${cell(g.name)}_`} | ${g.all} | ${g.window} | ${g.legacy.all} | ${g.legacy.window} |`),
     "",
     `Declared groups come from the caller's config; _italic_ rows are files no rule claims, split by conflict shape. ${r.duplicatedScopeSameTicket} of the duplicated-scope files were created by two PRs sharing a ticket id or a branch.`,
     "",
+    `The first two columns are re-stack-aware: a stacked sync is replayed with its squash-merged parent's pre-squash head as an extra merge base, and only a file that merges cleanly that way is \`code: stacked\` (resolved by hand where the re-stack would have merged it); a file that still conflicts is counted by its shape in that merge. The legacy columns are the rule before it: every conflicted file of a stacked sync is \`code: stacked\`.`,
+    "",
+    ...restackSection(r),
     `### Most conflicted files since ${r.since.slice(0, 10)}`,
     "",
     "| file | conflicts |",

@@ -1,0 +1,259 @@
+{
+  "$comment": [
+    "The re-stack scenarios as data (FUT-3341), shared by the engine's tests and a consumer's local command, each building them with real git.",
+    "A case is a list of steps over named branches, run in order:",
+    "  {commit: <branch>, as?, files: {path: content | null}, message?}  a commit on <branch> (created from nothing if it does not exist): its tip's tree with `files` written (null deletes)",
+    "  {branch: <name>, from: <branch | label>}                              a new branch at that commit",
+    "  {squash: <branch>, into: <branch>, as, message}                       a squash merge: the clean merge-tree of the two, as ONE commit on <into>",
+    "  {merge: <branch | label>, into: <branch>, as?, resolve?: {path: content}}  a real two-parent merge; every conflicted path must be in `resolve`",
+    "  {restack: <pr>, expect}                                               plan the PR now, check `expect`, commit the re-stack and move the PR's branch to it",
+    "`{label}` in a message is that commit's sha. Every commit is made with a fixed identity and a date one second after the previous one, so a case builds the same objects anywhere.",
+    "`prs` names each PR's branch (its head is that branch's tip) and, for a merged PR, the label of its squash on main (its merge_commit_sha). `headRef` is the GitHub branch name, when it matters.",
+    "`expect` is per open PR, checked after the last step against main's tip:",
+    "  default       the plain merge of the PR's head and main: clean | conflicted",
+    "  plan          clean (nothing to do) | not-stacked | restack (push it) | residual (push nothing)",
+    "  parents       the stacked parents' PR numbers; pOld: each parent's held head, as a label",
+    "  residual      the files that still conflict with Z; tree: the tree of a clean re-stack, a fixed sha",
+    "  explicitBase  the merge with `--merge-base=<the one pOld>` instead of Z (rejected design A)",
+    "  skippedParents  parents dropped, as [pr, reason prefix]",
+    "No path here has a merge driver in any .gitattributes: merge-tree runs none."
+  ],
+  "version": 1,
+  "cases": [
+    {
+      "name": "clean re-stack",
+      "shape": "The common case: the child rewrites the parent's lines, the parent is squash-merged, an unrelated commit lands on main.",
+      "steps": [
+        { "commit": "main", "as": "m0", "files": { "README.md": "readme\n" } },
+        { "branch": "p", "from": "main" },
+        { "commit": "p", "as": "p1", "files": { "doc.txt": "p1\np2\np3\np4\np5\n" } },
+        { "branch": "c", "from": "p" },
+        { "commit": "c", "as": "c1", "files": { "doc.txt": "c1\nc2\nc3\nc4\nc5\n" } },
+        { "commit": "main", "as": "m1", "files": { "README.md": "readme\nunrelated\n" } },
+        { "squash": "p", "into": "main", "as": "s1", "message": "feat: add the doc (#1)" }
+      ],
+      "prs": { "1": { "branch": "p", "squash": "s1" }, "2": { "branch": "c" } },
+      "expect": {
+        "2": { "default": "conflicted", "plan": "restack", "parents": [1], "pOld": { "1": "p1" }, "residual": [], "tree": "eefc683ac426ac8d073f5afc7b57392cb138fddd" }
+      }
+    },
+    {
+      "name": "child merged main after the parent",
+      "shape": "#149: the child took main in after taking the parent, then changed a line that main commit touched. A single explicit base replays that main commit as a main-side change and conflicts; Z uses both merge bases.",
+      "steps": [
+        { "commit": "main", "as": "m0", "files": { "README.md": "readme\n", "m.txt": "m1\n" } },
+        { "branch": "p", "from": "main" },
+        { "commit": "p", "as": "p1", "files": { "doc.txt": "p1\np2\np3\np4\np5\n" } },
+        { "branch": "c", "from": "p" },
+        { "commit": "c", "as": "c1", "files": { "doc.txt": "c1\nc2\nc3\nc4\nc5\n" } },
+        { "commit": "main", "as": "x1", "files": { "m.txt": "m2\n" } },
+        { "merge": "main", "into": "c", "as": "cm" },
+        { "commit": "c", "as": "c2", "files": { "m.txt": "m3\n" } },
+        { "squash": "p", "into": "main", "as": "s1", "message": "feat: add the doc (#1)" }
+      ],
+      "prs": { "1": { "branch": "p", "squash": "s1" }, "2": { "branch": "c" } },
+      "expect": {
+        "2": { "default": "conflicted", "plan": "restack", "parents": [1], "pOld": { "1": "p1" }, "residual": [], "tree": "71d36150cc1064b3dd3ebd415a7e9df165b71043", "explicitBase": "conflicted" }
+      }
+    },
+    {
+      "name": "residual",
+      "shape": "#1849: the parent rewrote the lines again after the child was cut, and the child had rewritten them too. A real conflict: no merge base removes it, so nothing is pushed.",
+      "steps": [
+        { "commit": "main", "as": "m0", "files": { "README.md": "readme\n", "doc.txt": "l1\nl2\nl3\nl4\nl5\n" } },
+        { "branch": "p", "from": "main" },
+        { "commit": "p", "as": "p1", "files": { "doc.txt": "P1-1\nP1-2\nl3\nl4\nl5\n", "p.txt": "parent\n" } },
+        { "branch": "c", "from": "p" },
+        { "commit": "c", "as": "c1", "files": { "doc.txt": "C-1\nC-2\nl3\nl4\nl5\n", "p.txt": "parent\nchild\n" } },
+        { "commit": "p", "as": "p2", "files": { "doc.txt": "P2-1\nP2-2\nl3\nl4\nl5\n" } },
+        { "squash": "p", "into": "main", "as": "s1", "message": "feat: rework the doc (#1)" }
+      ],
+      "prs": { "1": { "branch": "p", "squash": "s1" }, "2": { "branch": "c" } },
+      "expect": {
+        "2": { "default": "conflicted", "plan": "residual", "parents": [1], "pOld": { "1": "p1" }, "residual": ["doc.txt"] }
+      }
+    },
+    {
+      "name": "two children",
+      "shape": "Two children of one parent: two plans, two branches, two leases.",
+      "steps": [
+        { "commit": "main", "as": "m0", "files": { "README.md": "readme\n" } },
+        { "branch": "p", "from": "main" },
+        { "commit": "p", "as": "p1", "files": { "doc.txt": "p1\np2\np3\np4\np5\n" } },
+        { "branch": "c", "from": "p" },
+        { "commit": "c", "as": "c1", "files": { "doc.txt": "c1\nc2\np3\np4\np5\n" } },
+        { "branch": "d", "from": "p" },
+        { "commit": "d", "as": "d1", "files": { "doc.txt": "p1\np2\np3\nd4\nd5\n" } },
+        { "squash": "p", "into": "main", "as": "s1", "message": "feat: add the doc (#1)" }
+      ],
+      "prs": { "1": { "branch": "p", "squash": "s1" }, "2": { "branch": "c" }, "3": { "branch": "d" } },
+      "expect": {
+        "2": { "default": "conflicted", "plan": "restack", "parents": [1], "pOld": { "1": "p1" }, "residual": [], "tree": "73a870927d98f8ac1f7a04642af0bce7da883085" },
+        "3": { "default": "conflicted", "plan": "restack", "parents": [1], "pOld": { "1": "p1" }, "residual": [], "tree": "0b980ab96ce577276da0714a7c19f76a0e2b3150" }
+      }
+    },
+    {
+      "name": "grandchild through two merges",
+      "shape": "P <- C <- G. P is squashed and both C and G are re-stacked; then C (re-stacked) is squashed. G converges: its next merge with main is clean, and its tree keeps every line.",
+      "steps": [
+        { "commit": "main", "as": "m0", "files": { "README.md": "readme\n" } },
+        { "branch": "p", "from": "main" },
+        { "commit": "p", "as": "p1", "files": { "doc.txt": "p1\np2\np3\np4\np5\n" } },
+        { "branch": "c", "from": "p" },
+        { "commit": "c", "as": "c1", "files": { "doc.txt": "c1\nc2\np3\np4\np5\n" } },
+        { "branch": "g", "from": "c" },
+        { "commit": "g", "as": "g1", "files": { "doc.txt": "c1\nc2\np3\ng4\ng5\n" } },
+        { "squash": "p", "into": "main", "as": "s1", "message": "feat: add the doc (#1)" },
+        { "restack": 2, "expect": { "default": "conflicted", "plan": "restack", "parents": [1], "pOld": { "1": "p1" }, "residual": [] } },
+        { "restack": 3, "expect": { "default": "conflicted", "plan": "restack", "parents": [1], "pOld": { "1": "p1" }, "residual": [] } },
+        { "commit": "main", "as": "m2", "files": { "README.md": "readme\nunrelated\n" } },
+        { "squash": "c", "into": "main", "as": "s2", "message": "feat: rewrite the head of the doc (#2)" }
+      ],
+      "prs": { "1": { "branch": "p", "squash": "s1" }, "2": { "branch": "c", "squash": "s2" }, "3": { "branch": "g" } },
+      "expect": {
+        "3": { "default": "clean", "plan": "clean", "content": { "doc.txt": "c1\nc2\np3\ng4\ng5\n" } }
+      }
+    },
+    {
+      "name": "grandchild after both squashes",
+      "shape": "P <- C <- G. C is re-stacked and squash-merged; G is not touched until then: two stacked parents, and C's held head (its own commit, not the re-stack) makes P's redundant in Z.",
+      "steps": [
+        { "commit": "main", "as": "m0", "files": { "README.md": "readme\n" } },
+        { "branch": "p", "from": "main" },
+        { "commit": "p", "as": "p1", "files": { "doc.txt": "p1\np2\np3\np4\np5\n" } },
+        { "branch": "c", "from": "p" },
+        { "commit": "c", "as": "c1", "files": { "doc.txt": "c1\nc2\np3\np4\np5\n" } },
+        { "branch": "g", "from": "c" },
+        { "commit": "g", "as": "g1", "files": { "doc.txt": "c1\nc2\np3\ng4\ng5\n" } },
+        { "squash": "p", "into": "main", "as": "s1", "message": "feat: add the doc (#1)" },
+        { "restack": 2, "expect": { "default": "conflicted", "plan": "restack", "parents": [1], "pOld": { "1": "p1" }, "residual": [] } },
+        { "squash": "c", "into": "main", "as": "s2", "message": "feat: rewrite the head of the doc (#2)" }
+      ],
+      "prs": { "1": { "branch": "p", "squash": "s1" }, "2": { "branch": "c", "squash": "s2" }, "3": { "branch": "g" } },
+      "expect": {
+        "3": { "default": "conflicted", "plan": "restack", "parents": [1, 2], "pOld": { "1": "p1", "2": "c1" }, "residual": [], "tree": "471218e0d8b8de44fb1679c6ebec5978405243e0", "content": { "doc.txt": "c1\nc2\np3\ng4\ng5\n" } }
+      }
+    },
+    {
+      "name": "branch-name reuse",
+      "shape": "The child's PR reuses the parent's head-branch name (deleted at the parent's merge): the plan and the push go by PR, never by branch name.",
+      "steps": [
+        { "commit": "main", "as": "m0", "files": { "README.md": "readme\n" } },
+        { "branch": "p", "from": "main" },
+        { "commit": "p", "as": "p1", "files": { "doc.txt": "p1\np2\np3\np4\np5\n" } },
+        { "branch": "c", "from": "p" },
+        { "commit": "c", "as": "c1", "files": { "doc.txt": "p1\np2\nc3\nc4\np5\n" } },
+        { "squash": "p", "into": "main", "as": "s1", "message": "feat: add the doc (#1)" }
+      ],
+      "prs": { "1": { "branch": "p", "squash": "s1", "headRef": "feat/doc" }, "2": { "branch": "c", "headRef": "feat/doc" } },
+      "expect": {
+        "2": { "default": "conflicted", "plan": "restack", "parents": [1], "pOld": { "1": "p1" }, "residual": [], "tree": "def83c982fcd1569db0db7f4293f909ab534b0ff" }
+      }
+    },
+    {
+      "name": "two parents",
+      "shape": "#740: the child holds two squash-merged parents. Z takes one extra parent per held head; with only one of them the other parent's code still conflicts.",
+      "steps": [
+        { "commit": "main", "as": "m0", "files": { "README.md": "readme\n" } },
+        { "branch": "p", "from": "main" },
+        { "commit": "p", "as": "p1", "files": { "a.txt": "a1\na2\na3\n" } },
+        { "branch": "q", "from": "main" },
+        { "commit": "q", "as": "q1", "files": { "b.txt": "b1\nb2\nb3\n" } },
+        { "branch": "c", "from": "p" },
+        { "merge": "q", "into": "c", "as": "cm" },
+        { "commit": "c", "as": "c1", "files": { "a.txt": "A1\na2\na3\n", "b.txt": "b1\nb2\nB3\n" } },
+        { "squash": "p", "into": "main", "as": "s1", "message": "feat: add a (#1)" },
+        { "squash": "q", "into": "main", "as": "s3", "message": "feat: add b (#3)" }
+      ],
+      "prs": { "1": { "branch": "p", "squash": "s1" }, "3": { "branch": "q", "squash": "s3" }, "2": { "branch": "c" } },
+      "expect": {
+        "2": { "default": "conflicted", "plan": "restack", "parents": [1, 3], "pOld": { "1": "p1", "3": "q1" }, "residual": [], "tree": "53cceac5d24b300d97878e39890b814242704970" }
+      }
+    },
+    {
+      "name": "parent squash without a PR number",
+      "shape": "The squash's subject carries no (#N) (a PR title without one): the parent is found through GET /commits/{sha}/pulls.",
+      "steps": [
+        { "commit": "main", "as": "m0", "files": { "README.md": "readme\n" } },
+        { "branch": "p", "from": "main" },
+        { "commit": "p", "as": "p1", "files": { "doc.txt": "p1\np2\np3\np4\np5\n" } },
+        { "branch": "c", "from": "p" },
+        { "commit": "c", "as": "c1", "files": { "doc.txt": "c1\nc2\nc3\nc4\nc5\n" } },
+        { "squash": "p", "into": "main", "as": "s1", "message": "feat(admin): add the doc on every page (FUT-1)" }
+      ],
+      "prs": { "1": { "branch": "p", "squash": "s1" }, "2": { "branch": "c" } },
+      "expect": {
+        "2": { "default": "conflicted", "plan": "restack", "parents": [1], "pOld": { "1": "p1" }, "residual": [], "tree": "ce1b5df675b817a825669ab623dc7a4c7ca7d41a" }
+      }
+    },
+    {
+      "name": "parent squash naming the wrong PR",
+      "shape": "The squash's subject names another merged PR (#7): that PR's merge commit is not this squash, so the number is ignored and the API's answer is used.",
+      "steps": [
+        { "commit": "main", "as": "m0", "files": { "README.md": "readme\n" } },
+        { "branch": "o", "from": "main" },
+        { "commit": "o", "as": "o1", "files": { "other.txt": "other\n" } },
+        { "squash": "o", "into": "main", "as": "s7", "message": "feat: add other (#7)" },
+        { "branch": "p", "from": "main" },
+        { "commit": "p", "as": "p1", "files": { "doc.txt": "p1\np2\np3\np4\np5\n" } },
+        { "branch": "c", "from": "p" },
+        { "commit": "c", "as": "c1", "files": { "doc.txt": "c1\nc2\nc3\nc4\nc5\n" } },
+        { "squash": "p", "into": "main", "as": "s1", "message": "feat: add the doc (#7)" }
+      ],
+      "prs": { "7": { "branch": "o", "squash": "s7" }, "1": { "branch": "p", "squash": "s1" }, "2": { "branch": "c" } },
+      "expect": {
+        "2": { "default": "conflicted", "plan": "restack", "parents": [1], "pOld": { "1": "p1" }, "residual": [], "tree": "2166ef57f54cfaec6fa2f2aa3efb4cf1cdc41889" }
+      }
+    },
+    {
+      "name": "reverted parent",
+      "shape": "main reverted part of the parent's squash after it landed. Z would declare the parent's code held by main and drop it from the child, so the parent is skipped and nothing is re-stacked.",
+      "steps": [
+        { "commit": "main", "as": "m0", "files": { "README.md": "readme\n", "doc.txt": "l1\nl2\nl3\nl4\nl5\n" } },
+        { "branch": "p", "from": "main" },
+        { "commit": "p", "as": "p1", "files": { "doc.txt": "l1\nP2\nl3\nP4\nl5\n" } },
+        { "branch": "c", "from": "p" },
+        { "commit": "c", "as": "c1", "files": { "doc.txt": "l1\nC2\nl3\nP4\nl5\n" } },
+        { "squash": "p", "into": "main", "as": "s1", "message": "feat: rework the doc (#1)" },
+        { "commit": "main", "as": "r1", "files": { "doc.txt": "l1\nP2\nl3\nl4\nl5\n" }, "message": "Revert \"feat: rework the doc (#1)\"\n\nThis reverts commit {s1}.\n" }
+      ],
+      "prs": { "1": { "branch": "p", "squash": "s1" }, "2": { "branch": "c" } },
+      "expect": {
+        "2": { "default": "conflicted", "plan": "not-stacked", "parents": [], "skippedParents": [[1, "reverted by"]] }
+      }
+    },
+    {
+      "name": "idempotent",
+      "shape": "After the re-stack the default merge is clean: a second run plans nothing.",
+      "steps": [
+        { "commit": "main", "as": "m0", "files": { "README.md": "readme\n" } },
+        { "branch": "p", "from": "main" },
+        { "commit": "p", "as": "p1", "files": { "doc.txt": "p1\np2\np3\np4\np5\n" } },
+        { "branch": "c", "from": "p" },
+        { "commit": "c", "as": "c1", "files": { "doc.txt": "c1\nc2\nc3\nc4\nc5\n" } },
+        { "squash": "p", "into": "main", "as": "s1", "message": "feat: add the doc (#1)" },
+        { "restack": 2, "expect": { "default": "conflicted", "plan": "restack", "parents": [1], "pOld": { "1": "p1" }, "residual": [], "tree": "ce1b5df675b817a825669ab623dc7a4c7ca7d41a" } }
+      ],
+      "prs": { "1": { "branch": "p", "squash": "s1" }, "2": { "branch": "c" } },
+      "expect": {
+        "2": { "default": "clean", "plan": "clean" }
+      }
+    },
+    {
+      "name": "default merge clean",
+      "shape": "A child of a squash-merged parent that GitHub can merge as it is: it is left alone.",
+      "steps": [
+        { "commit": "main", "as": "m0", "files": { "README.md": "readme\n" } },
+        { "branch": "p", "from": "main" },
+        { "commit": "p", "as": "p1", "files": { "doc.txt": "p1\np2\np3\np4\np5\n" } },
+        { "branch": "c", "from": "p" },
+        { "commit": "c", "as": "c1", "files": { "child.txt": "child\n" } },
+        { "squash": "p", "into": "main", "as": "s1", "message": "feat: add the doc (#1)" }
+      ],
+      "prs": { "1": { "branch": "p", "squash": "s1" }, "2": { "branch": "c" } },
+      "expect": {
+        "2": { "default": "clean", "plan": "clean" }
+      }
+    }
+  ]
+}
