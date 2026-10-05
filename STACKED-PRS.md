@@ -126,6 +126,16 @@ concurrency:
 Keyed on `github.ref`, so layers never cancel each other, and a superseded run of
 *the same* layer is dropped. Keep it.
 
+## Not a stack: a branch cut from a squash-merged branch
+
+A pull request that targets the default branch but was cut from another pull
+request's branch is not a stack in GitHub's sense, and nothing above applies
+to it. Once its parent is squash-merged, its next merge of the base conflicts
+with the parent's own code. The conflict monitor's `restack` mode re-stacks
+it with a merge, never a rebase or a force-push; it leaves real stack members
+(a non-default base) alone. See CONSUMING.md, "Consuming the Conflict
+monitor's re-stack".
+
 ## What needs no change
 
 - **`commitlint.yml`** walks `base..head`. Mid-stack that base is the layer
