@@ -249,3 +249,29 @@ tested against; a change to a case or its tree id is a change to that
 contract. `runner-selection.test.mjs` lists `conflict-restack.yml:restack` as
 PINNED ("holds a PAT"). Hosted evidence (the job's median wall time, the first
 pushes) is recorded with the consumer's rollout.
+
+**Correction (review r1, 2026-10-06):** the first ping-pong cap could not fire
+on GitHub. It looked for the bot's re-stack in the PR timeline's `committed`
+events, and GitHub lists there only the commits the PR has now: on every
+force-pushed future-pay PR checked (#169, #1327, #1727, #1837, #1849) the
+timeline's commits equal `/pulls/{n}/commits`, and none is a commit a
+force-push removed. The test was green because it fed exactly the shape
+GitHub never returns. The cap now reads
+`GET /repos/{o}/{r}/activity?ref=refs/heads/<ref>&activity_type=force_push`
+and, per force-push, `GET /repos/{o}/{r}/compare/{after}...{before}`, which
+still serves the discarded commits. Both were checked read-only on #1849's
+force-push of 2026-09-19 (`36f5625` -> `29e4aba`, 41 discarded commits, one of
+them a hand merge of `main`). `__tests__/restack-activity.json` keeps that
+structure with its values replaced, and the test force-pushes for real and
+answers compare from the repository. In the same pass: no git subprocess of
+the mode inherits `PUSH_TOKEN` or `GITHUB_TOKEN` and every git call runs with
+hooks and fsmonitor off (a `git` wrapper asserts it, and removing either now
+turns a test red; before, removing the hardening turned nothing red); a
+`[remote rejected]` push is a warning and that PR's entry, not a red run; the
+commit is dated by its parents; the comment's recipe computes the held heads
+instead of printing trailer values; a tool merge's file with a custom merge
+driver counts as the tool's. Re-run: conflict-monitor **177 / 177**, every
+`self-test.yml` step green, workflow tests **309 / 309**, actionlint clean,
+and the replay unchanged (46 / 14 / 81; 318 / 55 → 249 / 9 and the other
+three rows as above). The duplicated-scope ticket line reads 20 instead of 3
+on the pinned window: it follows the re-stack-aware group.

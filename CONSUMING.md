@@ -2237,10 +2237,10 @@ jobs:
 
   probe:
     needs: restack
-    # Its condition is unchanged; `always()` keeps it running when `restack`
-    # is skipped or fails.
+    # Its condition is unchanged; `!cancelled()` keeps it running when
+    # `restack` is skipped or fails, and lets a cancelled run stay cancelled.
     if: >-
-      always() && (
+      !cancelled() && (
       github.event_name == 'push' ||
       (github.event_name == 'pull_request' &&
        github.event.action == 'synchronize' &&
@@ -2361,18 +2361,45 @@ the head branch itself, not from `refs/pull/N/head`.
 **Never written to:** forks; PRs whose base is not the default branch (a
 real `gh stack` member, which GitHub re-stacks, or an ad-hoc `--base` PR);
 the heads `main`, `master`, `develop`, `release/*` and any branch GitHub
-reports `protected`; heads matching `ignoreHeads`. Drafts ARE re-stacked.
+reports `protected`; heads matching `ignoreHeads`. Drafts ARE re-stacked. A
+PR whose base is not the default branch gets no comment either: the probe
+lists only default-base PRs, as before.
 
-**The ping-pong cap:** when the PR's timeline shows a `head_ref_force_pushed`
-after the bot's last re-stack commit for the same parent, the bot does not
-re-stack again; the probe's comment carries the command.
+**The ping-pong cap:** when the head branch was ever force-pushed over one of
+the bot's re-stacks for the same parent, the bot does not re-stack again; the
+probe's comment carries the command. The PR timeline cannot tell: it lists
+only the commits the PR has now. So the mode reads the repository activity
+API, `GET /repos/{o}/{r}/activity?ref=refs/heads/<ref>&activity_type=force_push`,
+which keeps every force-push with its `before` and `after`, and for each one
+`GET /repos/{o}/{r}/compare/{after}...{before}`, which lists the commits it
+discarded. A discarded commit by `github-actions[bot]` with a matching
+`Restack-Parent` trailer stops the bot. Both need only `contents: read`.
+
+**A push the remote refuses** (a ruleset the branch API's `protected` flag
+does not show, a server hook) is a `::warning::` and that PR's entry; the run
+stays green for every other PR.
+
+**The commit date** is the later of its two parents' committer dates, so two
+runs planning the same head on the same base write the same commit, and the
+second push is a no-op.
+
+**The tokens:** `PUSH_TOKEN` and `GITHUB_TOKEN` leave the process
+environment before the first git call, so no git subprocess inherits them;
+only the push gets the PAT, as an extraheader. Every git call of the mode
+runs with hooks and fsmonitor off.
+
+**A comment can flap once.** The bot plans on the head branch, while a
+probe on the PR's next `synchronize` reads `refs/pull/N/head`, which lags a
+push by seconds. That probe can still see the head before the re-stack and
+write "stacked" after an earlier run wrote "resolved"; the re-stack's own
+`synchronize` run resolves it again.
 
 **The record:** the job summary lists every PR as re-stacked, planned only,
 still conflicting (with its files), moved before the push, or skipped (with
 the reason). One machine-readable line goes to the log:
 
 ```
-restack {"base":"<sha>","open":8,"pushed":[[2519,"<sha>",[2514]]],"planned":[],"residual":[[1849,[1837],["docs/x.md"]]],"skipped":[[2401,"a fork"]],"leaseFailed":[],"failed":[],"reads":19}
+restack {"base":"<sha>","open":8,"pushed":[[2519,"<sha>",[2514]]],"planned":[],"residual":[[1849,[1837],["docs/x.md"]]],"skipped":[[2401,"a fork"]],"leaseFailed":[],"rejected":[],"failed":[],"reads":19}
 ```
 
 ## D. What the probe and the report do with a stacked PR
@@ -2380,7 +2407,9 @@ restack {"base":"<sha>","open":8,"pushed":[[2519,"<sha>",[2514]]],"planned":[],"
 * **The probe** analyses a stacked PR against Z instead of the base tip. Its
   comment lists only the files that still conflict there, says "Stacked on
   #P (squash-merged): these files conflict even with #P's pre-squash head as
-  the merge base", and adds `command` and the raw git recipe. A stacked PR
+  the merge base", and adds `command` and the raw git recipe. The recipe
+  computes each parent's held head itself, so the comment prints no trailer
+  value a hand merge could paste. A stacked PR
   whose Z merge is clean but that was not pushed (no token, the ping-pong
   cap, a lease lost) gets a comment saying so, never "resolved". A PR that is
   not stacked keeps exactly the comment it had.
@@ -2391,9 +2420,25 @@ restack {"base":"<sha>","open":8,"pushed":[[2519,"<sha>",[2514]]],"planned":[],"
   trailers naming exactly the held heads and parents the report computes
   itself, and the committed blob equal to Z's. Then the file is not counted,
   and the sync is listed as "re-stacked by the tool", or "redone at push" with
-  `Restack-Redo: yes`. A trailer copied from another sync names another held
-  head and is refused; a forged one can hide only a blob byte-identical to the
-  tool's output, never a residual file.
+  `Restack-Redo: yes`. A trailer copied from another sync is refused when it
+  names another held head or parent; two siblings cut from one parent commit
+  share a held head, and there the blob check holds. A forged trailer can hide
+  only a blob byte-identical to the tool's output, never a residual file.
+* **Merge drivers.** A real `git merge` of Z (your local command, the recipe)
+  runs the `.gitattributes` drivers, which `merge-tree` does not. So on a
+  merge carrying valid trailers, a file Z merges cleanly but whose committed
+  blob differs is still the tool's when the file has a custom `merge=`
+  driver at that commit. A file Z still conflicts on is counted by its shape
+  or its bucket whatever a driver did with it, exactly as a hand merge of it
+  is: a driver-resolved residual (a lockfile, a ledger) lands in its declared
+  bucket, never in `code: stacked`. A local command therefore needs nothing
+  special for drivers beyond writing the trailers.
+* The duplicated-scope line under the table ("N of the duplicated-scope
+  files were created by two PRs sharing a ticket id") follows the
+  re-stack-aware group: on future-pay's pinned window it reads 20 instead of
+  3, because #1849's 17 add/add files with #1837 (both FUT-2233) move there.
+  Each file's `culprits` in `report.json` is also mapped through
+  `merge_commit_sha` now.
 * The report's table prints the re-stack-aware groups and, next to them, the
   **legacy** columns: the rule before this (every conflicted file of a
   stacked sync is `code: stacked`). Both map a culprit to its PR through the
@@ -2415,11 +2460,19 @@ concurrent edit, append point and duplicated scope by their shape under Z.
   ledger) is not pushed; a local `git merge` of Z, which the recipe does, runs
   them.
 * **A rebase onto `main`** leaves no merge, and nothing here sees it.
-* **Cost:** one `merge-tree` per open PR; for a conflicted one, one
-  `GET /commits/{sha}/pulls` (or `GET /pulls/{n}`) per culprit squash, cached
-  per run, and the parent's head fetched from `refs/pull/N/head`; for a PR
-  about to be pushed, one timeline read and one branch read. The wall time is
-  about the probe's, dominated by the full-history checkout.
+* **Cost of the restack job:** one `merge-tree` per open PR; for a
+  conflicted one, up to two calls per culprit squash (`GET /pulls/{n}` for the
+  `(#N)` fast path, then `GET /commits/{sha}/pulls`), cached per run, and the
+  parent's head fetched from `refs/pull/N/head`; for a PR about to be pushed,
+  one activity read, one compare per force-push of its branch, and one branch
+  read. The wall time is about the probe's, dominated by the full-history
+  checkout.
+* **Cost added to the probe:** every CONFLICTED PR, stacked or not, now
+  costs the same culprit mapping (up to two REST calls per culprit squash,
+  cached per run and shared across PRs) and one `refs/pull/P/head` fetch per
+  mapped parent, then a second `merge-tree` against Z when it is stacked. A
+  clean PR costs nothing new, and a non-stacked PR's comment is byte for byte
+  what it was.
 
 ---
 

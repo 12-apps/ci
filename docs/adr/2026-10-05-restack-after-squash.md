@@ -44,10 +44,13 @@ base's tree, with the base and each parent's held head as parents) is clean on
    takes `PUSH_TOKEN`, sends it as an extraheader in the push call only, runs
    on `ubuntu-latest` with no input to move it (a listed exception to the
    runner-selection rule), checks out the base without persisting
-   credentials, and executes nothing from a PR. Without the token it plans and
-   warns. Forks, non-default bases, protected heads and ignored heads are
-   never written to, and a force-push after the bot's re-stack stops it for
-   that parent.
+   credentials, and executes nothing from a PR; no git subprocess inherits a
+   token, and every git call runs with hooks and fsmonitor off. Without the
+   token it plans and warns. Forks, non-default bases, protected heads and
+   ignored heads are never written to. A force-push over the bot's re-stack
+   stops it for that parent, read from a record that survives the
+   force-push: the repository activity API's `force_push` events and the
+   compare of what each discarded.
 4. **The report tells a tool merge from a hand merge by contract, not by
    tree.** Most hand resolutions produce the tool's tree, so the tree cannot be
    the tell. A tool merge carries `Restack-Base`/`Restack-Parent` trailers; the
@@ -66,6 +69,8 @@ duplicated scope. Those baselines move for any consumer reading the report.
 The bot pushes to branches people are working on. Their next push is rejected
 and they pull a fast-forward or a normal merge; nothing of theirs is
 rewritten. Real conflicts, and residuals only a merge driver resolves, are
-left to the developer and the probe's comment. The ping-pong cap reads the PR
-timeline's commit events, so it depends on GitHub listing a force-pushed-away
-commit there.
+left to the developer and the probe's comment. The ping-pong cap does not
+use the PR timeline, which lists only the commits the PR has now (checked on
+future-pay's five force-pushed PRs); it depends on the activity API keeping a
+ref's force-pushes and on compare serving the commits they discarded, both
+checked read-only on #1849's force-push of 2026-09-19.
