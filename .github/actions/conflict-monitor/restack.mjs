@@ -84,6 +84,8 @@ const BLOCKING_RULES = new Set([
  */
 export function protectionOf(branch, rules) {
   if (branch?.protection?.enabled) return "a protected head (classic branch protection)";
+  // `protected` with no readable `enabled` cannot rule classic protection out.
+  if (branch?.protected && typeof branch?.protection?.enabled !== "boolean") return "a protected head (classic protection unknown)";
   const blocking = [...new Set((rules ?? []).map((r) => r?.type).filter((t) => BLOCKING_RULES.has(t)))];
   return blocking.length ? `a protected head (ruleset: ${blocking.join(", ")})` : null;
 }
@@ -294,7 +296,7 @@ export async function runRestack({
       let rules = [];
       if (branch?.protected) {
         try {
-          rules = await api.request("GET", `/repos/${repo}/rules/branches/${segments(ref)}`);
+          rules = await api.paginate(`/repos/${repo}/rules/branches/${segments(ref)}`);
         } catch (err) {
           skip(pr, `a protected head whose rules could not be read (${err.message})`);
           continue;

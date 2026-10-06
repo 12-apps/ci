@@ -77,6 +77,13 @@ function setup(name, { prs = {} } = {}) {
     async paginate(path) {
       base.calls.push(`PAGINATE ${path}`);
       if (/\/pulls\?state=open$/.test(path)) return pulls();
+      const r = /\/rules\/branches\/(.+)$/.exec(path);
+      if (r) {
+        const ref = r[1].split("/").map(decodeURIComponent).join("/");
+        const rules = rulesInfo.get(ref);
+        if (rules instanceof Error) throw rules;
+        return rules ?? [];
+      }
       const m = /\/activity\?ref=([^&]+)&activity_type=force_push$/.exec(path);
       if (m) return activity.get(decodeURIComponent(m[1])) ?? [];
       throw new Error(`unexpected paginate ${path}`);
@@ -320,7 +327,10 @@ test("exclusions: a fork, a protected head, an ignored head, a non-default base,
   const blocked = [
     [{ protected: true, protection: { enabled: true } }, null, "a protected head (classic branch protection)"],
     [{ protected: true, protection: { enabled: false } }, [{ type: "branch_name_pattern" }, { type: "pull_request" }, { type: "required_status_checks" }], "a protected head (ruleset: pull_request, required_status_checks)"],
-    [{ protected: true }, Object.assign(new Error("Resource not accessible"), { status: 403 }), "a protected head whose rules could not be read (Resource not accessible)"],
+    [{ protected: true, protection: { enabled: false } }, Object.assign(new Error("Resource not accessible"), { status: 403 }), "a protected head whose rules could not be read (Resource not accessible)"],
+    [{ protected: true, protection: { enabled: false } }, [{ type: "non_fast_forward" }, { type: "update" }], "a protected head (ruleset: update)"],
+    [{ protected: true, protection: { enabled: false } }, [...Array.from({ length: 30 }, () => ({ type: "branch_name_pattern" })), { type: "required_linear_history" }], "a protected head (ruleset: required_linear_history)"],
+    [{ protected: true }, [{ type: "branch_name_pattern" }], "a protected head (classic protection unknown)"],
   ];
   for (const [info, rules, reason] of blocked) {
     const { api, run, remoteHead } = setup("clean re-stack");
@@ -345,7 +355,15 @@ test("a repo-wide naming ruleset marks every branch protected, and the bot still
   assert.deepEqual(result.skipped, []);
   assert.equal(result.pushed.length, 1);
   assert.notEqual(remoteHead("c"), before);
-  assert.ok(api.calls.some((c) => /GET \/repos\/o\/r\/rules\/branches\/c$/.test(c)), "the rules were read because the branch reads protected");
+  assert.ok(api.calls.some((c) => /PAGINATE \/repos\/o\/r\/rules\/branches\/c$/.test(c)), "the rules were read, every page, because the branch reads protected");
+});
+
+test("an unprotected branch is pushed without reading its rules", async () => {
+  const { api, run } = setup("clean re-stack");
+  api.branchInfo.set("c", { protected: false, protection: { enabled: false } });
+  const result = await run();
+  assert.equal(result.pushed.length, 1);
+  assert.ok(!api.calls.some((c) => /\/rules\/branches\//.test(c)), "no rules call for a branch that does not read protected");
 });
 
 test("no token: plan and log, push nothing", async () => {
