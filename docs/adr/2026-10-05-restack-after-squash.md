@@ -47,7 +47,10 @@ base's tree, with the base and each parent's held head as parents) is clean on
    credentials, and executes nothing from a PR; no git subprocess inherits a
    token, and every git call runs with hooks and fsmonitor off. Without the
    token it plans and warns. Forks, non-default bases, protected heads and
-   ignored heads are never written to. A force-push over the bot's re-stack
+   ignored heads are never written to; a head is protected when classic
+   branch protection is on or a ruleset rule would stop a fast-forward push,
+   not merely because the branch API reports `protected` (amended
+   2026-10-06: a repo-wide naming ruleset sets that flag on every branch). A force-push over the bot's re-stack
    stops it for that parent, read from a record that survives the
    force-push: the repository activity API's `force_push` events and the
    compare of what each discarded, both readable with the job's

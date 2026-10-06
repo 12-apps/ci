@@ -301,3 +301,17 @@ wrong and are reverted or hardened.
   (`GITHUB_TOKEN`) may call. The job grants `contents: read`. An unreadable
   record now skips the PR with a `::warning::` naming the cause; force-pushes
   before the PR was opened are ignored, and a compare 404 is no bot re-stack.
+
+**Correction (live proof, 2026-10-06):** the first live re-stack in
+future-pay skipped its child PR (#2639) as "a protected head" (run
+37452210190, `restack {"pushed":[],"skipped":[[2639,"a protected head"]]}`).
+future-pay's repo-wide ruleset 19208143 (`branch_name_pattern` +
+`non_fast_forward`) applies to every branch, so `GET /branches/<b>` reports
+`protected: true` everywhere while classic protection is off; the exclusion
+made the bot inert in that repository, and no test caught it because the
+stub never set the flag on a pushable branch. The exclusion now reads classic
+protection (`protection.enabled`) and the effective rule types
+(`GET /rules/branches/{branch}`), skipping only on a rule that stops a
+fast-forward push; a protected branch whose rules cannot be read is skipped
+with the reason. A test pins the future-pay shape (protected, naming rules
+only → pushed), and reverting either half of the check turns it red.

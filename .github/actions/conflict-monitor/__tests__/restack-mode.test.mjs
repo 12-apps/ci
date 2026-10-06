@@ -54,6 +54,7 @@ function setup(name, { prs = {} } = {}) {
   const base = caseApi(world);
   const activity = new Map();
   const branchInfo = new Map();
+  const rulesInfo = new Map();
   const pulls = () =>
     open.map((n) => {
       const pr = c.prs[n];
@@ -72,6 +73,7 @@ function setup(name, { prs = {} } = {}) {
     calls: base.calls,
     activity,
     branchInfo,
+    rulesInfo,
     async paginate(path) {
       base.calls.push(`PAGINATE ${path}`);
       if (/\/pulls\?state=open$/.test(path)) return pulls();
@@ -80,6 +82,14 @@ function setup(name, { prs = {} } = {}) {
       throw new Error(`unexpected paginate ${path}`);
     },
     async request(method, path, body) {
+      const r = /\/rules\/branches\/(.+)$/.exec(path);
+      if (method === "GET" && r) {
+        base.calls.push(`${method} ${path}`);
+        const ref = r[1].split("/").map(decodeURIComponent).join("/");
+        const rules = rulesInfo.get(ref);
+        if (rules instanceof Error) throw rules;
+        return rules ?? [];
+      }
       const b = /\/branches\/(.+)$/.exec(path);
       if (method === "GET" && b) {
         base.calls.push(`${method} ${path}`);
@@ -306,12 +316,36 @@ test("exclusions: a fork, a protected head, an ignored head, a non-default base,
     assert.deepEqual(result.pushed, []);
     assert.equal(remoteHead("c"), before);
   }
+  // Classic branch protection, and a ruleset rule that stops a fast-forward push.
+  const blocked = [
+    [{ protected: true, protection: { enabled: true } }, null, "a protected head (classic branch protection)"],
+    [{ protected: true, protection: { enabled: false } }, [{ type: "branch_name_pattern" }, { type: "pull_request" }, { type: "required_status_checks" }], "a protected head (ruleset: pull_request, required_status_checks)"],
+    [{ protected: true }, Object.assign(new Error("Resource not accessible"), { status: 403 }), "a protected head whose rules could not be read (Resource not accessible)"],
+  ];
+  for (const [info, rules, reason] of blocked) {
+    const { api, run, remoteHead } = setup("clean re-stack");
+    api.branchInfo.set("c", info);
+    if (rules) api.rulesInfo.set("c", rules);
+    const before = remoteHead("c");
+    const result = await run();
+    assert.deepEqual(result.skipped, [{ pr: 2, reason }], reason);
+    assert.equal(remoteHead("c"), before);
+  }
+});
+
+test("a repo-wide naming ruleset marks every branch protected, and the bot still pushes (FUT-3341 live proof)", async () => {
+  // future-pay's ruleset 19208143: branch_name_pattern + non_fast_forward on
+  // every branch. GET /branches/<b> reports protected: true with classic
+  // protection off; the run of 37452210190 skipped the PR as "a protected head".
   const { api, run, remoteHead } = setup("clean re-stack");
-  api.branchInfo.set("c", { protected: true });
+  api.branchInfo.set("c", { protected: true, protection: { enabled: false, required_status_checks: { enforcement_level: "off", contexts: [], checks: [] } } });
+  api.rulesInfo.set("c", [{ type: "branch_name_pattern", ruleset_source_type: "Repository", ruleset_id: 19208143 }, { type: "non_fast_forward", ruleset_source_type: "Repository", ruleset_id: 19208143 }]);
   const before = remoteHead("c");
   const result = await run();
-  assert.deepEqual(result.skipped, [{ pr: 2, reason: "a protected head" }]);
-  assert.equal(remoteHead("c"), before);
+  assert.deepEqual(result.skipped, []);
+  assert.equal(result.pushed.length, 1);
+  assert.notEqual(remoteHead("c"), before);
+  assert.ok(api.calls.some((c) => /GET \/repos\/o\/r\/rules\/branches\/c$/.test(c)), "the rules were read because the branch reads protected");
 });
 
 test("no token: plan and log, push nothing", async () => {

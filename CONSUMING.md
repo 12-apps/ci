@@ -2360,8 +2360,13 @@ the head branch itself, not from `refs/pull/N/head`.
 
 **Never written to:** forks; PRs whose base is not the default branch (a
 real `gh stack` member, which GitHub re-stacks, or an ad-hoc `--base` PR);
-the heads `main`, `master`, `develop`, `release/*` and any branch GitHub
-reports `protected`; heads matching `ignoreHeads`. Drafts ARE re-stacked. A
+the heads `main`, `master`, `develop`, `release/*`; a branch under classic
+branch protection, or under a ruleset rule that stops a fast-forward push
+(`update`, `pull_request`, `required_status_checks`, `required_linear_history`,
+`required_signatures`, `required_deployments`, `merge_queue`, read from
+`GET /rules/branches/{branch}`); heads matching `ignoreHeads`. The branch
+API's `protected` flag alone does not exclude a PR: a repo-wide ruleset that
+only names branches or forbids force-pushes sets it on every branch. Drafts ARE re-stacked. A
 PR whose base is not the default branch gets no comment either: the probe
 lists only default-base PRs, as before.
 
