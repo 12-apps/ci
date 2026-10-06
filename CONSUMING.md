@@ -2184,6 +2184,312 @@ which is not proof they touched the conflicting lines.
 
 ---
 
+# Consuming the Conflict monitor's re-stack
+
+A branch C cut from the branch of PR P, both targeting `main`. P is
+squash-merged: its commits never reach `main`, one squash commit does. When C
+next takes `main` in, git's merge base is the old `main` commit P branched
+from, so P's code is "added on both sides" and every place C changed P's lines
+conflicts — with C's own parent.
+
+The `restack` mode makes that merge with the right base. It builds a
+throwaway commit Z (`main`'s tree, with `main` and P's last head that C holds
+as parents), merges C with Z, and when that is clean pushes the result as an
+ordinary merge commit with the parents (C, `main`). Z is never pushed. When
+the merge still conflicts, it pushes nothing, and the probe's ONE comment
+lists only the files that conflict even with P's pre-squash head as a base,
+with the command that takes `main` in that way.
+
+On future-pay's 60 historical stacked syncs this merge was clean on 46, and
+on 40 of those the person resolving by hand committed exactly its tree.
+
+## A. Caller workflow: a `restack` job, and the probe after it
+
+```yaml
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, closed]
+  schedule:
+    - cron: '17 11 * * 1'
+  workflow_dispatch:
+    inputs:
+      since: { type: string, required: false, default: '' }
+      until: { type: string, required: false, default: '' }
+
+jobs:
+  restack:
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+       contains(fromJSON('["opened","reopened","synchronize"]'), github.event.action) &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.actor != 'dependabot[bot]')
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: 12-apps/ci/.github/workflows/conflict-restack.yml@v2
+    with:
+      pr: ${{ github.event.pull_request.number || '' }}
+    secrets:
+      PUSH_TOKEN: ${{ secrets.SOME_PAT }}
+
+  probe:
+    needs: restack
+    # Its condition is unchanged; `!cancelled()` keeps it running when
+    # `restack` is skipped or fails, and lets a cancelled run stay cancelled.
+    if: >-
+      !cancelled() && (
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+       github.event.action == 'synchronize' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.actor != 'dependabot[bot]'))
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: 12-apps/ci/.github/workflows/conflict-probe.yml@v2
+    with:
+      pr: ${{ github.event.pull_request.number || '' }}
+      restacked: ${{ needs.restack.outputs.pushed }}
+
+  report:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: 12-apps/ci/.github/workflows/conflict-report.yml@v2
+    with:
+      since: ${{ inputs.since || '' }}
+      until: ${{ inputs.until || '' }}
+```
+
+`conflict-restack.yml` takes `config`, `base`, `pr`, `dry-run` and
+`node-version`, with the probe's defaults, and the secret `PUSH_TOKEN`.
+
+* **`PUSH_TOKEN`** is a PAT that can push to PR branches. A push made with
+  `GITHUB_TOKEN` starts no workflow, so the re-stacked PR would sit with zero
+  check runs; the PAT's push fires `synchronize`, and CI runs once, as it
+  would after a hand merge. The token is sent as an http extraheader in the
+  push call only, never in a URL and never in `.git/config`. Without it the
+  job plans, logs a `::warning::` and pushes nothing.
+* **The runner is fixed** to `ubuntu-latest`: the job holds a PAT, so it runs
+  on a runner recycled per job, with no `runner` input and no `CI_RUNNER`
+  fallback to move it. It checks out the BASE with `persist-credentials:
+  false` and runs nothing from a PR: only `merge-tree`, `commit-tree` and
+  `push`.
+* **The output `pushed`** is `{"<pr>": {"head": <sha>, "baseSha": <sha>}}`.
+  The probe takes it as `restacked`: a PR listed there is not fetched again
+  (`refs/pull/N/head` lags a push by seconds), counts as clean against that
+  base, and an existing comment is marked resolved.
+* **Concurrency:** one group per target,
+  `conflict-restack-<repo>-<pr or 'all'>`, never cancelled mid-push, like the
+  probe's. Single-PR runs for two PRs both run. A full run and a single-PR run
+  on the same PR may overlap; the push is a lease, so the second fails instead
+  of clobbering, and the next event re-plans. No group is shared with a heal
+  job: each side's push is refused when the other moved the branch first.
+
+## B. The `restack` key in `.github/conflict-monitor.json`
+
+Nothing happens until the key exists: the job exits 0 having read and written
+nothing, and the PR that adds the key is green on arrival, since its own run
+reads the BASE's config.
+
+```json
+{
+  "buckets": [ … ],
+  "restack": {
+    "push": true,
+    "ignoreHeads": ["renovate/", "chore/post-merge-regen-"],
+    "command": "pnpm restack"
+  }
+}
+```
+
+| key | default | |
+|---|---|---|
+| `push` | `true` | `false` is the kill switch: plan, log and warn, push nothing |
+| `ignoreHeads` | `[]` | head-branch PREFIXES the bot never writes to |
+| `command` | none | your local command, quoted in the probe's comment next to the raw git recipe |
+
+A bad block (an unknown key, a wrong type) fails the restack job naming the
+reason. `report` never reads it, and `probe` reads only `command`, ignoring a
+block it cannot parse.
+
+## C. What it writes, and what it never touches
+
+**The plan, per open PR:**
+
+1. The plain merge with `main` must conflict. A PR GitHub can merge is left
+   alone, so a second run is a no-op.
+2. The culprits of the conflicted files (`main`'s first-parent commits since
+   the branch last took `main`, E0's set) are mapped to their PR through
+   `GET /commits/{sha}/pulls`, keeping the PR whose `merge_commit_sha` is the
+   commit. A `(#N)` in the subject is only a fast path, taken when PR N's
+   merge commit agrees: a squash title can lack the number, or name another
+   PR.
+3. A parent counts when the branch holds its commits and `main` does not
+   (the held test E0 and the overlap mode use), and `main` has not reverted
+   its squash (`This reverts commit <sha>`, or `Revert "…(#P)…"`).
+4. Its held head is the first commit on the parent head's first-parent chain
+   that the branch contains. With several parents, Z takes one per held head.
+5. `merge-tree branch Z`: clean is pushed, conflicted is left to the probe.
+
+**The commit:** the merged tree, parents (branch, `main`), author and
+committer `github-actions[bot]`, and a message that passes a conventional
+commitlint with an issue reference required:
+
+```
+chore(stack): merge main after the squash of #2514 (#2519)
+
+Take main in with the pre-squash head of #2514 as an extra merge base, so the parent's own code no
+longer conflicts with its squash. The merge has two parents, this branch and main; the throwaway
+base commit is not part of the history.
+
+Restack-Base: <the held head>
+Restack-Parent: #2514
+```
+
+**The push:** `git push --force-with-lease=refs/heads/<ref>:<planned head>
+origin <commit>:refs/heads/<ref>`, after asserting that the commit descends
+from the planned head. It is a compare-and-swap that never rewrites: a branch
+the author moved, or deleted, fails the lease — it is never overwritten and
+never recreated — and the next event re-plans. The planned head is read from
+the head branch itself, not from `refs/pull/N/head`.
+
+**Never written to:** forks; PRs whose base is not the default branch (a
+real `gh stack` member, which GitHub re-stacks, or an ad-hoc `--base` PR);
+the heads `main`, `master`, `develop`, `release/*` and any branch GitHub
+reports `protected`; heads matching `ignoreHeads`. Drafts ARE re-stacked. A
+PR whose base is not the default branch gets no comment either: the probe
+lists only default-base PRs, as before.
+
+**The ping-pong cap:** when the head branch was ever force-pushed over one of
+the bot's re-stacks for the same parent, the bot does not re-stack again; the
+probe's comment carries the command. The PR timeline cannot tell: it lists
+only the commits the PR has now. So the mode reads the repository activity
+API, `GET /repos/{o}/{r}/activity?ref=refs/heads/<ref>&activity_type=force_push`,
+which keeps every force-push with its `before` and `after`, and for each one
+`GET /repos/{o}/{r}/compare/{after}...{before}`, which lists the commits it
+discarded. A discarded commit by `github-actions[bot]` with a matching
+`Restack-Parent` trailer stops the bot. Only force-pushes since the PR was
+opened count, and a compare that answers 404 (a discarded commit GitHub no
+longer keeps) is no bot re-stack. Both endpoints need `contents: read`, which
+the job's `GITHUB_TOKEN` has: GitHub's REST docs list them under "Contents"
+(read) and among the endpoints an installation token, which `GITHUB_TOKEN`
+is, may call. If the record cannot be read anyway, the PR is skipped (fail
+closed) and the job prints a `::warning::` naming the cause.
+
+**A push the remote refuses** (a ruleset the branch API's `protected` flag
+does not show, a server hook) is a `::warning::` and that PR's entry; the run
+stays green for every other PR.
+
+**The commit date** is the later of its two parents' committer dates, so two
+runs planning the same head on the same base write the same commit, and the
+second push is a no-op.
+
+**The tokens:** `PUSH_TOKEN` and `GITHUB_TOKEN` leave the process
+environment before the first git call, so no git subprocess inherits them;
+only the push gets the PAT, as an extraheader. Every git call of the mode
+runs with hooks and fsmonitor off.
+
+**A comment can flap once.** The bot plans on the head branch, while a
+probe on the PR's next `synchronize` reads `refs/pull/N/head`, which lags a
+push by seconds. That probe can still see the head before the re-stack and
+write "stacked" after an earlier run wrote "resolved"; the re-stack's own
+`synchronize` run resolves it again.
+
+**The record:** the job summary lists every PR as re-stacked, planned only,
+still conflicting (with its files), moved before the push, or skipped (with
+the reason). One machine-readable line goes to the log:
+
+```
+restack {"base":"<sha>","open":8,"pushed":[[2519,"<sha>",[2514]]],"planned":[],"residual":[[1849,[1837],["docs/x.md"]]],"skipped":[[2401,"a fork"]],"leaseFailed":[],"rejected":[],"failed":[],"reads":19}
+```
+
+## D. What the probe and the report do with a stacked PR
+
+* **The probe** analyses a stacked PR against Z instead of the base tip. Its
+  comment lists only the files that still conflict there, says "Stacked on
+  #P (squash-merged): these files conflict even with #P's pre-squash head as
+  the merge base", and adds `command` and the raw git recipe. The recipe
+  computes each parent's held head itself, so the comment prints no trailer
+  value a hand merge could paste. It is fail-fast: one `( set -eu … )`
+  subshell that refuses an empty held head or merge base and goes on only
+  when the merge in progress is Z's, and a commit line that runs only while
+  that merge is in progress — so a failed step (an unpublished
+  `refs/pull/N/head`, a dirty worktree) commits nothing. A stacked PR
+  whose Z merge is clean but that was not pushed (no token, the ping-pong
+  cap, a lease lost) gets a comment saying so, never "resolved". A PR that is
+  not stacked keeps exactly the comment it had.
+* **The report** replays each stacked sync against Z too. A file Z still
+  conflicts on is grouped by its shape in that merge: a real conflict. A file
+  Z resolves is `code: stacked` — a person did by hand what the re-stack
+  automates — unless the sync is a tool merge: `Restack-Base`/`Restack-Parent`
+  trailers naming exactly the held heads and parents the report computes
+  itself, and the committed blob equal to Z's. Then the file is not counted,
+  and the sync is listed as "re-stacked by the tool", or "redone at push" with
+  `Restack-Redo: yes`. A trailer copied from another sync is refused when it
+  names another held head or parent; two siblings cut from one parent commit
+  share a held head, and there the blob check holds. A forged trailer can hide
+  only a blob byte-identical to the tool's output, never a residual file.
+* **Merge drivers: the blob check stays strict.** A real `git merge` of Z
+  (your local command, the recipe) runs the `.gitattributes` drivers, which
+  `merge-tree` does not. When a driver writes another blob than Z's for a
+  file Z merges cleanly, that file of a trailered merge is counted as
+  `code: stacked`, like any hand resolution: counted, never explained away.
+  There is no exemption by attribute, because a repository can give every
+  code file a driver (future-pay: `*.ts merge=imports`), and an exemption
+  would let the trailers alone hide any blob. It should be rare: a driver
+  runs only on a file BOTH sides changed, and here only where Z already
+  merges that file cleanly; such a week shows up named, by PR and commit.
+  A file Z still conflicts on is counted by its shape or its bucket whatever
+  resolved it, as before: a driver-resolved lockfile lands in
+  `dependencies`, never in `code: stacked`.
+* The duplicated-scope line under the table ("N of the duplicated-scope
+  files were created by two PRs sharing a ticket id") follows the
+  re-stack-aware group: on future-pay's pinned window it reads 20 instead of
+  3, because #1849's 17 add/add files with #1837 (both FUT-2233) move there.
+  Each file's `culprits` in `report.json` is also mapped through
+  `merge_commit_sha` now.
+* The report's table prints the re-stack-aware groups and, next to them, the
+  **legacy** columns: the rule before this (every conflicted file of a
+  stacked sync is `code: stacked`). Both map a culprit to its PR through the
+  PR list's `merge_commit_sha` first and `(#N)` second. A section names, per
+  window, every sync re-stacked by the tool, redone at push, and left in
+  `code: stacked`, as PR and commit.
+
+On future-pay, pinned to the epic's window (`until 2026-09-29T13:14:23Z`,
+`base-tip eb17230`, `since 2026-09-15`), `code: stacked` reads 318 / 55
+legacy and 249 / 9 re-stack-aware; the 69 / 46 files that move go to
+concurrent edit, append point and duplicated scope by their shape under Z.
+
+## E. What it cannot do, and what it costs
+
+* **Real conflicts stay.** A parent that kept changing lines after the child
+  took it, where the child changed them too, conflicts under any merge base.
+* **No merge driver runs.** `merge-tree` runs none of a repository's
+  `.gitattributes` drivers, so a residual a driver would resolve (a lockfile, a
+  ledger) is not pushed; a local `git merge` of Z, which the recipe does, runs
+  them.
+* **A rebase onto `main`** leaves no merge, and nothing here sees it.
+* **Cost of the restack job:** one `merge-tree` per open PR; for a
+  conflicted one, up to two calls per culprit squash (`GET /pulls/{n}` for the
+  `(#N)` fast path, then `GET /commits/{sha}/pulls`), cached per run, and the
+  parent's head fetched from `refs/pull/N/head`; for a PR about to be pushed,
+  one activity read, one compare per force-push of its branch, and one branch
+  read. The wall time is about the probe's, dominated by the full-history
+  checkout.
+* **Cost added to the probe:** every CONFLICTED PR, stacked or not, now
+  costs the same culprit mapping (up to two REST calls per culprit squash,
+  cached per run and shared across PRs) and one `refs/pull/P/head` fetch per
+  mapped parent, then a second `merge-tree` against Z when it is stacked. A
+  clean PR costs nothing new, and a non-stacked PR's comment is byte for byte
+  what it was.
+
+---
+
 # Consuming the Conflict monitor's overlap warning
 
 The probe says a PR conflicts AFTER the base has moved. The overlap mode says

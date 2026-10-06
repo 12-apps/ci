@@ -180,3 +180,51 @@ export function loadOverlapConfig(path) {
   const config = parseConfig(text, path);
   return { config, overlap: parseOverlapConfig(JSON.parse(text).overlap, config.rules, path) };
 }
+
+/**
+ * The `restack` block, read by `restack` mode (and, for `command` only, by
+ * `probe`). `parseConfig` never looks at it, so a mistake here fails the
+ * restack job and leaves `report` on the same file untouched.
+ *
+ *   "restack": {
+ *     "push": true,
+ *     "ignoreHeads": ["renovate/", "chore/post-merge-regen-"],
+ *     "command": "pnpm restack"
+ *   }
+ *
+ * `push: false` is the kill switch: the mode plans and logs and pushes
+ * nothing. `ignoreHeads` are head-branch PREFIXES the bot never writes to.
+ * `command` is the consumer's local command, quoted in the probe's comment
+ * next to the raw git recipe. `raw` undefined or null (no key) is `null`:
+ * the mode has nothing to do.
+ */
+export function parseRestackConfig(raw, source = "config") {
+  if (raw == null) return null;
+  const where = `${source}: "restack"`;
+  if (typeof raw !== "object" || Array.isArray(raw)) throw new ConfigError(`${where} must be an object`);
+  const known = new Set(["push", "ignoreHeads", "command"]);
+  const unknown = Object.keys(raw).filter((k) => !known.has(k));
+  if (unknown.length) throw new ConfigError(`${where} has unknown key(s): ${unknown.join(", ")}`);
+  if (raw.push != null && typeof raw.push !== "boolean") throw new ConfigError(`${where}.push must be true or false`);
+  const heads = raw.ignoreHeads ?? [];
+  if (!Array.isArray(heads) || heads.some((s) => typeof s !== "string" || !s)) {
+    throw new ConfigError(`${where}.ignoreHeads must be an array of non-empty strings`);
+  }
+  if (raw.command != null && (typeof raw.command !== "string" || !raw.command.trim() || /[\r\n`]/.test(raw.command))) {
+    throw new ConfigError(`${where}.command must be a one-line string with no backtick`);
+  }
+  return { push: raw.push !== false, ignoreHeads: heads, command: raw.command?.trim() ?? null };
+}
+
+/** The bucket config and the `restack` block of one file. A missing file is no buckets and no block. */
+export function loadRestackConfig(path) {
+  let text;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (err) {
+    if (err.code === "ENOENT") return { config: parseConfig("{}", path), restack: null };
+    throw err;
+  }
+  const config = parseConfig(text, path);
+  return { config, restack: parseRestackConfig(JSON.parse(text).restack, path) };
+}

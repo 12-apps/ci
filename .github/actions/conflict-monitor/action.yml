@@ -13,13 +13,16 @@ description: >-
   merges every pair of open PRs against each other and keeps ONE overlap
   comment on BOTH PRs of a pair that will conflict whichever merges second —
   before either does. It needs an `overlap` key in the config and does nothing
-  without one.
+  without one. `restack` takes the base into every open PR cut from a
+  squash-merged parent's branch, with the parent's pre-squash head as an extra
+  merge base, and pushes the merge under a lease when it is clean. It needs a
+  `restack` key in the config and does nothing without one.
 
   Needs a full-history checkout. The groups are the caller's (a JSON config);
   see lib/config.mjs for the format.
 inputs:
   mode:
-    description: '`probe`, `report` or `overlap`.'
+    description: '`probe`, `report`, `overlap` or `restack`.'
     required: true
   config:
     description: "Path to the caller's bucket config. A missing file means no buckets: every file is `code`."
@@ -30,7 +33,7 @@ inputs:
     required: false
     default: ''
   pr:
-    description: '`probe` only: probe this one PR instead of every open one.'
+    description: '`probe` and `restack`: this one PR instead of every open one.'
     required: false
     default: ''
   window-days:
@@ -54,17 +57,30 @@ inputs:
     required: false
     default: 'conflict-report/report.json'
   dry-run:
-    description: "`probe` and `overlap`: log what would be written, write nothing."
+    description: "`probe`, `overlap` and `restack`: log what would be written, write nothing."
     required: false
     default: 'false'
+  restacked:
+    description: "`probe` only: the restack job's `pushed` output. A PR listed there is not fetched again and counts as clean against the base it was merged with."
+    required: false
+    default: ''
+  push-token:
+    description: '`restack` only: a PAT that can push to PR branches. Sent as an http extraheader in the push call only. Empty: plan and warn, push nothing.'
+    required: false
+    default: ''
   github-token:
-    description: 'Lists PRs; `probe` and `overlap` also read and write PR comments (`pull-requests: write`).'
+    description: 'Lists PRs; `probe` and `overlap` also read and write PR comments (`pull-requests: write`); `restack` reads PRs, timelines and branches, and fetches heads.'
     required: false
     default: ${{ github.token }}
+outputs:
+  pushed:
+    description: '`restack` only: JSON `{"<pr>": {"head": <sha>, "baseSha": <sha>}}` of every PR it pushed.'
+    value: ${{ steps.run.outputs.pushed }}
 runs:
   using: composite
   steps:
-    - shell: bash
+    - id: run
+      shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         MODE: ${{ inputs.mode }}
@@ -77,10 +93,13 @@ runs:
         BASE_TIP: ${{ inputs.base-tip }}
         OUT: ${{ inputs.out }}
         DRY_RUN: ${{ inputs.dry-run }}
+        RESTACKED: ${{ inputs.restacked }}
+        PUSH_TOKEN: ${{ inputs.push-token }}
       run: |
         case "$MODE" in
           probe)  node "$GITHUB_ACTION_PATH/probe.mjs" ;;
           report) node "$GITHUB_ACTION_PATH/report.mjs" ;;
           overlap) node "$GITHUB_ACTION_PATH/overlap.mjs" ;;
-          *) echo "::error::conflict-monitor: mode must be probe, report or overlap, got '$MODE'"; exit 1 ;;
+          restack) node "$GITHUB_ACTION_PATH/restack.mjs" ;;
+          *) echo "::error::conflict-monitor: mode must be probe, report, overlap or restack, got '$MODE'"; exit 1 ;;
         esac

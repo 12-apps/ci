@@ -19,12 +19,13 @@ export const MARKER = "<!-- 12-apps/ci conflict-monitor -->";
 const STATE = /<!-- conflict-monitor:state (\S+) -->/;
 export const RESOLVED = "resolved";
 
-export function digest(records) {
-  const key = records
-    .map((r) => `${r.file}\t${r.shape}\t${r.bucket}`)
-    .sort()
-    .join("\n");
-  return createHash("sha256").update(key).digest("hex").slice(0, 16);
+export function digest(records, stack = null) {
+  const rows = records.map((r) => `${r.file}\t${r.shape}\t${r.bucket}`);
+  // A stacked PR's state also names its parents and their held heads, so the
+  // comment changes when the re-stack would. A PR that is not stacked keeps
+  // exactly the digest it always had: its comment is never rewritten for this.
+  if (stack) rows.push(...stack.parents.map((p) => `stacked\t#${p.pr}\t${p.pOld}`));
+  return createHash("sha256").update(rows.sort().join("\n")).digest("hex").slice(0, 16);
 }
 
 export const stateOf = (body) => STATE.exec(body ?? "")?.[1] ?? null;
@@ -60,16 +61,52 @@ function culpritCell(list) {
   return prs.length > 6 ? `${prs.slice(0, 6).join(", ")} +${prs.length - 6}` : prs.join(", ");
 }
 
-export function renderConflict(records, { base, baseSha }) {
+const prList = (parents) => {
+  const prs = parents.map((p) => `#${p.pr}`);
+  return prs.length < 2 ? prs.join("") : `${prs.slice(0, -1).join(", ")} and ${prs[prs.length - 1]}`;
+};
+
+/**
+ * The lines a stacked PR's comment adds: which parent, what the files below
+ * mean, and how to take the base in with the parent's pre-squash head as a
+ * merge base — the consumer's own command when its config names one, and
+ * the raw git recipe (lib/restack.mjs) always.
+ */
+function stackLines(stack, { base, clean }) {
+  const theirs = stack.parents.length > 1 ? "their pre-squash heads" : `${prList(stack.parents)}'s pre-squash head`;
+  const lead = clean
+    ? `Stacked on ${prList(stack.parents)} (squash-merged): every conflicted file is the parent's own code meeting its squash, and the merge is clean with ${theirs} as the merge base.`
+    : `Stacked on ${prList(stack.parents)} (squash-merged): these files conflict even with ${theirs} as the merge base.`;
+  const how = stack.command
+    ? `Take \`${base}\` in with \`${stack.command}\`, or by hand:`
+    : `Take \`${base}\` in this way:`;
+  return [lead, "", how, "", "```sh", ...stack.recipe, "```", ""];
+}
+
+export function renderConflict(records, { base, baseSha, stack = null }) {
   const rows = [...records]
     .sort((a, b) => a.bucket.localeCompare(b.bucket) || a.file.localeCompare(b.file))
     .map((r) => `| ${codeOf(r.file)} | ${esc(r.shape)} | ${esc(r.bucket)} | ${culpritCell(r.culprits)} |`);
   const hints = [...new Set(records.map((r) => r.shape))]
     .filter((s) => SHAPE_HINT[s])
     .map((s) => `**${s}**: ${SHAPE_HINT[s]}.`);
+  const state = `<!-- conflict-monitor:state ${digest(records, stack)} -->`;
+  const kept = "This comment is kept up to date and marked resolved when the branch merges cleanly again.";
+  if (stack && !records.length) {
+    return [
+      MARKER,
+      state,
+      `### This PR conflicts with \`${base}\` only through its parent's squash`,
+      "",
+      `Checked against \`${base}\` at \`${baseSha.slice(0, 7)}\`.`,
+      "",
+      ...stackLines(stack, { base, clean: true }),
+      kept,
+    ].join("\n");
+  }
   return [
     MARKER,
-    `<!-- conflict-monitor:state ${digest(records)} -->`,
+    state,
     `### This PR no longer merges cleanly with \`${base}\``,
     "",
     `Checked against \`${base}\` at \`${baseSha.slice(0, 7)}\`. ${records.length} file(s) conflict:`,
@@ -79,7 +116,9 @@ export function renderConflict(records, { base, baseSha }) {
     ...rows,
     "",
     ...(hints.length ? [hints.join(" "), ""] : []),
-    `Bring \`${base}\` into this branch and resolve the files above. This comment is kept up to date and marked resolved when the branch merges cleanly again.`,
+    ...(stack
+      ? [...stackLines(stack, { base, clean: false }), `Resolve the files above. ${kept}`]
+      : [`Bring \`${base}\` into this branch and resolve the files above. ${kept}`]),
   ].join("\n");
 }
 
@@ -97,6 +136,8 @@ export function renderResolved({ base, baseSha }) {
  * What to do with the PR's comment, given its current conflict records
  * (`null` = clean) and the monitor's existing comment, if any.
  *
+ * A stacked PR (`ctx.stack`) counts as conflicted with no residual records.
+ *
  *   conflicted, no comment          → create
  *   conflicted, different state     → update
  *   conflicted, same state          → nothing
@@ -105,10 +146,12 @@ export function renderResolved({ base, baseSha }) {
  */
 export function decide(records, existing, ctx) {
   const current = stateOf(existing?.body);
-  if (records && records.length) {
-    const next = digest(records);
+  // A stacked PR whose re-stack would be clean still conflicts with the base
+  // until somebody takes the base in: it is not "resolved".
+  if ((records && records.length) || ctx.stack) {
+    const next = digest(records ?? [], ctx.stack ?? null);
     if (current === next) return { action: "none" };
-    return { action: existing ? "update" : "create", body: renderConflict(records, ctx) };
+    return { action: existing ? "update" : "create", body: renderConflict(records ?? [], ctx) };
   }
   if (existing && current !== RESOLVED) return { action: "update", body: renderResolved(ctx) };
   return { action: "none" };

@@ -172,3 +172,132 @@ actually logged **24/24 guard**, **17/17 runner override** and **31/31 full-suit
 wiring** checks, all with zero skipped, proving both changes coexist in the
 hosted tree. This documentation-only addendum must pass its own final-head
 checks before merge; the compatibility prerequisite still applies.
+
+## E-003 — A stacked branch is re-stacked with its parent's pre-squash head as a merge base
+
+**Date:** 2026-10-05 · **Ticket:** FUT-3341 · **Status:** Local proof and replay complete; hosted proof pending
+
+**Question:** after a parent PR is squash-merged, can the engine take the base
+into its child branch with the right merge base, push that merge without
+rewriting anything, and leave only the real conflicts to a person? And can the
+report tell that merge from a hand resolution, given that most hand
+resolutions produce the same tree?
+
+**Baseline:** engine `ce9be5f` (`v2`, #166). The report counts every
+conflicted file of a stacked sync as `code: stacked`. Replayed over
+future-pay's PR history (2,574 PRs, every `refs/pull/*/head` fetched, config
+`.github/conflict-monitor.json`), pinned to the epic's window
+(`until 2026-09-29T13:14:23Z`, `base-tip eb17230`, `since 2026-09-15`):
+`code: stacked` 315 / 52 of 2,076 / 472 files. A culprit is mapped to its PR
+by the subject's `(#N)` only, which missed #1984's squash (`6cf2cda`, no
+number in its title).
+
+**Method:** `lib/restack.mjs` merges the branch with a throwaway commit Z (the
+base's tree, with the base and each stacked parent's held head as parents), so
+git uses every merge base it finds. A new `restack` mode and
+`conflict-restack.yml` push a clean result as a two-parent merge under a lease;
+the probe analyses a stacked PR against Z; the report replays each stacked sync
+against Z and prints the re-stack-aware groups next to the legacy ones, mapping
+a culprit through the PR list's `merge_commit_sha` before `(#N)`. The
+scenarios live in `__tests__/restack-cases.json` and are built with real git;
+the mode's pushes go to a real bare remote; GitHub is stubbed.
+
+**Results:**
+- The engine's own planner (`planRestack`, as the bot calls it) over E0's 60
+  live stacked syncs: **46 clean (33 distinct merges), 14 residual, 81
+  residual files**; 40 of the 46 clean trees equal what the human committed.
+  Identical row by row to the ticket's measurement, with the squash mapped by
+  `merge_commit_sha` only or with the `(#N)` fallback. The three two-parent
+  syncs take both held heads; #740 is left with 5 files either way.
+- The pinned report, legacy → re-stack-aware (all / since 09-15): stacked
+  **318 / 55 → 249 / 9**; concurrent edit **635 / 168 → 672 / 187**; append
+  point **273 / 102 → 288 / 112**; duplicated scope **32 / 5 → 49 / 22**.
+  Every other row and the totals (2,076 / 472) are unchanged. The legacy
+  column is today's rule plus the `merge_commit_sha` mapping (+3, #1984). The
+  live report gives 327 / 64 → 258 / 18, 714 / 247 → 751 / 266,
+  297 / 126 → 312 / 136 and 32 / 5 → 49 / 22, and names the five stacked syncs
+  since 09-15 (#1849, #1984, #2123, #2344, #2519).
+- `node --test .github/actions/conflict-monitor/__tests__/*.test.mjs`:
+  **173 passed, 0 failed** (117 before); every `self-test.yml` step run
+  locally is green; `node --test .github/workflows/__tests__/*.test.mjs`
+  **309 / 309**; actionlint 1.7.7 passes the four conflict workflows.
+- Ten mutations each turn a test red: trailers accepted unchecked, the blob
+  check dropped, no revert skip, Z without held heads, Z with one of two, a
+  plain `--force`, no ping-pong cap, forks not excluded, the probe re-fetching
+  a re-stacked PR, and the report without the `merge_commit_sha` mapping.
+- The rendered messages (one parent, 4- and 5-digit numbers, two and five
+  parents, with and without `Restack-Redo`) pass the real `@commitlint/cli`
+  with future-pay's `scripts/commitlint/ci.config.mjs` and
+  `REQUIRE_ISSUE_REF=true`.
+
+**Rejected:** a single `--merge-base` (43 clean syncs, and worse than the
+default merge on 3); `rebase --onto` (28 clean, and a force-push); recording
+the parent's head as a third parent (the report would replay it as a sync);
+the `(#N)` subject as the only map; a `GITHUB_TOKEN` push (it starts no
+checks on the PR).
+
+**Why:** the merge is the one git would have made had the parent landed as a
+merge commit, so it removes exactly the squash artefacts and keeps every real
+conflict. The trailers, accepted only when they match the report's own
+computation and the committed blob equals Z's, are the tell that the tree is
+not. Decision record: `docs/adr/2026-10-05-restack-after-squash.md`.
+
+**Regression watch:** the report's groups move for every consumer: the
+re-stack-aware columns are primary, the legacy ones keep the old rule for
+comparison. `restack-cases.json` is the contract a consumer's local command is
+tested against; a change to a case or its tree id is a change to that
+contract. `runner-selection.test.mjs` lists `conflict-restack.yml:restack` as
+PINNED ("holds a PAT"). Hosted evidence (the job's median wall time, the first
+pushes) is recorded with the consumer's rollout.
+
+**Correction (review r1, 2026-10-06):** the first ping-pong cap could not fire
+on GitHub. It looked for the bot's re-stack in the PR timeline's `committed`
+events, and GitHub lists there only the commits the PR has now: on every
+force-pushed future-pay PR checked (#169, #1327, #1727, #1837, #1849) the
+timeline's commits equal `/pulls/{n}/commits`, and none is a commit a
+force-push removed. The test was green because it fed exactly the shape
+GitHub never returns. The cap now reads
+`GET /repos/{o}/{r}/activity?ref=refs/heads/<ref>&activity_type=force_push`
+and, per force-push, `GET /repos/{o}/{r}/compare/{after}...{before}`, which
+still serves the discarded commits. Both were checked read-only on #1849's
+force-push of 2026-09-19 (`36f5625` -> `29e4aba`, 41 discarded commits, one of
+them a hand merge of `main`). `__tests__/restack-activity.json` keeps that
+structure with its values replaced, and the test force-pushes for real and
+answers compare from the repository. In the same pass: no git subprocess of
+the mode inherits `PUSH_TOKEN` or `GITHUB_TOKEN` and every git call runs with
+hooks and fsmonitor off (a `git` wrapper asserts it, and removing either now
+turns a test red; before, removing the hardening turned nothing red); a
+`[remote rejected]` push is a warning and that PR's entry, not a red run; the
+commit is dated by its parents; the comment's recipe computes the held heads
+instead of printing trailer values; a tool merge's file with a custom merge
+driver counts as the tool's. Re-run: conflict-monitor **177 / 177**, every
+`self-test.yml` step green, workflow tests **309 / 309**, actionlint clean,
+and the replay unchanged (46 / 14 / 81; 318 / 55 → 249 / 9 and the other
+three rows as above). The duplicated-scope ticket line reads 20 instead of 3
+on the pinned window: it follows the re-stack-aware group.
+
+**Correction (review r2, 2026-10-06):** two changes of the r1 pass were
+wrong and are reverted or hardened.
+- **The merge-driver exemption is withdrawn.** It let a trailered merge's file
+  count as the tool's whenever its path had a custom `merge=` driver,
+  whatever its blob, and read that attribute from the merge being judged.
+  future-pay gives every `*.ts`, `*.tsx`, `*.js` and `*.mjs` file a driver, so
+  trailers alone would have hidden any hand resolution, a wrong one included.
+  The blob check is strict again for every file; a driver that writes another
+  blob than Z's is counted as `code: stacked`, which is conservative and
+  expected to be rare (a driver runs only where both sides changed a file Z
+  already merges cleanly). A regression test pins it.
+- **The raw recipe was not fail-fast.** Pasted with an unpublished
+  `refs/pull/N/head`, its later lines still rewrote MERGE_HEAD and committed
+  the branch's own tree under the tool's header, a merge that silently drops
+  `main`'s changes. It is now one `( set -eu … )` subshell that refuses an
+  empty held head or merge base and proceeds only when the merge in progress
+  is Z's, plus a commit line that runs only while that merge is in progress.
+  A test pastes it with no `refs/pull`, with an empty held head and over a
+  dirty worktree: each exits non-zero and creates no commit.
+- **The activity API's permission is documented, not assumed:** GitHub's REST
+  docs list `GET /repos/{o}/{r}/activity` and `GET /repos/{o}/{r}/compare/…`
+  under "Contents" (read), among the endpoints an installation token
+  (`GITHUB_TOKEN`) may call. The job grants `contents: read`. An unreadable
+  record now skips the PR with a `::warning::` naming the cause; force-pushes
+  before the PR was opened are ignored, and a compare 404 is no bot re-stack.
