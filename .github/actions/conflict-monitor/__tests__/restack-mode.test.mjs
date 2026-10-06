@@ -9,7 +9,7 @@ import { after, test } from "node:test";
 import { authEnv, redact } from "../lib/auth.mjs";
 import { git, isAncestor } from "../lib/git.mjs";
 import { BOT, trailersOf } from "../lib/restack.mjs";
-import { forcePushOverRestack, isBotRestack, pushRestack, pushedOutput, restackLogLine, restackSummary, runRestack } from "../restack.mjs";
+import { forcePushOverRestack, isBotRestack, protectionOf, pushRestack, pushedOutput, restackLogLine, restackSummary, runRestack } from "../restack.mjs";
 import { ACTIVITY, buildCase, caseApi, caseNamed, compareShape, forcePushEvent } from "./restack-world.mjs";
 
 // The `restack` mode end to end: the case's repository plays GitHub's git
@@ -579,3 +579,14 @@ test("the force-push scan: an old force-push of an earlier PR is ignored, and a 
   });
   await assert.rejects(forcePushOverRestack({ ...args, api: denied }), /Forbidden/);
 });
+
+test("protectionOf: every rule type that stops a fast-forward push, and none that does not", () => {
+  const open = { protected: true, protection: { enabled: false } };
+  const blocking = ["update", "pull_request", "required_status_checks", "required_linear_history", "required_signatures", "required_deployments", "merge_queue"];
+  for (const type of blocking) assert.equal(protectionOf(open, [{ type }]), `a protected head (ruleset: ${type})`, type);
+  const passing = ["branch_name_pattern", "non_fast_forward", "deletion", "creation", "commit_message_pattern", "commit_author_email_pattern", "committer_email_pattern"];
+  for (const type of passing) assert.equal(protectionOf(open, [{ type }]), null, type);
+  assert.equal(protectionOf({ protected: false, protection: { enabled: false } }, []), null);
+  assert.equal(protectionOf({ protected: true, protection: { enabled: true } }, []), "a protected head (classic branch protection)");
+});
+
