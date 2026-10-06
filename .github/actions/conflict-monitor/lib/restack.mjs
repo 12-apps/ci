@@ -275,48 +275,55 @@ export function blobId(tree, path, cwd) {
 }
 
 /**
- * The commands a developer runs by hand to do what the bot does, run in the
- * branch's checkout: fetch the base and each parent's head, find each held
- * head (the first commit of the parent's first-parent chain this branch
- * holds), build Z, merge it without committing, point MERGE_HEAD back at the
- * base so the commit's parents are (branch, base), and commit with the bot's
- * header and trailers so the report tells the merge from a hand resolution.
+ * The commands a developer runs by hand to do what the bot does, in the
+ * branch's checkout. Two steps, and the first is fail-fast:
  *
- * The held heads are COMPUTED by the recipe, never printed: the comment that
- * shows it carries no trailer value a hand merge could paste.
+ *   1. ONE `( set -eu … )` subshell: fetch the base and each parent's head,
+ *      compute each held head (the first commit of the parent's first-parent
+ *      chain this branch holds) and refuse an empty one, build Z and refuse
+ *      an empty one, merge Z without committing, and go on only when the
+ *      merge in progress IS Z's (a refused merge, a dirty worktree or another
+ *      merge already in progress stops here). Only then point MERGE_HEAD at
+ *      the base, so the commit's parents are (branch, base), and write the
+ *      bot's header and trailers into MERGE_MSG.
+ *   2. After resolving: commit only while that merge is in progress — the
+ *      base as MERGE_HEAD and this recipe's trailer in MERGE_MSG — so a
+ *      failed step 1 never leaves the branch's own tree committed under the
+ *      tool's header.
+ *
+ * The held heads are COMPUTED, never printed: the comment that shows the
+ * recipe carries no trailer value a hand merge could paste.
  */
 export function recipeOf({ base, parents, child }) {
   const prs = [...new Set(parents.map((p) => p.pr))];
   const v = (pr) => `pold_${pr}`;
+  const gitPath = (name) => `"$(git rev-parse --git-path ${name})"`;
+  const message = [
+    `"${restackHeader({ base, child, parents })}"`,
+    '""',
+    ...prs.flatMap((pr) => [`"${TRAILER.base}: $${v(pr)}"`, `"${TRAILER.parent}: #${pr}"`]),
+  ];
+  const marker = `${TRAILER.parent}: #${prs[0]}`;
   return [
-    `git fetch origin ${base} ${prs.map((pr) => `+refs/pull/${pr}/head:refs/restack/${pr}`).join(" ")}`,
-    ...prs.map(
-      (pr) =>
-        `${v(pr)}=$(for c in $(git rev-list --first-parent refs/restack/${pr} ^origin/${base}); do git merge-base --is-ancestor "$c" HEAD && { echo "$c"; break; }; done)`,
-    ),
-    `z=$(git commit-tree "origin/${base}^{tree}" -p origin/${base} ${prs.map((pr) => `-p "$${v(pr)}"`).join(" ")} -m restack)`,
-    `git merge --no-ff --no-commit "$z"`,
-    `git rev-parse origin/${base} > "$(git rev-parse --git-path MERGE_HEAD)"`,
+    "(",
+    "  set -eu",
+    `  git fetch origin ${base} ${prs.map((pr) => `+refs/pull/${pr}/head:refs/restack/${pr}`).join(" ")}`,
+    ...prs.flatMap((pr) => [
+      `  ${v(pr)}=$(for c in $(git rev-list --first-parent refs/restack/${pr} ^origin/${base}); do if git merge-base --is-ancestor "$c" HEAD; then echo "$c"; break; fi; done)`,
+      `  [ -n "$${v(pr)}" ] || { echo "restack: this branch holds no commit of #${pr}" >&2; exit 1; }`,
+    ]),
+    `  z=$(git commit-tree "origin/${base}^{tree}" -p origin/${base} ${prs.map((pr) => `-p "$${v(pr)}"`).join(" ")} -m restack)`,
+    `  [ -n "$z" ] || { echo "restack: could not build the merge base" >&2; exit 1; }`,
+    `  git merge --no-ff --no-commit "$z" || true`,
+    `  [ "$(git rev-parse -q --verify MERGE_HEAD || true)" = "$z" ] || { echo "restack: the merge did not start" >&2; exit 1; }`,
+    `  git rev-parse origin/${base} > ${gitPath("MERGE_HEAD")}`,
+    `  printf '%s\\n' ${message.join(" ")} > ${gitPath("MERGE_MSG")}`,
+    ")",
     "# resolve any file still conflicted and `git add` it, then:",
     [
-      "git",
-      "commit",
-      "-m",
-      `"${restackHeader({ base, child, parents })}"`,
-      ...prs.flatMap((pr) => [`--trailer "${TRAILER.base}: $${v(pr)}"`, `--trailer "${TRAILER.parent}: #${pr}"`]),
-    ].join(" "),
+      `[ "$(git rev-parse -q --verify MERGE_HEAD)" = "$(git rev-parse origin/${base})" ]`,
+      `grep -qx '${marker}' ${gitPath("MERGE_MSG")}`,
+      ["git", "commit", "--no-edit"].join(" "),
+    ].join(" && "),
   ];
-}
-
-/**
- * The custom merge driver `path` names in the `.gitattributes` of `commit`,
- * or null. A real `git merge` (a consumer's local command) runs it; the
- * report's `merge-tree` does not, so a driver may legitimately write another
- * blob than Z's for a file both sides changed.
- */
-export function mergeDriverOf(commit, path, cwd) {
-  const { out, status } = git(["check-attr", `--source=${commit}`, "merge", "--", path], { cwd, ok: [0, 1, 128] });
-  if (status !== 0) return null;
-  const value = /: merge: (.*)$/.exec(out.trim())?.[1] ?? "unspecified";
-  return ["unspecified", "unset", "set", "text", "binary"].includes(value) ? null : value;
 }

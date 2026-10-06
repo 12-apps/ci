@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -170,6 +170,17 @@ test("toolMade: the trailers must name exactly this sync's parents and held head
   assert.ok(!toolMade({ bases: ["a".repeat(40)], parents: [1], redo: false }, []), "not a stacked sync");
 });
 
+/** A developer's clone of the case with the child checked out, and the recipe pasted into bash. */
+function devClone(world, child) {
+  const dev = mkdtempSync(join(tmpdir(), "restack-dev-"));
+  worlds.push({ cleanup: () => rmSync(dev, { recursive: true, force: true }) });
+  git(["clone", "-q", "--no-checkout", world.dir, dev], { env: DEV });
+  git(["checkout", "-q", "-b", "c", child], { cwd: dev });
+  return dev;
+}
+const DEV = { GIT_AUTHOR_NAME: "Dev", GIT_AUTHOR_EMAIL: "dev@example.invalid", GIT_COMMITTER_NAME: "Dev", GIT_COMMITTER_EMAIL: "dev@example.invalid" };
+const paste = (dev, lines) => spawnSync("bash", ["-c", lines.join("\n")], { cwd: dev, env: { ...process.env, ...DEV }, encoding: "utf8" });
+
 test("the recipe a developer runs, run for real, makes the tool's merge: same tree, parents, trailers", async () => {
   const world = buildCase(CASES.find((c) => c.name === "clean re-stack"));
   worlds.push(world);
@@ -177,23 +188,54 @@ test("the recipe a developer runs, run for real, makes the tool's merge: same tr
   const lines = recipeOf({ base: "main", parents: plan.parents, child: 2 });
   assert.ok(!lines.join("\n").includes(plan.parents[0].pOld), "the held head is computed, never printed");
   world.git("update-ref", "refs/pull/1/head", world.tipOf("p"));
-  // A developer's clone with the child checked out; the recipe fetches main.
-  const dev = mkdtempSync(join(tmpdir(), "restack-dev-"));
-  worlds.push({ cleanup: () => rmSync(dev, { recursive: true, force: true }) });
-  const env = { GIT_AUTHOR_NAME: "Dev", GIT_AUTHOR_EMAIL: "dev@example.invalid", GIT_COMMITTER_NAME: "Dev", GIT_COMMITTER_EMAIL: "dev@example.invalid" };
-  git(["clone", "-q", "--no-checkout", world.dir, dev], { env });
-  git(["checkout", "-q", "-b", "c", child], { cwd: dev });
-  const res = spawnSync("bash", ["-euo", "pipefail", "-c", lines.filter((l) => !l.startsWith("#")).join("\n")], {
-    cwd: dev,
-    env: { ...process.env, ...env },
-    encoding: "utf8",
-  });
+  const dev = devClone(world, child);
+  const res = paste(dev, lines);
   assert.equal(res.status, 0, res.stderr);
   const head = git(["rev-parse", "HEAD"], { cwd: dev }).out.trim();
   assert.deepEqual(git(["rev-list", "--parents", "-n1", head], { cwd: dev }).out.trim().split(" ").slice(1), [child, base]);
   assert.equal(git(["rev-parse", "HEAD^{tree}"], { cwd: dev }).out.trim(), plan.tree);
   assert.ok(toolMade(trailersOf(head, dev), plan.parents), "the report accepts it as the tool's merge");
   assert.equal(git(["log", "-1", "--format=%s", head], { cwd: dev }).out.trim(), "chore(stack): merge main after the squash of #1 (#2)");
+});
+
+test("the recipe is fail-fast: a failing step exits non-zero and commits nothing", async () => {
+  const world = buildCase(CASES.find((c) => c.name === "clean re-stack"));
+  worlds.push(world);
+  const { plan, child } = await planFor(world, 2);
+  const lines = recipeOf({ base: "main", parents: plan.parents, child: 2 });
+  const untouched = (dev, why) => {
+    assert.equal(git(["rev-parse", "HEAD"], { cwd: dev }).out.trim(), child, `${why}: no commit`);
+    assert.equal(git(["rev-parse", "-q", "--verify", "MERGE_HEAD"], { cwd: dev, ok: [0, 1] }).status, 1, `${why}: no merge left behind`);
+  };
+  // refs/pull/1/head is not published: the fetch fails, nothing after it runs.
+  const noRef = devClone(world, child);
+  const a = paste(noRef, lines);
+  assert.notEqual(a.status, 0, "exits non-zero");
+  assert.doesNotMatch(a.stderr, /restack: /, "it stops at the failed fetch, before any later step runs");
+  untouched(noRef, "no refs/pull");
+  // The fetch works, but the branch holds no commit of the parent's head.
+  world.git("update-ref", "refs/pull/1/head", world.tipOf("main"));
+  const noHeld = devClone(world, child);
+  const b = paste(noHeld, lines);
+  assert.notEqual(b.status, 0);
+  assert.match(b.stderr, /restack: this branch holds no commit of #1/);
+  untouched(noHeld, "empty held head");
+  // A dirty worktree: git refuses the merge, and MERGE_HEAD is never written.
+  world.git("update-ref", "refs/pull/1/head", world.tipOf("p"));
+  const dirty = devClone(world, child);
+  writeFileSync(join(dirty, "README.md"), "uncommitted\n");
+  const c = paste(dirty, lines);
+  assert.notEqual(c.status, 0);
+  assert.match(c.stderr, /restack: the merge did not start/);
+  untouched(dirty, "dirty worktree");
+  // The developer's own merge of main is already in progress: the recipe
+  // refuses to start, and its commit line never commits that merge.
+  const pending = devClone(world, child);
+  git(["merge", "-q", "--no-ff", "--no-commit", "-s", "ours", "origin/main"], { cwd: pending, env: DEV });
+  const d = paste(pending, lines);
+  assert.notEqual(d.status, 0);
+  assert.equal(git(["rev-parse", "HEAD"], { cwd: pending }).out.trim(), child, "the pending merge is not committed");
+  assert.equal(git(["rev-parse", "MERGE_HEAD"], { cwd: pending }).out.trim(), git(["rev-parse", "origin/main"], { cwd: pending }).out.trim());
 });
 
 test("two parents: with only one held head in Z, the other parent's code still conflicts", async () => {

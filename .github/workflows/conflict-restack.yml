@@ -10,7 +10,9 @@ name: Conflict restack (reusable)
 # WHY A FOURTH FILE: GitHub checks every job a called workflow DECLARES
 # against the caller's grant (see conflict-probe.yml), and this is the only
 # job that holds a secret able to push. It asks for read scopes only; the
-# push is the PAT's, not the workflow token's.
+# push is the PAT's, not the workflow token's. `contents: read` also covers
+# the force-push record the ping-pong cap reads (`GET /activity`,
+# `GET /compare`); without it the job skips each candidate with a warning.
 #
 # A consuming repo adds (see CONSUMING.md, "Consuming the Conflict monitor's
 # re-stack"):

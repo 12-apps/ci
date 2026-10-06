@@ -87,13 +87,32 @@ export function isBotRestack(c, parents) {
  * checked for a discarded bot re-stack: `compare/{after}...{before}` lists
  * exactly them. One activity read per candidate PR, one compare per
  * force-push of its branch (compare's first page: 250 commits, newest last).
+ *
+ * Both endpoints need `contents: read`, which the job's GITHUB_TOKEN (an
+ * installation token) has; GitHub's REST docs list `GET /activity` and
+ * `GET /compare` under "Contents" (read) for installation tokens. Only
+ * force-pushes since the PR was opened (`since`) count: an older one belongs
+ * to an earlier PR that used the same branch name. A compare that answers 404
+ * (a discarded commit GitHub no longer keeps) is no bot re-stack; any other
+ * error is thrown, and the caller skips the PR with a warning.
  * Returns the force-push found, or null.
  */
-export async function forcePushOverRestack({ api, repo, ref, parents }) {
+export async function forcePushOverRestack({ api, repo, ref, parents, since = null }) {
   const events = await api.paginate(`/repos/${repo}/activity?ref=${encodeURIComponent(`refs/heads/${ref}`)}&activity_type=force_push`);
+  const from = since ? Date.parse(since) : null;
   for (const e of events) {
     if (e?.activity_type !== "force_push" || !e.before || !e.after) continue;
-    const cmp = await api.request("GET", `/repos/${repo}/compare/${e.after}...${e.before}`);
+    if (from !== null && Date.parse(e.timestamp ?? "") < from) continue;
+    let cmp;
+    try {
+      cmp = await api.request("GET", `/repos/${repo}/compare/${e.after}...${e.before}`);
+    } catch (err) {
+      if (err.status === 404) {
+        log(`${ref}: force-push ${e.before.slice(0, 7)} -> ${e.after.slice(0, 7)} cannot be compared any more (404); not a bot re-stack`);
+        continue;
+      }
+      throw err;
+    }
     if ((cmp?.commits ?? []).some((c) => isBotRestack(c, parents))) return { before: e.before, after: e.after, at: e.timestamp ?? null };
   }
   return null;
@@ -214,7 +233,17 @@ export async function runRestack({
   for (const { pr, head, plan, parents } of ready) {
     const ref = pr.head.ref;
     try {
-      const over = await forcePushOverRestack({ api, repo, ref, parents: plan.parents });
+      let over;
+      try {
+        over = await forcePushOverRestack({ api, repo, ref, parents: plan.parents, since: pr.created_at ?? null });
+      } catch (err) {
+        // Fail closed, and say so: without the record the bot cannot know
+        // whether it would be fighting a force-push.
+        const why = `could not read the force-push record of ${ref} (GET /activity and /compare need contents: read): ${err.message}`;
+        console.log(redact(`::warning title=conflict-restack::#${pr.number}: ${why}; not re-stacked`, masked));
+        skip(pr, why);
+        continue;
+      }
       if (over) {
         skip(pr, `force-pushed over the bot's re-stack for this parent (${over.before.slice(0, 7)} -> ${over.after.slice(0, 7)}); the probe's comment carries the command`);
         continue;

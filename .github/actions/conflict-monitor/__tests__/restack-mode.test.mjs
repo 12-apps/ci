@@ -484,3 +484,46 @@ test("the commit is dated by its parents: two runs planning the same head write 
   const latest = Math.max(...dates("%ct", `${head}^1`, `${head}^2`));
   assert.equal(git(["show", "-s", "--format=%at %ct", head], { cwd: local }).out.trim(), `${latest} ${latest}`);
 });
+
+test("an unreadable force-push record fails closed with a warning that names the cause", async () => {
+  const { api, run, remoteHead } = setup("clean re-stack");
+  const paginate = api.paginate.bind(api);
+  api.paginate = async (path) => {
+    if (/\/activity\?/.test(path)) throw Object.assign(new Error("GET /activity -> 403: Resource not accessible by integration"), { status: 403 });
+    return paginate(path);
+  };
+  const before = remoteHead("c");
+  const printed = [];
+  const log = console.log;
+  console.log = (line) => printed.push(String(line));
+  let result;
+  try {
+    result = await run();
+  } finally {
+    console.log = log;
+  }
+  assert.deepEqual(result.pushed, []);
+  assert.equal(remoteHead("c"), before);
+  assert.ok(
+    printed.some((l) => /^::warning title=conflict-restack::#2: could not read the force-push record of c \(GET \/activity and \/compare need contents: read\): GET \/activity -> 403/.test(l)),
+    printed.join("\n"),
+  );
+});
+
+test("the force-push scan: an old force-push of an earlier PR is ignored, and a compare 404 is no bot re-stack", async () => {
+  const bot = structuredClone(ACTIVITY.compare);
+  bot.commits[1].commit.author.email = bot.commits[1].commit.committer.email = BOT.email;
+  bot.commits[1].commit.message = "x\n\nRestack-Parent: #1";
+  const api = (request) => ({ paginate: async () => ACTIVITY.activity, request });
+  const args = { repo: "o/r", ref: "feat/child", parents: [{ pr: 1 }] };
+  assert.equal(await forcePushOverRestack({ ...args, api: api(async () => bot), since: "2026-09-20T00:00:00Z" }), null, "before the PR was opened");
+  assert.notEqual(await forcePushOverRestack({ ...args, api: api(async () => bot), since: "2026-09-19T00:00:00Z" }), null);
+  const gone = api(async () => {
+    throw Object.assign(new Error("Not Found"), { status: 404 });
+  });
+  assert.equal(await forcePushOverRestack({ ...args, api: gone }), null);
+  const denied = api(async () => {
+    throw Object.assign(new Error("Forbidden"), { status: 403 });
+  });
+  await assert.rejects(forcePushOverRestack({ ...args, api: denied }), /Forbidden/);
+});
