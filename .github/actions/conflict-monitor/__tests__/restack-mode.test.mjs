@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,8 +9,8 @@ import { after, test } from "node:test";
 import { authEnv, redact } from "../lib/auth.mjs";
 import { git, isAncestor } from "../lib/git.mjs";
 import { BOT, trailersOf } from "../lib/restack.mjs";
-import { forcePushedAfterRestack, pushRestack, pushedOutput, restackLogLine, restackSummary, runRestack } from "../restack.mjs";
-import { buildCase, caseApi, caseNamed } from "./restack-world.mjs";
+import { forcePushOverRestack, isBotRestack, pushRestack, pushedOutput, restackLogLine, restackSummary, runRestack } from "../restack.mjs";
+import { ACTIVITY, buildCase, caseApi, caseNamed, compareShape, forcePushEvent } from "./restack-world.mjs";
 
 // The `restack` mode end to end: the case's repository plays GitHub's git
 // side (head branches, `refs/pull/N/head`, the parent's branch deleted at
@@ -52,7 +52,7 @@ function setup(name, { prs = {} } = {}) {
   const baseSha = git(["rev-parse", "origin/main"], { cwd: local }).out.trim();
 
   const base = caseApi(world);
-  const timelines = new Map();
+  const activity = new Map();
   const branchInfo = new Map();
   const pulls = () =>
     open.map((n) => {
@@ -70,13 +70,13 @@ function setup(name, { prs = {} } = {}) {
     });
   const api = {
     calls: base.calls,
-    timelines,
+    activity,
     branchInfo,
     async paginate(path) {
       base.calls.push(`PAGINATE ${path}`);
       if (/\/pulls\?state=open$/.test(path)) return pulls();
-      const m = /\/issues\/(\d+)\/timeline$/.exec(path);
-      if (m) return timelines.get(Number(m[1])) ?? [];
+      const m = /\/activity\?ref=([^&]+)&activity_type=force_push$/.exec(path);
+      if (m) return activity.get(decodeURIComponent(m[1])) ?? [];
       throw new Error(`unexpected paginate ${path}`);
     },
     async request(method, path, body) {
@@ -87,6 +87,11 @@ function setup(name, { prs = {} } = {}) {
         const exists = git(["rev-parse", "-q", "--verify", `refs/heads/${ref}`], { cwd: world.dir, ok: [0, 1] }).status === 0;
         if (!exists) throw Object.assign(new Error("Branch not found"), { status: 404 });
         return { name: ref, protected: false, ...(branchInfo.get(ref) ?? {}) };
+      }
+      const cmp = /\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/.exec(path);
+      if (method === "GET" && cmp) {
+        base.calls.push(`${method} ${path}`);
+        return compareShape(world.dir, cmp[1], cmp[2]);
       }
       const one = /\/pulls\/(\d+)$/.exec(path);
       if (method === "GET" && one) {
@@ -218,28 +223,71 @@ test("a commit that does not descend from the planned head is never pushed", () 
   assert.equal(world.tipOf("c"), head);
 });
 
-test("a force-push after the bot's re-stack for the same parent stops further re-stacks", async () => {
-  const { api, run, remoteHead } = setup("clean re-stack");
-  const restacked = { event: "committed", sha: "f".repeat(40), message: "chore(stack): merge main after the squash of #1 (#2)\n\nRestack-Base: x\nRestack-Parent: #1\n", author: { email: BOT.email, date: "2026-01-02T00:00:00Z" }, committer: { email: BOT.email, date: "2026-01-02T00:00:00Z" } };
-  api.timelines.set(2, [restacked, { event: "head_ref_force_pushed", created_at: "2026-01-02T00:05:00Z" }]);
-  const before = remoteHead("c");
-  const result = await run();
-  assert.deepEqual(result.pushed, []);
-  assert.match(result.skipped[0].reason, /^force-pushed after the bot's last re-stack/);
-  assert.equal(remoteHead("c"), before);
-  // A force-push BEFORE the re-stack, or a re-stack for another parent, does not stop it.
-  api.timelines.set(2, [{ event: "head_ref_force_pushed", created_at: "2026-01-01T00:00:00Z" }, restacked]);
-  assert.deepEqual((await run()).pushed.map((p) => p.pr), [2]);
+test("a force-push over the bot's re-stack stops further re-stacks; one over the author's own commits does not", async () => {
+  const { world, api, run, remoteHead } = setup("clean re-stack");
+  const original = remoteHead("c");
+  const first = await run();
+  const restack = first.pushed[0].head;
+  // The author force-pushes the branch back over the re-stack, with one more
+  // commit of their own: the PR no longer lists the bot's commit anywhere.
+  const tree = world.git("rev-parse", `${original}^{tree}`);
+  const rewritten = git(["commit-tree", tree, "-p", original, "-m", "author: rework"], {
+    cwd: world.dir,
+    env: { GIT_AUTHOR_NAME: "A", GIT_AUTHOR_EMAIL: "a@example.invalid", GIT_COMMITTER_NAME: "A", GIT_COMMITTER_EMAIL: "a@example.invalid" },
+  }).out.trim();
+  world.git("update-ref", "refs/heads/c", rewritten);
+  api.activity.set("refs/heads/c", [forcePushEvent({ before: restack, after: rewritten, ref: "c" })]);
+  const second = await run();
+  assert.deepEqual(second.pushed, []);
+  assert.match(second.skipped[0].reason, /^force-pushed over the bot's re-stack for this parent \([0-9a-f]{7} -> [0-9a-f]{7}\)/);
+  assert.equal(remoteHead("c"), rewritten);
+  assert.ok(api.calls.includes(`GET /repos/o/r/compare/${rewritten}...${restack}`));
+
+  // A force-push that discarded only the author's own commits does not stop it.
+  const control = setup("clean re-stack");
+  const before = control.remoteHead("c");
+  const redo = git(["commit-tree", control.world.git("rev-parse", `${before}^{tree}`), "-p", before, "-m", "author: amend"], {
+    cwd: control.world.dir,
+    env: { GIT_AUTHOR_NAME: "A", GIT_AUTHOR_EMAIL: "a@example.invalid", GIT_COMMITTER_NAME: "A", GIT_COMMITTER_EMAIL: "a@example.invalid" },
+  }).out.trim();
+  const amended = git(["commit-tree", control.world.git("rev-parse", `${before}^{tree}`), "-p", `${before}^`, "-m", "author: amended"], {
+    cwd: control.world.dir,
+    env: { GIT_AUTHOR_NAME: "A", GIT_AUTHOR_EMAIL: "a@example.invalid", GIT_COMMITTER_NAME: "A", GIT_COMMITTER_EMAIL: "a@example.invalid" },
+  }).out.trim();
+  control.world.git("update-ref", "refs/heads/c", amended);
+  control.api.activity.set("refs/heads/c", [forcePushEvent({ before: redo, after: amended, ref: "c" })]);
+  assert.deepEqual((await control.run()).pushed.map((p) => p.pr), [2]);
 });
 
-test("forcePushedAfterRestack reads only the bot's own re-stack commits", () => {
-  const at = (d) => ({ date: d });
-  const human = { event: "committed", message: "x\n\nRestack-Parent: #1\n", author: { email: "dev@example.invalid", ...at("2026-01-02T00:00:00Z") }, committer: { email: "dev@example.invalid", ...at("2026-01-02T00:00:00Z") } };
-  const push = { event: "head_ref_force_pushed", created_at: "2026-01-03T00:00:00Z" };
-  assert.equal(forcePushedAfterRestack([human, push], [{ pr: 1 }]), false);
-  const bot = { ...human, author: { email: BOT.email, ...at("2026-01-02T00:00:00Z") }, committer: { email: BOT.email, ...at("2026-01-02T00:00:00Z") } };
-  assert.equal(forcePushedAfterRestack([bot, push], [{ pr: 1 }]), true);
-  assert.equal(forcePushedAfterRestack([bot, push], [{ pr: 9 }]), false, "another parent");
+test("the recorded shape of a real force-push: a discarded hand merge is not the bot's; a discarded bot re-stack is", async () => {
+  const api = (compare) => ({
+    calls: [],
+    async paginate(path) {
+      this.calls.push(path);
+      return ACTIVITY.activity;
+    },
+    async request(method, path) {
+      this.calls.push(path);
+      return compare;
+    },
+  });
+  const real = api(ACTIVITY.compare);
+  assert.equal(await forcePushOverRestack({ api: real, repo: "o/r", ref: "feat/child", parents: [{ pr: 1 }] }), null);
+  assert.deepEqual(real.calls, [
+    "/repos/o/r/activity?ref=refs%2Fheads%2Ffeat%2Fchild&activity_type=force_push",
+    `/repos/o/r/compare/${ACTIVITY.activity[0].after}...${ACTIVITY.activity[0].before}`,
+  ]);
+  // The same force-push, had the discarded merge been the bot's re-stack for #1.
+  const commits = structuredClone(ACTIVITY.compare.commits);
+  commits[1].commit.author.email = BOT.email;
+  commits[1].commit.committer.email = BOT.email;
+  commits[1].commit.message = "chore(stack): merge main after the squash of #1 (#2)\n\nRestack-Base: x\nRestack-Parent: #1";
+  const found = await forcePushOverRestack({ api: api({ ...ACTIVITY.compare, commits }), repo: "o/r", ref: "feat/child", parents: [{ pr: 1 }] });
+  assert.deepEqual(found, { before: ACTIVITY.activity[0].before, after: ACTIVITY.activity[0].after, at: ACTIVITY.activity[0].timestamp });
+  assert.equal(isBotRestack(commits[1], [{ pr: 9 }]), false, "another parent");
+  const byHuman = structuredClone(commits[1]);
+  byHuman.commit.author.email = byHuman.commit.committer.email = "dev@example.invalid";
+  assert.equal(isBotRestack(byHuman, [{ pr: 1 }]), false, "a person's trailer is not the bot's push");
 });
 
 test("exclusions: a fork, a protected head, an ignored head, a non-default base, a protected branch", async () => {
@@ -293,15 +341,16 @@ test("the token reaches git as an extraheader only, and is redacted from message
 
 // The process, as the composite action runs it, against a local HTTP stub of
 // the REST API: the two behaviours that live in main().
-async function runMain({ config, env = {} }) {
+async function runMain({ config, env = {}, prepare = () => {} }) {
   const { world, local } = setup("clean re-stack");
+  prepare({ world, local });
   const api = caseApi(world);
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, "http://x");
     let body;
     try {
       if (url.pathname === "/repos/o/r/pulls") body = [{ number: 2, state: "open", head: { ref: "c", sha: world.tipOf("c"), repo: { full_name: REPO } }, base: { ref: "main" } }];
-      else if (/\/issues\/\d+\/timeline$/.test(url.pathname)) body = [];
+      else if (/\/activity$/.test(url.pathname)) body = [];
       else if (/\/branches\//.test(url.pathname)) body = { protected: false };
       else body = await api.request("GET", url.pathname);
       res.writeHead(200, { "content-type": "application/json" });
@@ -341,7 +390,7 @@ async function runMain({ config, env = {} }) {
   } catch {
     output = "";
   }
-  return { code, stdout, output, moved: world.tipOf("c") !== before };
+  return { code, stdout, output, moved: world.tipOf("c") !== before, world };
 }
 
 test("main: no `restack` key exits 0 having read and written nothing", async () => {
@@ -375,4 +424,63 @@ test("main: with a token, the re-stack is pushed and handed to the probe", async
   assert.equal(r.moved, true);
   assert.match(r.output, /^pushed=\{"2":\{"head":"[0-9a-f]{40}","baseSha":"[0-9a-f]{40}"\}\}\n$/);
   assert.ok(!r.stdout.includes("a-token"));
+});
+
+test("main: no git call inherits a token, only the push carries the PAT, and every call runs hardened", async () => {
+  // A `git` that logs what each call was given, then runs the real one.
+  const bin = mkdtempSync(join(tmpdir(), "restack-gitwrap-"));
+  dirs.push(bin);
+  const log = join(bin, "calls.tsv");
+  const real = spawnSync("bash", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+  writeFileSync(
+    join(bin, "git"),
+    `#!/bin/bash\nprintf '%s\\t%s\\t%s\\t%s\\n' "\${PUSH_TOKEN:+P}" "\${GITHUB_TOKEN:+G}" "\${GIT_CONFIG_VALUE_0:-}" "$*" >> "${log}"\nexec "${real}" "$@"\n`,
+    { mode: 0o755 },
+  );
+  const r = await runMain({
+    config: { restack: {} },
+    env: { PUSH_TOKEN: "push-secret", GITHUB_TOKEN: "read-secret", PATH: `${bin}:${process.env.PATH}` },
+  });
+  assert.equal(r.code, 0, r.stdout);
+  assert.equal(r.moved, true);
+  const calls = readFileSync(log, "utf8").trimEnd().split("\n").map((l) => l.split("\t"));
+  const header = (t) => `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${t}`).toString("base64")}`;
+  assert.ok(calls.length > 5, `saw ${calls.length} git calls`);
+  for (const [push, read, value, args] of calls) {
+    assert.equal(push + read, "", `no token in the environment of: git ${args}`);
+    assert.match(args, /^-c core\.hooksPath=\/dev\/null -c core\.fsmonitor=false /, `hardened: git ${args}`);
+    if (/ push /.test(` ${args} `)) assert.equal(value, header("push-secret"), "the push carries the PAT");
+    else assert.notEqual(value, header("push-secret"), `the PAT reaches only the push, not: git ${args}`);
+  }
+  assert.equal(calls.filter(([, , , a]) => / push /.test(` ${a} `)).length, 1);
+  assert.ok(calls.some(([, , v, a]) => /fetch/.test(a) && v === header("read-secret")), "fetches use the read token");
+  assert.ok(!r.stdout.includes("push-secret") && !r.stdout.includes("read-secret"));
+  assert.ok(r.stdout.includes(`::add-mask::${Buffer.from("x-access-token:push-secret").toString("base64")}`));
+});
+
+test("main: a push the remote refuses (a ruleset, a hook) fails that PR's entry with a warning, not the run", async () => {
+  const r = await runMain({
+    config: { restack: {} },
+    env: { PUSH_TOKEN: "a-token" },
+    prepare: ({ world }) => {
+      const hook = join(world.dir, "hooks", "pre-receive");
+      writeFileSync(hook, "#!/bin/sh\necho 'refs/heads/c is protected by a ruleset' >&2\nexit 1\n", { mode: 0o755 });
+    },
+  });
+  assert.equal(r.code, 0, r.stdout);
+  assert.equal(r.moved, false);
+  assert.match(r.stdout, /^::warning title=conflict-restack::#2: the push to c was refused by the remote/m);
+  assert.match(r.stdout, /^restack \{.*"rejected":\[2\],"failed":\[\]/m);
+  assert.equal(r.output, "pushed={}\n");
+});
+
+test("the commit is dated by its parents: two runs planning the same head write the same commit", async () => {
+  const { run, local } = setup("clean re-stack");
+  const a = await run({ canPush: false, date: null });
+  const b = await run({ canPush: false, date: null });
+  assert.equal(a.planned[0].head, b.planned[0].head);
+  const dates = (fmt, ...revs) => git(["show", "-s", `--format=${fmt}`, ...revs], { cwd: local }).out.split("\n").filter(Boolean).map(Number);
+  const head = a.planned[0].head;
+  const latest = Math.max(...dates("%ct", `${head}^1`, `${head}^2`));
+  assert.equal(git(["show", "-s", "--format=%at %ct", head], { cwd: local }).out.trim(), `${latest} ${latest}`);
 });

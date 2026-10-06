@@ -39,7 +39,7 @@ name: Conflict restack (reusable)
 #         PUSH_TOKEN: ${{ secrets.SOME_PAT }}
 #     probe:
 #       needs: restack
-#       if: always() && (<the probe's existing condition>)
+#       if: "!cancelled() && (<the probe's existing condition>)"
 #       uses: 12-apps/ci/.github/workflows/conflict-probe.yml@v2
 #       with:
 #         pr: ${{ github.event.pull_request.number || '' }}

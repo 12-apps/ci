@@ -36,7 +36,7 @@ name: Conflict probe (reusable)
 #         pr: ${{ github.event.pull_request.number || '' }}
 #
 # With conflict-restack.yml, the probe job `needs: restack`, keeps its own
-# condition under `always()`, and passes `restacked:
+# condition under `!cancelled()`, and passes `restacked:
 # ${{ needs.restack.outputs.pushed }}` (CONSUMING.md, "Consuming the Conflict
 # monitor's re-stack"). A stacked PR's comment then lists only the conflicts
 # no merge base removes, with the command that takes the base in.

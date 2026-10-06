@@ -175,7 +175,8 @@ test("the recipe a developer runs, run for real, makes the tool's merge: same tr
   worlds.push(world);
   const { plan, child, base } = await planFor(world, 2);
   const lines = recipeOf({ base: "main", parents: plan.parents, child: 2 });
-  assert.equal(lines.filter((l) => l.includes(`-p ${plan.parents[0].pOld}`)).length, 1);
+  assert.ok(!lines.join("\n").includes(plan.parents[0].pOld), "the held head is computed, never printed");
+  world.git("update-ref", "refs/pull/1/head", world.tipOf("p"));
   // A developer's clone with the child checked out; the recipe fetches main.
   const dev = mkdtempSync(join(tmpdir(), "restack-dev-"));
   worlds.push({ cleanup: () => rmSync(dev, { recursive: true, force: true }) });

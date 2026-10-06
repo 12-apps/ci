@@ -84,7 +84,9 @@ test("the #1849 shape: the comment lists only the residual file, the parent, the
   assert.doesNotMatch(body, /p\.txt/, "the parent's own file is the re-stack's, not a conflict");
   assert.match(body, /Stacked on #1 \(squash-merged\): these files conflict even with #1's pre-squash head as the merge base\./);
   assert.match(body, /Take `main` in with `pnpm restack`, or by hand:/);
-  assert.ok(body.includes(`-p ${world.labels.get("p1")} -m restack`), "the recipe names the held head");
+  assert.ok(!body.includes(world.labels.get("p1")), "no held head is printed: the recipe computes it");
+  assert.doesNotMatch(body, /Restack-Base: [0-9a-f]{7,}/, "no trailer value to paste");
+  assert.match(body, /git fetch origin main \+refs\/pull\/1\/head:refs\/restack\/1/);
   assert.match(body, /MERGE_HEAD/);
   // Re-run: same state, no write.
   api.writes.length = 0;

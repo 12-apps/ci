@@ -258,8 +258,10 @@ const sameSet = (a, b) => {
 
 /**
  * The trailers name exactly the parents and pOlds this sync's own replay
- * computes. A trailer copied from another sync names another pOld or a PR
- * outside this sync's stacked parents, and is refused.
+ * computes. A trailer copied from another sync is refused when it names
+ * another pOld or a PR outside this sync's stacked parents; two siblings cut
+ * from one parent commit share a pOld, and there the report's blob check is
+ * what holds.
  */
 export function toolMade(trailers, parents) {
   if (!parents.length || !trailers.bases.length || !trailers.parents.length) return false;
@@ -273,20 +275,48 @@ export function blobId(tree, path, cwd) {
 }
 
 /**
- * The commands a developer runs by hand to do what the bot does: fetch the
- * base, build Z, merge it without committing, point MERGE_HEAD back at the
+ * The commands a developer runs by hand to do what the bot does, run in the
+ * branch's checkout: fetch the base and each parent's head, find each held
+ * head (the first commit of the parent's first-parent chain this branch
+ * holds), build Z, merge it without committing, point MERGE_HEAD back at the
  * base so the commit's parents are (branch, base), and commit with the bot's
- * header and trailers, so the report tells the merge from a hand resolution.
+ * header and trailers so the report tells the merge from a hand resolution.
+ *
+ * The held heads are COMPUTED by the recipe, never printed: the comment that
+ * shows it carries no trailer value a hand merge could paste.
  */
 export function recipeOf({ base, parents, child }) {
-  const pOlds = [...new Set(parents.map((p) => p.pOld))];
-  const trailers = parents.flatMap((p) => [`--trailer "${TRAILER.base}: ${p.pOld}"`, `--trailer "${TRAILER.parent}: #${p.pr}"`]);
+  const prs = [...new Set(parents.map((p) => p.pr))];
+  const v = (pr) => `pold_${pr}`;
   return [
-    `git fetch origin ${base}`,
-    `z=$(git commit-tree "origin/${base}^{tree}" -p origin/${base} ${pOlds.map((p) => `-p ${p}`).join(" ")} -m restack)`,
+    `git fetch origin ${base} ${prs.map((pr) => `+refs/pull/${pr}/head:refs/restack/${pr}`).join(" ")}`,
+    ...prs.map(
+      (pr) =>
+        `${v(pr)}=$(for c in $(git rev-list --first-parent refs/restack/${pr} ^origin/${base}); do git merge-base --is-ancestor "$c" HEAD && { echo "$c"; break; }; done)`,
+    ),
+    `z=$(git commit-tree "origin/${base}^{tree}" -p origin/${base} ${prs.map((pr) => `-p "$${v(pr)}"`).join(" ")} -m restack)`,
     `git merge --no-ff --no-commit "$z"`,
     `git rev-parse origin/${base} > "$(git rev-parse --git-path MERGE_HEAD)"`,
     "# resolve any file still conflicted and `git add` it, then:",
-    ["git", "commit", "-m", `"${restackHeader({ base, child, parents })}"`, ...trailers].join(" "),
+    [
+      "git",
+      "commit",
+      "-m",
+      `"${restackHeader({ base, child, parents })}"`,
+      ...prs.flatMap((pr) => [`--trailer "${TRAILER.base}: $${v(pr)}"`, `--trailer "${TRAILER.parent}: #${pr}"`]),
+    ].join(" "),
   ];
+}
+
+/**
+ * The custom merge driver `path` names in the `.gitattributes` of `commit`,
+ * or null. A real `git merge` (a consumer's local command) runs it; the
+ * report's `merge-tree` does not, so a driver may legitimately write another
+ * blob than Z's for a file both sides changed.
+ */
+export function mergeDriverOf(commit, path, cwd) {
+  const { out, status } = git(["check-attr", `--source=${commit}`, "merge", "--", path], { cwd, ok: [0, 1, 128] });
+  if (status !== 0) return null;
+  const value = /: merge: (.*)$/.exec(out.trim())?.[1] ?? "unspecified";
+  return ["unspecified", "unset", "set", "text", "binary"].includes(value) ? null : value;
 }

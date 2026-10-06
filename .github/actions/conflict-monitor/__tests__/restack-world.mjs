@@ -191,3 +191,34 @@ export function caseApi(world) {
     },
   };
 }
+
+/**
+ * GitHub's force-push record, in the shapes restack-activity.json recorded
+ * from a real one: an activity event, and the compare listing of what it
+ * discarded, computed from the local repository.
+ */
+export const ACTIVITY = JSON.parse(readFileSync(new URL("./restack-activity.json", import.meta.url), "utf8"));
+export const forcePushEvent = ({ before, after, ref, timestamp = "2026-01-03T00:00:00Z" }) => ({
+  ...ACTIVITY.activity[0],
+  before,
+  after,
+  ref: `refs/heads/${ref}`,
+  timestamp,
+});
+export function compareShape(dir, after, before) {
+  const shas = git(["rev-list", "--reverse", before, `^${after}`], { cwd: dir }).out.split("\n").filter(Boolean);
+  const template = ACTIVITY.compare.commits[0];
+  const commits = shas.map((sha) => {
+    const [an, ae, ad, cn, ce, cd, tree, parents, message] = git(
+      ["show", "-s", "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%T%x00%P%x00%B", sha],
+      { cwd: dir },
+    ).out.split("\0");
+    return {
+      ...template,
+      sha,
+      commit: { ...template.commit, author: { name: an, email: ae, date: ad }, committer: { name: cn, email: ce, date: cd }, message: message.trimEnd(), tree: { sha: tree } },
+      parents: parents.split(" ").filter(Boolean).map((p) => ({ sha: p })),
+    };
+  });
+  return { ...ACTIVITY.compare, ahead_by: commits.length, total_commits: commits.length, commits };
+}

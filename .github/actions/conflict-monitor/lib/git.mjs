@@ -12,8 +12,19 @@ import { spawnSync } from "node:child_process";
 
 const MAX_BUFFER = 512 * 1024 * 1024;
 
+/**
+ * Hardening for a process that holds a write token (the `restack` mode): once
+ * on, every git call runs with hooks and fsmonitor off, as post-merge-regen's
+ * `land` does, so nothing the checkout's config names can run next to it.
+ */
+const HARDENED = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
+let hardened = false;
+export function hardenGit(on = true) {
+  hardened = on;
+}
+
 export function git(args, { cwd = process.cwd(), ok = [0], input, env } = {}) {
-  const res = spawnSync("git", args, {
+  const res = spawnSync("git", hardened ? [...HARDENED, ...args] : args, {
     cwd,
     input,
     encoding: "utf8",

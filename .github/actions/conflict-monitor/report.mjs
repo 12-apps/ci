@@ -42,8 +42,12 @@
  * trailers naming exactly the pOlds and parents this replay computes, and the
  * committed blob equal to Z's. Then the file is not counted at all, and the
  * sync is listed as "re-stacked by the tool" (or "redone at push", with
- * `Restack-Redo`). A copied trailer names another pOld or parent and is
- * refused; a forged one can hide only a blob byte-identical to the tool's.
+ * `Restack-Redo`). A file with a merge driver is accepted with another blob,
+ * since a real `git merge` ran the driver and merge-tree did not. A trailer
+ * copied from another sync is refused when it names another pOld or parent
+ * (two siblings cut from one commit share a pOld: the blob check is what
+ * holds there); a forged one can hide only a blob identical to the tool's or
+ * a driver-managed file.
  *
  * LEGACY. Each file also keeps the group today's rule gives it (the default
  * merge, the held test), and the summary prints those columns next to the
@@ -60,7 +64,7 @@ import { DEFAULT_BUCKET, loadConfig, ticketsIn } from "./lib/config.mjs";
 import { isMain } from "./lib/entry.mjs";
 import { blobAt, git, lines, mergeTree, revParse } from "./lib/git.mjs";
 import { githubClient } from "./lib/github.mjs";
-import { blobId, heldHead, revertOf, toolMade, trailersOf, virtualBase } from "./lib/restack.mjs";
+import { blobId, heldHead, mergeDriverOf, revertOf, toolMade, trailersOf, virtualBase } from "./lib/restack.mjs";
 import { fileShape } from "./lib/shape.mjs";
 import { heldCommitsOf as holdsCommits } from "./lib/stack.mjs";
 
@@ -211,7 +215,11 @@ export function replay({ prs, base, baseTip, config, until = null, cwd = process
         let resolvedBy = null;
         if (rs?.merge) {
           const residual = rs.merge.conflicted && rs.merge.files.includes(r.file);
-          if (!residual && rs.tool && blobId(committed, r.file, cwd) === blobId(rs.merge.tree, r.file, cwd)) {
+          // A tool merge's file counts as the tool's when its blob is Z's, or
+          // when the file has a merge driver: a real `git merge` ran it, and
+          // merge-tree, which wrote Z's blob, runs none.
+          const toolBlob = rs.tool && (blobId(committed, r.file, cwd) === blobId(rs.merge.tree, r.file, cwd) || mergeDriverOf(commit, r.file, cwd));
+          if (!residual && toolBlob) {
             group = null;
             resolvedBy = rs.redo ? "redone" : "tool";
           } else if (r.bucket === DEFAULT_BUCKET && residual) {

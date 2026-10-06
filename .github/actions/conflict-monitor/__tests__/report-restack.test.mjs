@@ -129,3 +129,21 @@ test("a parent main reverted is left out of Z: the file counts by its shape, not
   assert.deepEqual(s.restack.parents, [], "but the revert keeps it out of Z");
   assert.deepEqual(s.files.map((f) => [f.file, f.group, f.legacyGroup]), [["doc.txt", GROUPS.edit, GROUPS.stacked]]);
 });
+
+test("a tool merge whose driver-managed file differs from merge-tree's blob is still the tool's", () => {
+  const { world, prs, main, plan, addSync } = history("clean re-stack");
+  // A consumer's local command runs a real `git merge`, so a merge driver can
+  // write another blob than merge-tree's for the same clean file.
+  const withFile = (tree, path, content) => {
+    const blob = git(["hash-object", "-w", "--stdin"], { cwd: world.dir, input: content }).out.trim();
+    const listing = world.git("ls-tree", tree).split("\n").filter((l) => !l.endsWith(`\t${path}`));
+    return git(["mktree"], { cwd: world.dir, input: [...listing, `100644 blob ${blob}\t${path}`].join("\n") + "\n" }).out.trim();
+  };
+  const edited = treeWith(world, plan.tree, "doc.txt", "what the driver wrote\n");
+  const message = (n) => restackMessage({ base: "main", child: n, parents: plan.parents });
+  addSync(21, { message: message(21), tree: withFile(edited, ".gitattributes", "doc.txt merge=regenerate\n") });
+  addSync(22, { message: message(22), tree: withFile(edited, ".gitattributes", "doc.txt text\n") });
+  const result = replay({ prs, base: "main", baseTip: main, config, cwd: world.dir });
+  assert.deepEqual(syncOf(result, 21).files.map((f) => [f.file, f.group, f.resolvedBy]), [["doc.txt", null, "tool"]], "a driver ran: the tool's");
+  assert.deepEqual(syncOf(result, 22).files.map((f) => [f.file, f.group, f.resolvedBy]), [["doc.txt", GROUPS.stacked, null]], "no driver: a hand edit");
+});
