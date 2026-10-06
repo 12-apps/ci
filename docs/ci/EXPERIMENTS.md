@@ -275,3 +275,29 @@ driver counts as the tool's. Re-run: conflict-monitor **177 / 177**, every
 and the replay unchanged (46 / 14 / 81; 318 / 55 → 249 / 9 and the other
 three rows as above). The duplicated-scope ticket line reads 20 instead of 3
 on the pinned window: it follows the re-stack-aware group.
+
+**Correction (review r2, 2026-10-06):** two changes of the r1 pass were
+wrong and are reverted or hardened.
+- **The merge-driver exemption is withdrawn.** It let a trailered merge's file
+  count as the tool's whenever its path had a custom `merge=` driver,
+  whatever its blob, and read that attribute from the merge being judged.
+  future-pay gives every `*.ts`, `*.tsx`, `*.js` and `*.mjs` file a driver, so
+  trailers alone would have hidden any hand resolution, a wrong one included.
+  The blob check is strict again for every file; a driver that writes another
+  blob than Z's is counted as `code: stacked`, which is conservative and
+  expected to be rare (a driver runs only where both sides changed a file Z
+  already merges cleanly). A regression test pins it.
+- **The raw recipe was not fail-fast.** Pasted with an unpublished
+  `refs/pull/N/head`, its later lines still rewrote MERGE_HEAD and committed
+  the branch's own tree under the tool's header, a merge that silently drops
+  `main`'s changes. It is now one `( set -eu … )` subshell that refuses an
+  empty held head or merge base and proceeds only when the merge in progress
+  is Z's, plus a commit line that runs only while that merge is in progress.
+  A test pastes it with no `refs/pull`, with an empty held head and over a
+  dirty worktree: each exits non-zero and creates no commit.
+- **The activity API's permission is documented, not assumed:** GitHub's REST
+  docs list `GET /repos/{o}/{r}/activity` and `GET /repos/{o}/{r}/compare/…`
+  under "Contents" (read), among the endpoints an installation token
+  (`GITHUB_TOKEN`) may call. The job grants `contents: read`. An unreadable
+  record now skips the PR with a `::warning::` naming the cause; force-pushes
+  before the PR was opened are ignored, and a compare 404 is no bot re-stack.

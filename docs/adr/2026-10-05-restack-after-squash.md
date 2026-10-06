@@ -50,12 +50,20 @@ base's tree, with the base and each parent's held head as parents) is clean on
    ignored heads are never written to. A force-push over the bot's re-stack
    stops it for that parent, read from a record that survives the
    force-push: the repository activity API's `force_push` events and the
-   compare of what each discarded.
+   compare of what each discarded, both readable with the job's
+   `contents: read`. When that record cannot be read the PR is skipped with
+   a warning, never re-stacked blind.
 4. **The report tells a tool merge from a hand merge by contract, not by
    tree.** Most hand resolutions produce the tool's tree, so the tree cannot be
    the tell. A tool merge carries `Restack-Base`/`Restack-Parent` trailers; the
    report accepts them only when they name exactly the held heads and parents
-   it computes itself and the committed blob equals Z's. Re-stack-aware groups
+   it computes itself and the committed blob equals Z's, for every file:
+   a merge driver that wrote another blob (a real `git merge` runs drivers,
+   `merge-tree` does not) is counted as a hand resolution, conservatively,
+   because an exemption by attribute would let trailers alone hide any blob
+   in a repository that gives every code file a driver. It is rare: a driver
+   runs only where both sides changed a file that Z already merges cleanly.
+   Re-stack-aware groups
    are primary, and the legacy columns are printed next to them so a report
    stays comparable with the ones before it.
 

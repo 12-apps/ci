@@ -2373,7 +2373,13 @@ API, `GET /repos/{o}/{r}/activity?ref=refs/heads/<ref>&activity_type=force_push`
 which keeps every force-push with its `before` and `after`, and for each one
 `GET /repos/{o}/{r}/compare/{after}...{before}`, which lists the commits it
 discarded. A discarded commit by `github-actions[bot]` with a matching
-`Restack-Parent` trailer stops the bot. Both need only `contents: read`.
+`Restack-Parent` trailer stops the bot. Only force-pushes since the PR was
+opened count, and a compare that answers 404 (a discarded commit GitHub no
+longer keeps) is no bot re-stack. Both endpoints need `contents: read`, which
+the job's `GITHUB_TOKEN` has: GitHub's REST docs list them under "Contents"
+(read) and among the endpoints an installation token, which `GITHUB_TOKEN`
+is, may call. If the record cannot be read anyway, the PR is skipped (fail
+closed) and the job prints a `::warning::` naming the cause.
 
 **A push the remote refuses** (a ruleset the branch API's `protected` flag
 does not show, a server hook) is a `::warning::` and that PR's entry; the run
@@ -2409,7 +2415,11 @@ restack {"base":"<sha>","open":8,"pushed":[[2519,"<sha>",[2514]]],"planned":[],"
   #P (squash-merged): these files conflict even with #P's pre-squash head as
   the merge base", and adds `command` and the raw git recipe. The recipe
   computes each parent's held head itself, so the comment prints no trailer
-  value a hand merge could paste. A stacked PR
+  value a hand merge could paste. It is fail-fast: one `( set -eu … )`
+  subshell that refuses an empty held head or merge base and goes on only
+  when the merge in progress is Z's, and a commit line that runs only while
+  that merge is in progress — so a failed step (an unpublished
+  `refs/pull/N/head`, a dirty worktree) commits nothing. A stacked PR
   whose Z merge is clean but that was not pushed (no token, the ping-pong
   cap, a lease lost) gets a comment saying so, never "resolved". A PR that is
   not stacked keeps exactly the comment it had.
@@ -2424,15 +2434,19 @@ restack {"base":"<sha>","open":8,"pushed":[[2519,"<sha>",[2514]]],"planned":[],"
   names another held head or parent; two siblings cut from one parent commit
   share a held head, and there the blob check holds. A forged trailer can hide
   only a blob byte-identical to the tool's output, never a residual file.
-* **Merge drivers.** A real `git merge` of Z (your local command, the recipe)
-  runs the `.gitattributes` drivers, which `merge-tree` does not. So on a
-  merge carrying valid trailers, a file Z merges cleanly but whose committed
-  blob differs is still the tool's when the file has a custom `merge=`
-  driver at that commit. A file Z still conflicts on is counted by its shape
-  or its bucket whatever a driver did with it, exactly as a hand merge of it
-  is: a driver-resolved residual (a lockfile, a ledger) lands in its declared
-  bucket, never in `code: stacked`. A local command therefore needs nothing
-  special for drivers beyond writing the trailers.
+* **Merge drivers: the blob check stays strict.** A real `git merge` of Z
+  (your local command, the recipe) runs the `.gitattributes` drivers, which
+  `merge-tree` does not. When a driver writes another blob than Z's for a
+  file Z merges cleanly, that file of a trailered merge is counted as
+  `code: stacked`, like any hand resolution: counted, never explained away.
+  There is no exemption by attribute, because a repository can give every
+  code file a driver (future-pay: `*.ts merge=imports`), and an exemption
+  would let the trailers alone hide any blob. It should be rare: a driver
+  runs only on a file BOTH sides changed, and here only where Z already
+  merges that file cleanly; such a week shows up named, by PR and commit.
+  A file Z still conflicts on is counted by its shape or its bucket whatever
+  resolved it, as before: a driver-resolved lockfile lands in
+  `dependencies`, never in `code: stacked`.
 * The duplicated-scope line under the table ("N of the duplicated-scope
   files were created by two PRs sharing a ticket id") follows the
   re-stack-aware group: on future-pay's pinned window it reads 20 instead of
