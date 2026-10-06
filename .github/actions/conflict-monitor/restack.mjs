@@ -11,8 +11,11 @@
  *
  * WHO IS NEVER WRITTEN TO: a fork; a PR whose base is not the default
  * branch (a real `gh stack` member, which GitHub re-stacks, or an ad-hoc
- * `--base` PR); the heads `main`, `master`, `develop`, `release/*` and any
- * branch GitHub reports `protected`; a head matching `restack.ignoreHeads`;
+ * `--base` PR); the heads `main`, `master`, `develop`, `release/*`; a branch
+ * under classic branch protection, or under a ruleset rule that stops a
+ * fast-forward push (`protectionOf` — NOT the branch API's `protected` flag,
+ * which a repo-wide naming or no-force-push ruleset sets on every branch);
+ * a head matching `restack.ignoreHeads`;
  * and a PR whose head branch was force-pushed over one of the bot's re-stacks
  * for the same parent (the probe's comment carries the command instead).
  * Drafts ARE re-stacked.
@@ -54,6 +57,38 @@ const log = (msg) => console.log(`[conflict-monitor] ${redact(msg, masked)}`);
 /** Git never runs a hook or an fsmonitor from the checkout's config here. */
 const HARDENED = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
 const PROTECTED_HEAD = /^(main|master|develop|release\/.+)$/;
+
+/**
+ * Ruleset rule types that stop the bot's push: a fast-forward merge commit on
+ * an existing branch. `branch_name_pattern`, `non_fast_forward`, `deletion` and
+ * `creation` never do. A message or e-mail pattern might; that push is refused
+ * by the remote and handled per PR, like any other refusal.
+ */
+const BLOCKING_RULES = new Set([
+  "update",
+  "pull_request",
+  "required_status_checks",
+  "required_linear_history",
+  "required_signatures",
+  "required_deployments",
+  "merge_queue",
+]);
+
+/**
+ * Why the branch refuses the bot's push, or null. The branch API's `protected`
+ * is true under ANY ruleset — future-pay's repo-wide naming ruleset
+ * (`branch_name_pattern` + `non_fast_forward`) sets it on every branch, which
+ * made the bot skip every PR there (FUT-3341 live proof, run 37452210190). So
+ * the decision reads classic protection (`protection.enabled`) and the
+ * effective rule types (`GET /rules/branches/{branch}`) instead.
+ */
+export function protectionOf(branch, rules) {
+  if (branch?.protection?.enabled) return "a protected head (classic branch protection)";
+  // `protected` with no readable `enabled` cannot rule classic protection out.
+  if (branch?.protected && typeof branch?.protection?.enabled !== "boolean") return "a protected head (classic protection unknown)";
+  const blocking = [...new Set((rules ?? []).map((r) => r?.type).filter((t) => BLOCKING_RULES.has(t)))];
+  return blocking.length ? `a protected head (ruleset: ${blocking.join(", ")})` : null;
+}
 
 /** Why the bot never writes to this PR, or null. */
 export function exclusionOf(pr, { repo, base, restack }) {
@@ -258,8 +293,18 @@ export async function runRestack({
         }
         throw err;
       }
+      let rules = [];
       if (branch?.protected) {
-        skip(pr, "a protected head");
+        try {
+          rules = await api.paginate(`/repos/${repo}/rules/branches/${segments(ref)}`);
+        } catch (err) {
+          skip(pr, `a protected head whose rules could not be read (${err.message})`);
+          continue;
+        }
+      }
+      const protectedBy = protectionOf(branch, Array.isArray(rules) ? rules : []);
+      if (protectedBy) {
+        skip(pr, protectedBy);
         continue;
       }
     } catch (err) {

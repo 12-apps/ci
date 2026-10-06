@@ -9,7 +9,7 @@ import { after, test } from "node:test";
 import { authEnv, redact } from "../lib/auth.mjs";
 import { git, isAncestor } from "../lib/git.mjs";
 import { BOT, trailersOf } from "../lib/restack.mjs";
-import { forcePushOverRestack, isBotRestack, pushRestack, pushedOutput, restackLogLine, restackSummary, runRestack } from "../restack.mjs";
+import { forcePushOverRestack, isBotRestack, protectionOf, pushRestack, pushedOutput, restackLogLine, restackSummary, runRestack } from "../restack.mjs";
 import { ACTIVITY, buildCase, caseApi, caseNamed, compareShape, forcePushEvent } from "./restack-world.mjs";
 
 // The `restack` mode end to end: the case's repository plays GitHub's git
@@ -54,6 +54,7 @@ function setup(name, { prs = {} } = {}) {
   const base = caseApi(world);
   const activity = new Map();
   const branchInfo = new Map();
+  const rulesInfo = new Map();
   const pulls = () =>
     open.map((n) => {
       const pr = c.prs[n];
@@ -72,14 +73,30 @@ function setup(name, { prs = {} } = {}) {
     calls: base.calls,
     activity,
     branchInfo,
+    rulesInfo,
     async paginate(path) {
       base.calls.push(`PAGINATE ${path}`);
       if (/\/pulls\?state=open$/.test(path)) return pulls();
+      const r = /\/rules\/branches\/(.+)$/.exec(path);
+      if (r) {
+        const ref = r[1].split("/").map(decodeURIComponent).join("/");
+        const rules = rulesInfo.get(ref);
+        if (rules instanceof Error) throw rules;
+        return rules ?? [];
+      }
       const m = /\/activity\?ref=([^&]+)&activity_type=force_push$/.exec(path);
       if (m) return activity.get(decodeURIComponent(m[1])) ?? [];
       throw new Error(`unexpected paginate ${path}`);
     },
     async request(method, path, body) {
+      const r = /\/rules\/branches\/(.+)$/.exec(path);
+      if (method === "GET" && r) {
+        base.calls.push(`${method} ${path}`);
+        const ref = r[1].split("/").map(decodeURIComponent).join("/");
+        const rules = rulesInfo.get(ref);
+        if (rules instanceof Error) throw rules;
+        return rules ?? [];
+      }
       const b = /\/branches\/(.+)$/.exec(path);
       if (method === "GET" && b) {
         base.calls.push(`${method} ${path}`);
@@ -306,12 +323,47 @@ test("exclusions: a fork, a protected head, an ignored head, a non-default base,
     assert.deepEqual(result.pushed, []);
     assert.equal(remoteHead("c"), before);
   }
+  // Classic branch protection, and a ruleset rule that stops a fast-forward push.
+  const blocked = [
+    [{ protected: true, protection: { enabled: true } }, null, "a protected head (classic branch protection)"],
+    [{ protected: true, protection: { enabled: false } }, [{ type: "branch_name_pattern" }, { type: "pull_request" }, { type: "required_status_checks" }], "a protected head (ruleset: pull_request, required_status_checks)"],
+    [{ protected: true, protection: { enabled: false } }, Object.assign(new Error("Resource not accessible"), { status: 403 }), "a protected head whose rules could not be read (Resource not accessible)"],
+    [{ protected: true, protection: { enabled: false } }, [{ type: "non_fast_forward" }, { type: "update" }], "a protected head (ruleset: update)"],
+    [{ protected: true, protection: { enabled: false } }, [...Array.from({ length: 30 }, () => ({ type: "branch_name_pattern" })), { type: "required_linear_history" }], "a protected head (ruleset: required_linear_history)"],
+    [{ protected: true }, [{ type: "branch_name_pattern" }], "a protected head (classic protection unknown)"],
+  ];
+  for (const [info, rules, reason] of blocked) {
+    const { api, run, remoteHead } = setup("clean re-stack");
+    api.branchInfo.set("c", info);
+    if (rules) api.rulesInfo.set("c", rules);
+    const before = remoteHead("c");
+    const result = await run();
+    assert.deepEqual(result.skipped, [{ pr: 2, reason }], reason);
+    assert.equal(remoteHead("c"), before);
+  }
+});
+
+test("a repo-wide naming ruleset marks every branch protected, and the bot still pushes (FUT-3341 live proof)", async () => {
+  // future-pay's ruleset 19208143: branch_name_pattern + non_fast_forward on
+  // every branch. GET /branches/<b> reports protected: true with classic
+  // protection off; the run of 37452210190 skipped the PR as "a protected head".
   const { api, run, remoteHead } = setup("clean re-stack");
-  api.branchInfo.set("c", { protected: true });
+  api.branchInfo.set("c", { protected: true, protection: { enabled: false, required_status_checks: { enforcement_level: "off", contexts: [], checks: [] } } });
+  api.rulesInfo.set("c", [{ type: "branch_name_pattern", ruleset_source_type: "Repository", ruleset_id: 19208143 }, { type: "non_fast_forward", ruleset_source_type: "Repository", ruleset_id: 19208143 }]);
   const before = remoteHead("c");
   const result = await run();
-  assert.deepEqual(result.skipped, [{ pr: 2, reason: "a protected head" }]);
-  assert.equal(remoteHead("c"), before);
+  assert.deepEqual(result.skipped, []);
+  assert.equal(result.pushed.length, 1);
+  assert.notEqual(remoteHead("c"), before);
+  assert.ok(api.calls.some((c) => /PAGINATE \/repos\/o\/r\/rules\/branches\/c$/.test(c)), "the rules were read, every page, because the branch reads protected");
+});
+
+test("an unprotected branch is pushed without reading its rules", async () => {
+  const { api, run } = setup("clean re-stack");
+  api.branchInfo.set("c", { protected: false, protection: { enabled: false } });
+  const result = await run();
+  assert.equal(result.pushed.length, 1);
+  assert.ok(!api.calls.some((c) => /\/rules\/branches\//.test(c)), "no rules call for a branch that does not read protected");
 });
 
 test("no token: plan and log, push nothing", async () => {
@@ -527,3 +579,14 @@ test("the force-push scan: an old force-push of an earlier PR is ignored, and a 
   });
   await assert.rejects(forcePushOverRestack({ ...args, api: denied }), /Forbidden/);
 });
+
+test("protectionOf: every rule type that stops a fast-forward push, and none that does not", () => {
+  const open = { protected: true, protection: { enabled: false } };
+  const blocking = ["update", "pull_request", "required_status_checks", "required_linear_history", "required_signatures", "required_deployments", "merge_queue"];
+  for (const type of blocking) assert.equal(protectionOf(open, [{ type }]), `a protected head (ruleset: ${type})`, type);
+  const passing = ["branch_name_pattern", "non_fast_forward", "deletion", "creation", "commit_message_pattern", "commit_author_email_pattern", "committer_email_pattern"];
+  for (const type of passing) assert.equal(protectionOf(open, [{ type }]), null, type);
+  assert.equal(protectionOf({ protected: false, protection: { enabled: false } }, []), null);
+  assert.equal(protectionOf({ protected: true, protection: { enabled: true } }, []), "a protected head (classic branch protection)");
+});
+
