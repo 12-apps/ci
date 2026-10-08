@@ -17,6 +17,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 10.34.5
+          run_install: false
       - name: Install exact public consumer Playwright version
         run: npm install --no-audit --no-fund @playwright/test@1.61.1
       - name: Baseline setup using pre-experiment engine
@@ -62,7 +66,6 @@ jobs:
           PW_TIMEOUT_SECONDS: '360'
         run: |
           set -euo pipefail
-          executable=$(node -p "require('@playwright/test').chromium.executablePath()")
           shell=$(find "$HOME/.cache/ms-playwright" -path '*/chrome-headless-shell-linux64/chrome-headless-shell' -type f | head -1)
           test -n "$shell"
           mv "$shell" "$shell.probe-backup"
