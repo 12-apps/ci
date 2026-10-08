@@ -25,6 +25,9 @@ inputs:
       SKIP_ENV_VALIDATION
       AUTH_SECRET
 outputs:
+  published:
+    description: true only after this producer uploaded an immutable artifact successfully.
+    value: ${{ inputs.mode == 'produce' && steps.upload.outcome == 'success' && steps.upload.outputs.artifact-id != '' && 'true' || 'false' }}
   ready:
     description: true on restore only after complete identity and byte validation; otherwise build locally.
     value: ${{ steps.bundle.outputs.ready }}
@@ -57,6 +60,7 @@ runs:
         cd -- "$ARTIFACT_DIRECTORY"
         node "$GITHUB_ACTION_PATH/main.mjs" "$ARTIFACT_MODE"
     - name: Upload immutable build before tests can mutate the workspace
+      id: upload
       if: inputs.mode == 'produce' && steps.bundle.outputs.ready == 'true'
       continue-on-error: true
       uses: actions/upload-artifact@v4

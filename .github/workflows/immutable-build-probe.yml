@@ -35,11 +35,26 @@ jobs:
           artifact-name: immutable-control-${{ github.run_id }}-${{ github.run_attempt }}
           paths: packages/*/dist
           build-command: fixture-build
+      - id: rejected-upload
+        uses: ./.github/actions/immutable-build-artifact
+        env:
+          AUTH_SECRET: ''
+        with:
+          working-directory: ${{ runner.temp }}/immutable-fixture
+          mode: produce
+          artifact-name: 'deliberately-invalid:artifact'
+          paths: packages/*/dist
+          build-command: fixture-build
       - name: Assert publish then mutate producer state
         env:
           READY: ${{ steps.publish.outputs.ready }}
+          PUBLISHED: ${{ steps.publish.outputs.published }}
+          REJECTED_PUBLISHED: ${{ steps.rejected-upload.outputs.published }}
         run: |
           test "$READY" = true
+          test "$PUBLISHED" = true
+          test "$REJECTED_PUBLISHED" = false
+          echo "PUBLICATION_CONTROL valid_upload=true rejected_upload=false"
           echo changed-after-upload > "$RUNNER_TEMP/immutable-fixture/packages/a/dist/index.js"
           echo producer-mutated-database > "$RUNNER_TEMP/immutable-fixture/.pglite/state"
   consumer:

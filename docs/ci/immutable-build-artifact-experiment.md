@@ -41,3 +41,28 @@ remaining blockers. Actual local consumer builds (baseline12.829s versus normali
 producer environment12.079s) produce identical20 files/79,631 bytes. No hosted
 consumer speed claim is implied. Normal release and exact-consumer proof remain
 required before adopting its inputs.
+
+
+## Publication readiness correction
+
+Actual private consumer37809188348 passed10 Reliability cases (two repetitions,
+zero retries) and5 SPA cases on the normal0aa37b56/v2.54.4 release. SHA download
+logs prove that engine revision.20 files/79,631bytes restored from immutable
+artifact digestd26ffdb66ac1f407bcefecb2589265e2dd4765573799fef24263185e5a62d617;
+SPA regenerated its own client and skipped its workspace build. Reliability
+publication costs3s; SPA restore2s and client generation4s, measured step bounds.
+These are not a paired baseline or a critical-path/dollar claim.
+
+A follow-up prevents a known no-producer cost: unconditional SPA download would
+add overhead whenever no changed spec produced an artifact. The action now
+reports successful upload independently from local bundle validity; Quality
+exports that conservative result, false when skipped, failed or inconclusive.
+Consumer can skip all artifact preparation unless publication is confirmed,
+retaining its original build. Public controls assert actual successful upload
+true and deliberately invalid upload false; all codec/fallback checks remain.
+No-spec toolchain skips, independent jobs, global prerequisites, tests, retries,
+reports and mutable-state isolation are unchanged. Consumer use must wait for
+normal engine release and fresh exact-revision evidence.
+
+Owner explicitly approved continuing beyond the90-minute STOP with every gate
+intact; elapsed time and the prior STOP are retained in consumer history.
