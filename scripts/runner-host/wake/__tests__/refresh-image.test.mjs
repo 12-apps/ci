@@ -52,14 +52,28 @@ case " $* " in
   *" describe-images "*"099720109477"*) echo ami-ubuntu ;;
   *" describe-images "*"RootDeviceName"*) echo /dev/sda1 ;;
   *" describe-images "*"VolumeSize"*) echo 72 ;;
-  *" describe-images "*"State"*) echo available ;;
+  *" describe-images "*"State"*) key=image; states="\${REFRESH_TEST_IMAGE:-available}" ;;
   *" run-instances "*) n=$(grep -c run-instances "${calls}"); echo "i-fake$n" ;;
-  *" describe-instance-information "*) echo Online ;;
+  *" describe-instance-information "*) key=ssm-online; states="\${REFRESH_TEST_ONLINE:-Online}" ;;
   *" send-command "*) echo cmd-1 ;;
-  *" get-command-invocation "*"Status"*) echo Success ;;
+  *" get-command-invocation "*"Status"*)
+    key=command
+    states="\${REFRESH_TEST_COMMAND:-Success}"
+    if [[ "$*" == *"--instance-id i-fake2"* ]]; then
+      key=smoke-command
+      states="\${REFRESH_TEST_SMOKE_COMMAND:-Success}"
+    fi
+    ;;
   *" get-command-invocation "*) echo ok ;;
   *" create-image "*) echo ami-new ;;
 esac
+if [[ -n "\${key:-}" ]]; then
+  n=$(cat "${dir}/$key.count" 2>/dev/null || echo 0)
+  n=$((n + 1)); echo "$n" > "${dir}/$key.count"
+  read -ra values <<< "$states"
+  at=$((n - 1)); (( at < \${#values[@]} )) || at=$((\${#values[@]} - 1))
+  echo "\${values[$at]}"
+fi
 `,
   );
   chmodSync(path.join(dir, "aws"), 0o755);
@@ -81,13 +95,17 @@ esac
     if (v === undefined) delete env[k];
     else env[k] = v;
   }
-  // `sleep` is real in the script; the fake answers every poll on its first try.
+  // Only this mocked child gets the recording clock. Production resolves real sleep.
+  writeFileSync(path.join(dir, "sleep"), `#!/usr/bin/env bash
+echo "sleep $*" >> "${calls}"
+`);
+  chmodSync(path.join(dir, "sleep"), 0o755);
   const res = spawnSync("bash", [script], { env, encoding: "utf8", timeout: 60_000 });
   const log = (existsSync(calls) ? readFileSync(calls, "utf8") : "").trim().split("\n");
   const sent = log
     .filter((l) => l.includes("send-command"))
     .map((l) => Buffer.from(/echo (\S+) \| base64 -d/.exec(l)[1], "base64").toString("utf8"));
-  return { status: res.status, stderr: res.stderr, log, sent, terminated: log.filter((l) => l.includes("terminate-instances")) };
+  return { sleeps: log.filter((l) => l.startsWith("sleep ")), status: res.status, stderr: res.stderr, log, sent, terminated: log.filter((l) => l.includes("terminate-instances")) };
 }
 
 test("a failure reading the live settings stops the run before any host starts", () => {
@@ -235,4 +253,84 @@ test("the workflow is reusable and schedules nothing: its logs belong to the con
   assert.match(on, /^ {2}workflow_call:/m);
   assert.doesNotMatch(on, /^ {2}(schedule|workflow_dispatch|push|pull_request\w*):/m);
   assert.doesNotMatch(source, /vars\./, "every value comes from the caller's inputs");
+});
+
+test("the recording clock preserves the SSM sleep-before-poll order", () => {
+  const { log, sleeps } = runWith({ REFRESH_TEST_SMOKE_COMMAND: "Failed" });
+  const poll = log.findIndex((l) => l.includes("get-command-invocation") && l.includes("--query Status"));
+  assert.equal(log[poll - 1], "sleep 10");
+  assert.deepEqual(sleeps, ["sleep 10", "sleep 10"]);
+});
+
+test("pending SSM command becomes successful after three polls, before imaging", () => {
+  const { log, sleeps } = runWith({ REFRESH_TEST_COMMAND: "Pending InProgress Success", REFRESH_TEST_SMOKE_COMMAND: "Failed" });
+  const polls = log.filter((l) => l.includes("get-command-invocation") && l.includes("--instance-id i-fake1") && l.includes("--query Status"));
+  assert.equal(polls.length, 3);
+  assert.deepEqual(sleeps, ["sleep 10", "sleep 10", "sleep 10", "sleep 10"]);
+  assert.ok(log.findIndex((l) => l.includes("create-image")) > log.indexOf(polls[2]));
+});
+
+for (const terminal of ["Failed", "TimedOut", "Cancelled"]) {
+  test(`pending SSM command stops at ${terminal} and cleans the golden host`, () => {
+    const { status, log, sleeps, terminated } = runWith({ REFRESH_TEST_COMMAND: `Pending ${terminal}` });
+    assert.notEqual(status, 0);
+    assert.deepEqual(sleeps, ["sleep 10", "sleep 10"]);
+    assert.equal(log.filter((l) => l.includes("--query Status")).length, 2);
+    assert.ok(!log.some((l) => l.includes("create-image")));
+    assert.match(terminated[0], /--instance-ids i-fake1$/);
+  });
+}
+
+test("a perpetually pending command exhausts exactly 390 ten-second polls", () => {
+  const { status, log, sleeps, terminated } = runWith({ REFRESH_TEST_COMMAND: "Pending" });
+  assert.notEqual(status, 0);
+  assert.equal(log.filter((l) => l.includes("--query Status")).length, 390);
+  assert.deepEqual(sleeps, Array(390).fill("sleep 10"));
+  assert.ok(!log.some((l) => l.includes("create-image")));
+  assert.match(terminated[0], /--instance-ids i-fake1$/);
+});
+
+test("offline SSM retries before sending the command", () => {
+  const { log, sleeps } = runWith({ REFRESH_TEST_ONLINE: "None Offline Online" }, "send-command");
+  assert.deepEqual(sleeps, ["sleep 10", "sleep 10"]);
+  const polls = log.filter((l) => l.includes("describe-instance-information"));
+  assert.equal(polls.length, 3);
+  const first = log.indexOf(polls[0]);
+  assert.equal(log[first + 1], "sleep 10");
+  assert.ok(log.findIndex((l) => l.includes("send-command")) > log.indexOf(polls[2]));
+});
+
+test("offline SSM stops after 90 waits and sends no command", () => {
+  const { status, log, sleeps, stderr } = runWith({ REFRESH_TEST_ONLINE: "Offline" });
+  assert.notEqual(status, 0);
+  assert.equal(log.filter((l) => l.includes("describe-instance-information")).length, 90);
+  assert.deepEqual(sleeps, Array(90).fill("sleep 10"));
+  assert.match(stderr, /never came online in SSM/);
+  assert.ok(!log.some((l) => l.includes("send-command")));
+});
+
+test("a pending image waits twenty seconds before the next poll and smoke launch", () => {
+  const { log, sleeps } = runWith({ REFRESH_TEST_IMAGE: "pending available", REFRESH_TEST_SMOKE_COMMAND: "Failed" });
+  assert.deepEqual(sleeps, ["sleep 10", "sleep 20", "sleep 10"]);
+  const imagePoll = log.findIndex((l) => l.includes("--query Images[0].State"));
+  assert.equal(log[imagePoll + 1], "sleep 20");
+  assert.ok(log[imagePoll + 2].includes("--query Images[0].State"));
+  assert.equal(log.filter((l) => l.includes("run-instances")).length, 2);
+});
+
+test("a failed image never launches the smoke host", () => {
+  const { status, log, sleeps, stderr } = runWith({ REFRESH_TEST_IMAGE: "pending failed" });
+  assert.notEqual(status, 0);
+  assert.match(stderr, /image ami-new failed/);
+  assert.deepEqual(sleeps, ["sleep 10", "sleep 20"]);
+  assert.equal(log.filter((l) => l.includes("run-instances")).length, 1);
+});
+
+test("a pending image stops after 270 twenty-second waits", () => {
+  const { status, log, sleeps, stderr } = runWith({ REFRESH_TEST_IMAGE: "pending" });
+  assert.notEqual(status, 0);
+  assert.match(stderr, /still pending after 90 minutes/);
+  assert.equal(log.filter((l) => l.includes("--query Images[0].State")).length, 270);
+  assert.deepEqual(sleeps, ["sleep 10", ...Array(270).fill("sleep 20")]);
+  assert.equal(log.filter((l) => l.includes("run-instances")).length, 1);
 });
