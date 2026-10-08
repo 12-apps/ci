@@ -45,3 +45,7 @@ or original-suite fake-clock time at least 30 seconds. Rollback: restore only
 the test file from the baseline, rerun the 22 original cases, record its result
 as an addendum without deleting this history. The deadline never promotes the
 change to a decision; retain draft state if evidence remains blocked.
+
+## Hosted verdict — keep
+
+On source `050d0cc35d6c16a5905ad1068e63054a50336592`, [Self Tests37732824868/job113165615109](https://github.com/12-apps/ci/actions/runs/37732824868/job/113165615109) logs all33 refresh cases within the222/222 supervisor aggregate, zero failures/skips,10026.87ms. Step timestamps05:32:49–05:32:59 UTC confirm10s versus historical304s, approximately294 job-step seconds removed. The11 new cases actually executed. Runner-image build/smoke, commitlint and CodeQL passed. Independent review round1 had no blocking findings/regressions. Keep the test-only change; normal release verification follows merge. The documentation head must pass its own checks. No dollar or critical-path claim.
