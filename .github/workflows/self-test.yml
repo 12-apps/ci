@@ -76,7 +76,7 @@ jobs:
 
       - name: setup-playwright
         shell: bash
-        run: node --test .github/actions/setup-playwright/__tests__/install-playwright.test.mjs
+        run: node --test .github/actions/setup-playwright/__tests__/*.test.mjs
 
       - name: vitest-signal-guard
         shell: bash

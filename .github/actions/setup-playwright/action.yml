@@ -49,6 +49,7 @@ runs:
     - name: Install Playwright
       shell: bash
       env:
+        PW_VERSION: ${{ steps.playwright-version.outputs.version }}
         PW_BROWSER: ${{ inputs.browser }}
         PW_ATTEMPTS: ${{ inputs.attempts }}
         PW_TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
