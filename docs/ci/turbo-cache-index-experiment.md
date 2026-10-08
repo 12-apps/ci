@@ -30,3 +30,30 @@ Failure history: tests written before implementation failed on the absent module
 Focused suite77/77; complete engine workflow suite314/314. Baseline guards32/32 before/after. Unknown-index and failed/malformed dry-run CLI controls remain green on the fallback; upstream useful-hash controls require restore. Independent review, hosted exact-head controls and release are pending. No production revert or production speedup is claimed yet.
 
 Independent round1 found two blocking useful-cache risks: action-only variables could alter hash-relevant wildcard environments, and the default-only inventory missed custom directories. Fixed before merge: incomplete/wildcard/transient hash-environment contracts retain restore, and the inventory recursively covers actual archives throughout the saved payload, rejecting symlinks and unknown archive names. Ten new counterexample controls passed. Round2 verification and final-head hosted evidence remain pending.
+
+## Final-head hosted small-payload comparison
+
+Run37802549348 at45870b74 executes all six controls using real Turbo2.7.5,
+a1,592-byte payload and354-byte compressed paired index. Production cache size
+is not represented by this small fixture.
+
+| Scenario | Baseline index/restore/build total ms | Candidate total ms | Candidate build ms | Actual executions |
+|---|---:|---:|---:|---:|
+| no-hit |2295|2606|1194|3|
+| useful-hit |1016|3249|450|0|
+| lockfile-change |2052|3209|1334|3|
+
+Baseline build ms:1471/347/1378 respectively. Candidate index-decision costs:
+692/763/749ms. No-hit and lockfile-change skip the entire payload and still
+execute all three builds. Useful-hit retains all three hits. Cache backend and
+step overhead are included in the totals. Candidate downloads354 index bytes;
+useful-hit additionally downloads the original1,592-byte payload.
+
+Small-payload totals regress311/2233/1157ms respectively. This is measured
+mechanism overhead, not proof of a benefit on future-pay's1.45GB historical
+payload. Default adoption/release is blocked pending actual consumer measurement
+and a zero-known-regression verdict. No critical-path or dollar savings claimed.
+Independent review round2 closed both original findings at zero blockers; its
+focused counterexample/wiring suite45/45 passed. All checks at this source head
+passed, including controls and runner-host tests. Green correctness is not a
+performance verdict.
