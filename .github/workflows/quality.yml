@@ -73,6 +73,16 @@ on:
         type: string
         required: false
         default: ''
+      e2e-build-artifact-name:
+        description: Optional same-run immutable workspace build artifact published by Reliability before tests.
+        type: string
+        required: false
+        default: ''
+      e2e-build-artifact-paths:
+        description: Optional newline-separated immutable output roots; excludes databases, reports and server state.
+        type: string
+        required: false
+        default: ''
       install-playwright:
         description: 'Install Playwright browsers before the reliability gate.'
         type: boolean
@@ -1280,6 +1290,14 @@ jobs:
           set -o pipefail
           ${{ inputs.pre-e2e-command }} 2>&1 | tee pre-e2e.log
       # Same action as the reliability lane above — one place to fix the stall.
+      - name: Publish immutable workspace build before reliability tests
+        if: ${{ steps.changed-specs.outputs.any == 'true' && inputs.pre-e2e-command != '' && inputs.e2e-build-artifact-name != '' && inputs.e2e-build-artifact-paths != '' }}
+        uses: 12-apps/ci/.github/actions/immutable-build-artifact@v2
+        with:
+          mode: produce
+          artifact-name: ${{ inputs.e2e-build-artifact-name }}
+          paths: ${{ inputs.e2e-build-artifact-paths }}
+          build-command: ${{ inputs.pre-e2e-command }}
       - name: Set up Playwright
         if: ${{ steps.changed-specs.outputs.any == 'true' && inputs.install-playwright }}
         uses: 12-apps/ci/.github/actions/setup-playwright@v2
@@ -1295,3 +1313,15 @@ jobs:
           # same job, and repeating it with `--depth=1` re-grafted the checkout
           # shallow immediately before handing it to the script that diffs.
           pnpm test:e2e:reliability 2>&1 | tee e2e-reliability.log
+
+      - name: Upload the separate reliability report
+        if: ${{ always() && steps.changed-specs.outputs.any == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-reliability-report
+          path: |
+            playwright-report
+            test-results
+            e2e-reliability.log
+          retention-days: 7
+          if-no-files-found: ignore
