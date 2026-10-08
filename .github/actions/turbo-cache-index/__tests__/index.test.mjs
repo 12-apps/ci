@@ -10,11 +10,13 @@ const key = 'turbo-build-abc-123-1';
 const a = '1234567890abcdef';
 const b = 'fedcba0987654321';
 const index = () => ({ version: 1, cacheKey: key, turboVersion: '2.7.5', createdAt: new Date(now).toISOString(), hashes: [a] });
-const plan = () => ({ turboVersion: '2.7.5', tasks: [{ taskId: 'web#build', hash: b }] });
+const env = () => ({ specified: { env: [] }, configured: [], inferred: [] });
+const task = (taskId, hash) => ({ taskId, hash, environmentVariables: env() });
+const plan = () => ({ turboVersion: '2.7.5', globalCacheInputs: { environmentVariables: env() }, tasks: [task('web#build', b)] });
 
 test('only a complete paired index and proved zero intersection skips restore', () => {
   assert.equal(decideRestore(index(), plan(), key, now).restore, false);
-  assert.equal(decideRestore(index(), { ...plan(), tasks: [{ taskId: 'web#build', hash: a }] }, key, now).restore, true);
+  assert.equal(decideRestore(index(), { ...plan(), tasks: [task('web#build', a)] }, key, now).restore, true);
 });
 
 for (const [name, mutate] of [
@@ -40,7 +42,7 @@ for (const [name, mutate] of [
 ]) test(`${name} preserves restore`, () => assert.equal(decideRestore(index(), mutate(plan()), key, now).restore, true));
 
 test('an upstream dependency intersection still restores', () => {
-  assert.equal(decideRestore(index(), { ...plan(), tasks: [...plan().tasks, { taskId: 'upstream#build', hash: a }] }, key, now).restore, true);
+  assert.equal(decideRestore(index(), { ...plan(), tasks: [...plan().tasks, task('upstream#build', a)] }, key, now).restore, true);
 });
 
 test('empty matched cache key never authorizes skipping', () => assert.equal(decideRestore(index(), plan(), '', now).restore, true));
@@ -66,5 +68,27 @@ test('unknown archive naming cannot silently disappear from inventory', () => {
     mkdirSync(join(root, '.turbo/cache'), { recursive: true });
     writeFileSync(join(root, '.turbo/cache/unknown.tar.zst'), 'archive');
     assert.throws(() => makeIndex(root, key, '2.7.5', now), /unknown/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+for (const name of ['*','INDEX_*','INDEX_MODE','TURBO_MATCHED_KEY','GITHUB_OUTPUT','GITHUB_ACTION_REF','npm_command','SHLVL']) {
+  test(`hashing ${name} retains useful restoration when environment equivalence is unproved`, () => {
+    const p = plan(); p.globalCacheInputs.environmentVariables.specified.env = [name];
+    assert.equal(decideRestore(index(), p, key, now).restore, true);
+  });
+}
+test('missing environment metadata is inconclusive', () => {
+  const p = plan(); delete p.tasks[0].environmentVariables;
+  assert.equal(decideRestore(index(), p, key, now).restore, true);
+});
+test('custom cacheDir archives anywhere in the saved payload retain useful restoration', () => {
+  const root = mkdtempSync(join(tmpdir(), 'turbo-custom-index-'));
+  try {
+    mkdirSync(join(root, '.turbo/cache'), { recursive: true });
+    mkdirSync(join(root, '.turbo/custom'), { recursive: true });
+    writeFileSync(join(root, '.turbo/custom', `${b}.tar.zst`), 'useful custom archive');
+    const i = makeIndex(root, key, '2.7.5', now);
+    assert.deepEqual(i.hashes, [b]);
+    assert.equal(decideRestore(i, plan(), key, now).restore, true);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

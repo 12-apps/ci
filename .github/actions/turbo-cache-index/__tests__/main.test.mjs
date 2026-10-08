@@ -19,7 +19,7 @@ function fixture(t) {
   const run = (extra = {}, mode = 'check') => spawnSync(process.execPath, [main, mode], {
     cwd: dir, encoding: 'utf8', timeout: 5000,
     env: { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}`, GITHUB_OUTPUT: output, RUNNER_TEMP: dir, TURBO_MATCHED_KEY: key,
-      PLAN_JSON: JSON.stringify({ turboVersion: '2.7.5', tasks: [{ taskId: 'web#build', hash: b }] }), ...extra },
+      PLAN_JSON: JSON.stringify({ turboVersion: '2.7.5', globalCacheInputs: { environmentVariables: { specified: { env: [] }, configured: [], inferred: [] } }, tasks: [{ taskId: 'web#build', hash: b, environmentVariables: { specified: { env: [] }, configured: [], inferred: [] } }] }), ...extra },
   });
   return { dir, output, run };
 }
