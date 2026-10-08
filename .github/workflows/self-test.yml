@@ -326,6 +326,14 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/lane-verdict-jobs.test.mjs
 
+      - name: Conservative Turbo cache index
+        shell: bash
+        run: node --test .github/actions/turbo-cache-index/__tests__/*.test.mjs
+
+      - name: Turbo index wiring
+        shell: bash
+        run: node --test .github/workflows/__tests__/turbo-index-wiring.test.mjs
+
       # The cost report's own script, lifted out of cost-report.yml and run
       # against a fake GitHub. Its failure is a number that looks right: with the
       # jobs on the self-hosted fleet it read "$0.00" for runs that cost real AWS

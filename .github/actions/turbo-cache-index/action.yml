@@ -1,0 +1,40 @@
+name: Conservative Turbo build-cache index
+description: Skip a payload download only after proving zero overlap with its exact paired archive inventory.
+inputs:
+  working-directory:
+    description: Consumer workspace root; defaults to the caller checkout.
+    default: '.'
+  mode:
+    description: check an index, or record the inventory immediately before saving its payload.
+    default: check
+  matched-key:
+    description: Exact payload cache key returned by actions/cache/restore lookup-only.
+    default: ''
+  save-key:
+    description: Unique payload key for this run attempt; record mode only.
+    default: ''
+  selection-base:
+    description: The immutable affected base used by the unchanged Build step.
+    default: ''
+outputs:
+  restore:
+    description: false only for a complete paired index and proved zero overlap; otherwise retain restore.
+    value: ${{ steps.index.outputs.restore }}
+  ready:
+    description: true only when record mode produced the paired inventory.
+    value: ${{ steps.index.outputs.ready }}
+runs:
+  using: composite
+  steps:
+    - id: index
+      shell: bash
+      continue-on-error: true
+      env:
+        INDEX_MODE: ${{ inputs.mode }}
+        INDEX_DIRECTORY: ${{ inputs.working-directory }}
+        TURBO_MATCHED_KEY: ${{ inputs.matched-key }}
+        TURBO_SAVE_KEY: ${{ inputs.save-key }}
+        SELECTION_BASE: ${{ inputs.selection-base }}
+      run: |
+        cd -- "$INDEX_DIRECTORY"
+        node "$GITHUB_ACTION_PATH/main.mjs" "$INDEX_MODE"

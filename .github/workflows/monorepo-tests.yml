@@ -1422,12 +1422,44 @@ jobs:
       # The prefix restore is unchanged and still does the work: a PR gets the
       # newest entry the default branch wrote, and turbo's own content hashes
       # decide what inside it is reusable. What a PR no longer does is WRITE.
-      - name: Restore turbo cache
+      # Advisory index: legacy/missing/inconclusive metadata still restores.
+      # Pair future saves by run attempt; prefix fallback remains unchanged.
+      - name: Look up the exact turbo payload key
+        id: turbo-lookup
         if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
+        continue-on-error: true
         uses: actions/cache/restore@v4
         with:
           path: .turbo
           key: turbo-build-${{ github.sha }}
+          restore-keys: |
+            turbo-build-
+          lookup-only: true
+
+      - name: Restore the paired turbo hash index
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' && steps.turbo-lookup.outputs.cache-matched-key != '' }}
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: .turbo/index/build.json
+          key: turbo-hash-index-v1-${{ steps.turbo-lookup.outputs.cache-matched-key }}
+
+      - name: Check current task hashes against the paired inventory
+        id: turbo-index
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
+        uses: 12-apps/ci/.github/actions/turbo-cache-index@v2
+        with:
+          matched-key: ${{ steps.turbo-lookup.outputs.cache-matched-key }}
+          selection-base: ${{ steps.selection.outputs.base-sha }}
+
+      - name: Restore turbo cache
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' && steps.turbo-index.outputs.restore != 'false' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: .turbo
+          # Pin the lookup's chosen payload so a concurrent save cannot move
+          # the prefix underneath the paired index. Lookup failure falls back.
+          key: ${{ steps.turbo-lookup.outputs.cache-matched-key || format('turbo-build-{0}', github.sha) }}
           restore-keys: |
             turbo-build-
 
@@ -1454,12 +1486,28 @@ jobs:
       #
       # No status function: a lane that failed has nothing worth publishing as
       # the branch's warm state.
+      - name: Inventory the exact turbo payload to save
+        id: turbo-index-record
+        if: ${{ (github.event_name != 'pull_request') && steps.lane-verdict.outputs.hit != 'true' }}
+        uses: 12-apps/ci/.github/actions/turbo-cache-index@v2
+        with:
+          mode: record
+          save-key: turbo-build-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+
       - name: Save turbo cache
         if: ${{ (github.event_name != 'pull_request') && steps.lane-verdict.outputs.hit != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: .turbo
-          key: turbo-build-${{ github.sha }}
+          key: turbo-build-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save the index paired to this exact payload
+        if: ${{ (github.event_name != 'pull_request') && steps.lane-verdict.outputs.hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.turbo-index-record.outputs.ready == 'true' && '.turbo/index/build.json' || '.turbo/index/not-recorded' }}
+          key: turbo-hash-index-v1-turbo-build-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   # Sizes the integration matrix before any expensive setup. It is its own job
   # because `strategy.matrix` cannot be built from an input expression — a

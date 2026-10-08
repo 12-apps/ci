@@ -1,0 +1,129 @@
+name: Turbo cache index controls
+on:
+  pull_request:
+    paths:
+      - '.github/actions/turbo-cache-index/**'
+      - '.github/workflows/turbo-cache-index-probe.yml'
+      - '.github/workflows/monorepo-tests.yml'
+      - '**.md'
+permissions:
+  contents: read
+jobs:
+  payload:
+    name: Produce an immutable real Turbo payload
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 10.34.5
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install the exact public Turbo version
+        run: npm install --prefix "$RUNNER_TEMP/turbo-tools" turbo@2.7.5 --ignore-scripts
+      - name: Build the three-task positive control
+        shell: bash
+        run: |
+          set -euo pipefail
+          export TURBO_BINARY="$RUNNER_TEMP/turbo-tools/node_modules/turbo/bin/turbo"
+          export TURBO_PACKAGE="$RUNNER_TEMP/turbo-tools/node_modules/turbo"
+          node .github/actions/turbo-cache-index/probe.mjs prepare "$RUNNER_TEMP/turbo-fixture"
+          node .github/actions/turbo-cache-index/probe.mjs build "$RUNNER_TEMP/turbo-fixture" no-hit
+      - name: Inventory this exact payload
+        uses: ./.github/actions/turbo-cache-index
+        with:
+          working-directory: ${{ runner.temp }}/turbo-fixture
+          mode: record
+          save-key: fixture-payload-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Save fixture payload
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/turbo-fixture/.turbo
+          key: fixture-payload-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Save fixture paired index
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/turbo-fixture/.turbo/index/build.json
+          key: fixture-index-v1-fixture-payload-${{ github.run_id }}-${{ github.run_attempt }}
+
+  controls:
+    name: ${{ matrix.scenario }} / ${{ matrix.method }}
+    needs: payload
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [no-hit, useful-hit, lockfile-change]
+        method: [baseline, candidate]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 10.34.5
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install the exact public Turbo version
+        run: npm install --prefix "$RUNNER_TEMP/turbo-tools" turbo@2.7.5 --ignore-scripts
+      - name: Prepare the same baseline and controlled change
+        shell: bash
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+        run: |
+          set -euo pipefail
+          export TURBO_BINARY="$RUNNER_TEMP/turbo-tools/node_modules/turbo/bin/turbo"
+          export TURBO_PACKAGE="$RUNNER_TEMP/turbo-tools/node_modules/turbo"
+          node .github/actions/turbo-cache-index/probe.mjs prepare "$RUNNER_TEMP/turbo-fixture"
+          node .github/actions/turbo-cache-index/probe.mjs change "$RUNNER_TEMP/turbo-fixture" "$SCENARIO"
+          date +%s%N > "$RUNNER_TEMP/turbo-probe-start"
+      - name: Look up exact payload
+        id: lookup
+        if: matrix.method == 'candidate'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/turbo-fixture/.turbo
+          key: fixture-payload-${{ github.run_id }}-${{ github.run_attempt }}
+          lookup-only: true
+      - name: Restore exact paired index
+        if: matrix.method == 'candidate'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/turbo-fixture/.turbo/index/build.json
+          key: fixture-index-v1-${{ steps.lookup.outputs.cache-matched-key }}
+      - name: Decide from real current Turbo task hashes
+        id: index
+        if: matrix.method == 'candidate'
+        uses: ./.github/actions/turbo-cache-index
+        with:
+          working-directory: ${{ runner.temp }}/turbo-fixture
+          matched-key: ${{ steps.lookup.outputs.cache-matched-key }}
+      - name: Restore fixture payload
+        id: restore
+        if: matrix.method == 'baseline' || steps.index.outputs.restore != 'false'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/turbo-fixture/.turbo
+          key: fixture-payload-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Prove the decision and actual build execution count
+        shell: bash
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+          METHOD: ${{ matrix.method }}
+          RESTORE: ${{ steps.index.outputs.restore }}
+          RESTORED_KEY: ${{ steps.restore.outputs.cache-matched-key }}
+          EXPECTED_KEY: fixture-payload-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [ "$METHOD" = candidate ]; then
+            if [ "$SCENARIO" = useful-hit ]; then test "$RESTORE" = true; else test "$RESTORE" = false; fi
+          fi
+          if [ "$METHOD" = baseline ] || [ "$RESTORE" != false ]; then test "$RESTORED_KEY" = "$EXPECTED_KEY"; fi
+          export TURBO_BINARY="$RUNNER_TEMP/turbo-tools/node_modules/turbo/bin/turbo"
+          node .github/actions/turbo-cache-index/probe.mjs build "$RUNNER_TEMP/turbo-fixture" "$SCENARIO"
+          elapsed=$(( ($(date +%s%N) - $(cat "$RUNNER_TEMP/turbo-probe-start")) / 1000000 ))
+          echo "PROBE_TOTAL scenario=$SCENARIO method=$METHOD index-restore-build-ms=$elapsed"
