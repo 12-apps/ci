@@ -1,0 +1,82 @@
+name: Playwright validation experiment probe
+on:
+  pull_request:
+    paths: ['.github/workflows/playwright-validation-probe.yml']
+permissions:
+  contents: read
+jobs:
+  browser-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: 12-apps/ci
+          ref: 0d1e78b3887fda21c8dd9124389f45ae274ca142
+          path: engine
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install exact public consumer Playwright version
+        run: npm install --no-audit --no-fund @playwright/test@1.61.1
+      - name: Baseline setup using pre-experiment engine
+        uses: 12-apps/ci/.github/actions/setup-playwright@1208c421d9cf8953507d6a36bd6acd08a4252514
+      - name: Validate working exact browser and measure candidate setup
+        env:
+          PW_VERSION: '1.61.1'
+          PW_BROWSER: chromium
+          PW_CACHE_HIT: 'true'
+        run: |
+          set -euo pipefail
+          start=$(date +%s%N)
+          node engine/.github/actions/setup-playwright/main.mjs | tee working.log
+          elapsed=$(( ($(date +%s%N) - start) / 1000000 ))
+          echo "candidate working setup elapsed_ms=$elapsed"
+          grep -F 'validation passed; dependency installation is unnecessary' working.log
+      - name: Wrong requested version cannot use the working browser
+        env:
+          PW_VERSION: '1.60.0'
+          PW_BROWSER: chromium
+        run: |
+          set -euo pipefail
+          if node engine/.github/actions/setup-playwright/validate-browser.mjs > version.log 2>&1; then
+            echo '::error::wrong version incorrectly validated'; exit 1
+          fi
+          grep -F 'differs from the installed version' version.log
+      - name: Missing system libraries fail a real browser launch
+        run: |
+          set -euo pipefail
+          browser_cache="$HOME/.cache/ms-playwright"
+          if docker run --rm -v "$PWD:/consumer" -v "$browser_cache:/browsers:ro" -w /consumer \
+            -e PLAYWRIGHT_BROWSERS_PATH=/browsers -e PW_VERSION=1.61.1 -e PW_BROWSER=chromium \
+            node:24-bookworm-slim node engine/.github/actions/setup-playwright/validate-browser.mjs > missing-library.log 2>&1; then
+            echo '::error::browser without libraries incorrectly validated'; exit 1
+          fi
+          grep -E 'error while loading shared libraries|Host system is missing dependencies' missing-library.log
+      - name: Corrupt exact cache takes fallback; failed installation still fails
+        env:
+          PW_VERSION: '1.61.1'
+          PW_BROWSER: chromium
+          PW_CACHE_HIT: 'true'
+          PW_ATTEMPTS: '1'
+          PW_TIMEOUT_SECONDS: '360'
+        run: |
+          set -euo pipefail
+          executable=$(node -p "require('@playwright/test').chromium.executablePath()")
+          shell=$(find "$HOME/.cache/ms-playwright" -path '*/chrome-headless-shell-linux64/chrome-headless-shell' -type f | head -1)
+          test -n "$shell"
+          mv "$shell" "$shell.probe-backup"
+          trap 'mv "$shell.probe-backup" "$shell"' EXIT
+          node engine/.github/actions/setup-playwright/main.mjs 2>&1 | tee corrupt.log
+          grep -F 'validation failed or was inconclusive; using bounded installation' corrupt.log
+          if grep -F 'validation passed; dependency installation is unnecessary' corrupt.log; then exit 1; fi
+          mkdir failing-command
+          printf '#!/bin/sh\nexit 19\n' > failing-command/pnpm
+          chmod +x failing-command/pnpm
+          if PATH="$PWD/failing-command:$PATH" node engine/.github/actions/setup-playwright/main.mjs > failed-install.log 2>&1; then
+            echo '::error::failed fallback installation reported success'; exit 1
+          fi
+          grep -F 'validation failed or was inconclusive; using bounded installation' failed-install.log
+          mv "$shell.probe-backup" "$shell"
+          trap - EXIT
+          node engine/.github/actions/setup-playwright/validate-browser.mjs
