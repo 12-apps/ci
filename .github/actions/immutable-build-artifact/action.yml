@@ -1,0 +1,67 @@
+name: Immutable build artifact
+description: Share only declared verified build outputs in this workflow run; uncertainty retains a local build.
+inputs:
+  working-directory:
+    description: Consumer workspace root; defaults to the caller checkout.
+    default: '.'
+  mode:
+    description: produce after a successful build, or restore before the consumer's fallback build.
+    required: true
+  artifact-name:
+    description: Unique immutable artifact name in this workflow run.
+    required: true
+  paths:
+    description: Newline-separated build output roots, with optional single-component wildcards.
+    required: true
+  build-command:
+    description: Exact producer and fallback build command; part of reuse identity.
+    required: true
+  env-names:
+    description: Newline-separated build-affecting environment names; values are hashed, never published.
+    default: |
+      CI
+      NODE_ENV
+      USE_FILE_DB
+      SKIP_ENV_VALIDATION
+      AUTH_SECRET
+outputs:
+  ready:
+    description: true on restore only after complete identity and byte validation; otherwise build locally.
+    value: ${{ steps.bundle.outputs.ready }}
+runs:
+  using: composite
+  steps:
+    - id: location
+      shell: bash
+      env:
+        ARTIFACT_NAME: ${{ inputs.artifact-name }}
+      run: node "$GITHUB_ACTION_PATH/main.mjs" locate
+    - name: Download this run's immutable build
+      if: inputs.mode == 'restore'
+      continue-on-error: true
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ steps.location.outputs.directory }}
+    - id: bundle
+      shell: bash
+      continue-on-error: true
+      env:
+        ARTIFACT_MODE: ${{ inputs.mode }}
+        ARTIFACT_DIRECTORY: ${{ inputs.working-directory }}
+        ARTIFACT_NAME: ${{ inputs.artifact-name }}
+        BUILD_PATHS: ${{ inputs.paths }}
+        BUILD_COMMAND: ${{ inputs.build-command }}
+        BUILD_ENV_NAMES: ${{ inputs.env-names }}
+      run: |
+        cd -- "$ARTIFACT_DIRECTORY"
+        node "$GITHUB_ACTION_PATH/main.mjs" "$ARTIFACT_MODE"
+    - name: Upload immutable build before tests can mutate the workspace
+      if: inputs.mode == 'produce' && steps.bundle.outputs.ready == 'true'
+      continue-on-error: true
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ steps.location.outputs.directory }}/bundle.json
+        if-no-files-found: error
+        retention-days: 1
