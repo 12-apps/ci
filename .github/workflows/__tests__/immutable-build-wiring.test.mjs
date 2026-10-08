@@ -19,3 +19,15 @@ test('Reliability reports independently on failures as well as success',()=>{
   assert.match(reliability,/if: \$\{\{ always\(\) && steps\.changed-specs\.outputs\.any == 'true' \}\}/);
   assert.match(reliability,/name: e2e-reliability-report/);assert.doesNotMatch(reliability,/name: spa-e2e-report/);
 });
+
+test('publication readiness is exported conservatively through job and workflow',()=>{
+  assert.match(quality,/e2e-build-artifact-ready:[\s\S]*?jobs\.e2e-reliability\.outputs\.build-artifact-ready \|\| 'false'/);
+  assert.match(reliability,/build-artifact-ready: \$\{\{ steps\.build-artifact\.outputs\.published \|\| 'false' \}\}/);
+  assert.match(reliability,/name: Publish immutable workspace build[^\n]*\n        id: build-artifact/);
+});
+test('published requires successful upload, not just a valid local bundle',()=>{
+  const action=readFileSync(new URL('../../actions/immutable-build-artifact/action.yml',import.meta.url),'utf8');
+  assert.match(action,/published:[\s\S]*?inputs\.mode == 'produce' && steps\.upload\.outcome == 'success' && steps\.upload\.outputs\.artifact-id != '' && 'true' \|\| 'false'/);
+  assert.match(action,/name: Upload immutable build[^\n]*\n      id: upload/);
+  assert.match(action,/continue-on-error: true/);
+});

@@ -22,6 +22,10 @@ name: Quality (reusable)
 
 on:
   workflow_call:
+    outputs:
+      e2e-build-artifact-ready:
+        description: A same-run immutable build was uploaded; false when absent or uncertain.
+        value: ${{ jobs.e2e-reliability.outputs.build-artifact-ready || 'false' }}
     secrets:
       NPM_TOKEN:
         description: >-
@@ -1207,6 +1211,8 @@ jobs:
           key: e2e-last-run-${{ github.ref }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   e2e-reliability:
+    outputs:
+      build-artifact-ready: ${{ steps.build-artifact.outputs.published || 'false' }}
     name: E2E Reliability
     if: ${{ inputs.run-e2e-reliability }}
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
@@ -1291,6 +1297,7 @@ jobs:
           ${{ inputs.pre-e2e-command }} 2>&1 | tee pre-e2e.log
       # Same action as the reliability lane above — one place to fix the stall.
       - name: Publish immutable workspace build before reliability tests
+        id: build-artifact
         if: ${{ steps.changed-specs.outputs.any == 'true' && inputs.pre-e2e-command != '' && inputs.e2e-build-artifact-name != '' && inputs.e2e-build-artifact-paths != '' }}
         uses: 12-apps/ci/.github/actions/immutable-build-artifact@v2
         with:
