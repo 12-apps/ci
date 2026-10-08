@@ -1,6 +1,6 @@
 # Record sleeps in mocked refresh-image tests
 
-**Status:** Open — not a decision. ENGINE ownership (`12-apps/ci`).
+**Status:** Kept — hosted source proof; final-head checks and normal release verification pending. ENGINE ownership (`12-apps/ci`).
 Consumer history: FuturePay `docs/ci/log/draft-refresh-tests-record-sleep.md`.
 Baseline source: `1208c421d9cf8953507d6a36bd6acd08a4252514`.
 
@@ -35,8 +35,7 @@ limit both exit 1; neither mutation is in the proposed result.
 
 Run `node --test scripts/runner-host/wake/__tests__/refresh-image.test.mjs`.
 The existing Self Tests runner-host glob discovers this suite. Hosted final-head
-33/33 counts and job-step timing, independent review and normal release proof
-are needed before a keep verdict. No real AWS operation or fleet deployment is
+33/33 counts and job-step timing plus independent review are needed before a keep verdict. Normal release proof follows the authorized merge. No real AWS operation or fleet deployment is
 part of this experiment.
 
 Verdict target: 2026-10-09 12:00 UTC on the draft PR. Revert criteria: any one
