@@ -30,3 +30,14 @@ omitted-root and altered-metadata controls reject reuse before replacing outputs
 A public hosted fixture now exercises actual artifact upload/download, matching
 reuse, missing artifact, changed command/environment and truncated manifest,
 with a mutated producer and fresh independent consumer database marker.
+
+Hosted run37805188422 at b27313a passes all five real transfer controls. Matching
+job113407609425 reports `Immutable build reused: 2 verified files, 49 output bytes`
+and skips fallback; missing, wrong command/environment and omitted-file manifest
+controls all build locally. Corrupt job113407609415 confirms manifest digest
+mismatch. Every consumer retains its fresh database marker after producer mutation.
+Review round2 closed the original blocker with 24/24 focused tests and zero
+remaining blockers. Actual local consumer builds (baseline12.829s versus normalized
+producer environment12.079s) produce identical20 files/79,631 bytes. No hosted
+consumer speed claim is implied. Normal release and exact-consumer proof remain
+required before adopting its inputs.
