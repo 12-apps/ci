@@ -52,3 +52,24 @@ test('empty compiled directories survive without sharing database state',t=>{
   assert.equal(readFileSync(join(f.target,'packages/a/dist/index.js'),'utf8'),'export const value=42;');
   assert.doesNotThrow(()=>mkdirSync(join(f.target,'packages/a/dist/empty/child')));
 });
+
+for(const mutation of ['omitted file','omitted root','omitted directory','changed mode','changed path']) {
+  test(`${mutation} rejects incomplete or altered manifest without replacing outputs`,t=>{
+    const f=fixture(t);
+    mkdirSync(join(f.source,'packages/b/dist'),{recursive:true});
+    writeFileSync(join(f.source,'packages/b/dist/second.js'),'second');
+    f.bundle=createBundle(f.source,['packages/*/dist'],identity);
+    mkdirSync(join(f.target,'packages/a/dist'));writeFileSync(join(f.target,'packages/a/dist/existing.js'),'retain');
+    if(mutation==='omitted file')f.bundle.files.pop();
+    if(mutation==='omitted root'){f.bundle.roots.pop();f.bundle.files=f.bundle.files.filter(f=>!f.path.startsWith('packages/b/'));f.bundle.directories=f.bundle.directories.filter(d=>!d.startsWith('packages/b/'));}
+    if(mutation==='omitted directory')f.bundle.directories.pop();
+    if(mutation==='changed mode')f.bundle.files[0].mode=0o700;
+    if(mutation==='changed path')f.bundle.files[0].path='packages/a/dist/renamed.js';
+    assert.throws(()=>restoreBundle(f.target,['packages/*/dist'],identity,f.bundle));
+    assert.equal(readFileSync(join(f.target,'packages/a/dist/existing.js'),'utf8'),'retain');
+  });
+}
+test('dangling consumer symlink rejects reuse',t=>{
+  const f=fixture(t);symlinkSync(join(f.dir,'missing'),join(f.target,'packages/a/dist'));
+  assert.throws(()=>restoreBundle(f.target,['packages/*/dist'],identity,f.bundle),/symlink/);
+});

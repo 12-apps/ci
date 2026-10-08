@@ -10,7 +10,7 @@ Missing, incompatible, corrupt and unsafe artifacts retain the local build.
 Artifacts contain regular compiled files and directories only; database/server
 state and node_modules never cross jobs. Reports remain independent.
 
-Local controls: 331/331 engine tests, including identity mutations, corruption,
+Local controls: 337/337 engine tests, including identity mutations, corruption,
 traversal, symlinks, empty compiled directories and workflow placement. Hosted
 artifact-transfer and actual consumer controls remain required before merge.
 No build-duration, job-second, critical-path or dollar savings claimed.
@@ -23,3 +23,10 @@ are attributed to it. Prior Playwright optimization is not counted here.
 
 Rollback: leave consumer inputs empty and retain its original workspace build.
 Target: assess actual transfer and consumer measurements by 2026-10-09 12:00 UTC.
+
+Independent review R1 found an incomplete-manifest reuse bug. A complete manifest
+digest now binds output paths, modes, roots, directories and files; omitted-file,
+omitted-root and altered-metadata controls reject reuse before replacing outputs.
+A public hosted fixture now exercises actual artifact upload/download, matching
+reuse, missing artifact, changed command/environment and truncated manifest,
+with a mutated producer and fresh independent consumer database marker.

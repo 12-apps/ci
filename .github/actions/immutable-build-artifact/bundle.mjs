@@ -67,7 +67,8 @@ export function createBundle(root,patterns,identity) {
   };
   for(const r of roots)walk(r);
   if(!files.length)throw new Error('no immutable outputs to publish');
-  return {version:1,patterns,roots,identity,directories:directories.sort(),files:files.sort((a,b)=>a.path.localeCompare(b.path))};
+  const manifest={version:1,patterns,roots,identity,directories:directories.sort(),files:files.sort((a,b)=>a.path.localeCompare(b.path))};
+  return {...manifest,manifestDigest:digest(JSON.stringify(manifest))};
 }
 export function restoreBundle(root,patterns,identity,bundle) {
   patterns=descriptor(patterns);
@@ -91,6 +92,8 @@ export function restoreBundle(root,patterns,identity,bundle) {
   }
   for(const r of bundle.roots)noSymlinks(root,r);
   for(const d of bundle.directories)noSymlinks(root,d);
+  const manifest={version:bundle.version,patterns:bundle.patterns,roots:bundle.roots,identity:bundle.identity,directories:bundle.directories,files:bundle.files};
+  if(bundle.manifestDigest!==digest(JSON.stringify(manifest)))throw new Error('immutable manifest digest mismatch');
   // Validate the complete bundle before touching consumer outputs. Staging
   // contains regular files only; databases/server processes are never shared.
   const stage=mkdtempSync(join(root,'.immutable-build-stage-'));

@@ -1,0 +1,113 @@
+name: Immutable build artifact controls
+on:
+  pull_request:
+    paths:
+      - '.github/actions/immutable-build-artifact/**'
+      - '.github/workflows/immutable-build-probe.yml'
+      - '.github/workflows/quality.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  producer:
+    name: Publish immutable outputs before mutation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '10.34.5'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Build real fixture outputs
+        run: |
+          node .github/actions/immutable-build-artifact/probe.mjs prepare "$RUNNER_TEMP/immutable-fixture"
+          node .github/actions/immutable-build-artifact/probe.mjs build "$RUNNER_TEMP/immutable-fixture"
+      - id: publish
+        env:
+          AUTH_SECRET: ''
+        uses: ./.github/actions/immutable-build-artifact
+        with:
+          working-directory: ${{ runner.temp }}/immutable-fixture
+          mode: produce
+          artifact-name: immutable-control-${{ github.run_id }}-${{ github.run_attempt }}
+          paths: packages/*/dist
+          build-command: fixture-build
+      - name: Assert publish then mutate producer state
+        env:
+          READY: ${{ steps.publish.outputs.ready }}
+        run: |
+          test "$READY" = true
+          echo changed-after-upload > "$RUNNER_TEMP/immutable-fixture/packages/a/dist/index.js"
+          echo producer-mutated-database > "$RUNNER_TEMP/immutable-fixture/.pglite/state"
+  consumer:
+    name: Artifact ${{ matrix.scenario }}
+    needs: producer
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [matching, missing, wrong-command, wrong-environment, corrupt]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '10.34.5'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Prepare fresh consumer state
+        run: node .github/actions/immutable-build-artifact/probe.mjs prepare "$RUNNER_TEMP/immutable-fixture"
+      - name: Download for corruption control
+        if: matrix.scenario == 'corrupt'
+        uses: actions/download-artifact@v4
+        with:
+          name: immutable-control-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/corrupt-download
+      - name: Prepare incomplete manifest
+        if: matrix.scenario == 'corrupt'
+        env:
+          ARTIFACT_NAME: immutable-control-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          node .github/actions/immutable-build-artifact/main.mjs locate
+          destination=$(node --input-type=module -e 'import {digest} from "./.github/actions/immutable-build-artifact/bundle.mjs"; console.log(`${process.env.RUNNER_TEMP}/immutable-build-${digest(process.env.ARTIFACT_NAME).slice(0,16)}`)')
+          cp "$RUNNER_TEMP/corrupt-download/bundle.json" "$destination/bundle.json"
+          node .github/actions/immutable-build-artifact/probe.mjs corrupt "$RUNNER_TEMP/immutable-fixture"
+      - id: restore
+        if: matrix.scenario != 'corrupt'
+        uses: ./.github/actions/immutable-build-artifact
+        env:
+          AUTH_SECRET: ${{ matrix.scenario == 'wrong-environment' && 'changed' || '' }}
+        with:
+          working-directory: ${{ runner.temp }}/immutable-fixture
+          mode: restore
+          artifact-name: ${{ matrix.scenario == 'missing' && 'deliberately-missing-control' || format('immutable-control-{0}-{1}', github.run_id, github.run_attempt) }}
+          paths: packages/*/dist
+          build-command: ${{ matrix.scenario == 'wrong-command' && 'different-build' || 'fixture-build' }}
+      - id: corrupt
+        if: matrix.scenario == 'corrupt'
+        env:
+          ARTIFACT_NAME: immutable-control-${{ github.run_id }}-${{ github.run_attempt }}
+          BUILD_PATHS: packages/*/dist
+          BUILD_COMMAND: fixture-build
+          AUTH_SECRET: ''
+          BUILD_ENV_NAMES: |
+            CI
+            NODE_ENV
+            USE_FILE_DB
+            SKIP_ENV_VALIDATION
+            AUTH_SECRET
+        run: |
+          cd "$RUNNER_TEMP/immutable-fixture"
+          node "$GITHUB_WORKSPACE/.github/actions/immutable-build-artifact/main.mjs" restore
+      - name: Existing build fallback
+        if: steps.restore.outputs.ready != 'true'
+        run: node .github/actions/immutable-build-artifact/probe.mjs build "$RUNNER_TEMP/immutable-fixture"
+      - name: Verify real outputs and independent database
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+          READY: ${{ steps.restore.outputs.ready || steps.corrupt.outputs.ready }}
+        run: node .github/actions/immutable-build-artifact/probe.mjs assert "$RUNNER_TEMP/immutable-fixture" "$SCENARIO"
