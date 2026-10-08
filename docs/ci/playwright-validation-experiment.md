@@ -53,3 +53,9 @@ merged and shown harmful, revert the experiment source commit, prove the restore
 baseline guards and verify the normal v2 release before consumer readiness.
 No draft becomes ready and no rollout is treated as a decision after the target
 without the complete verdict and required reviews/checks.
+
+## Hosted real-browser controls
+
+Isolated companion [probe#171](https://github.com/12-apps/ci/pull/171), [run37733066736/job113166375541](https://github.com/12-apps/ci/actions/runs/37733066736/job/113166375541), exercises immutable baseline1208c42 and candidate0d1e78b using public Playwright1.61.1. Baseline setup took31s including the cold browser/download/system-dependency work; candidate on the now-working browser took1964ms and logged `validation passed; dependency installation is unnecessary`. This is a constructed cold-baseline/warm-candidate control, not an apples-to-apples production timing comparison to the historical590s stall.
+
+Actual wrong-version validation failed; an isolated node:24-bookworm-slim container failed the exact headless browser on missinglibglib-2.0.so.0; removing the exact headless executable selected bounded fallback; failing its pnpm installer propagated nonzero; restoring the executable passed the real launch/page/evaluation. All probe steps passed. The first probe revision lacked the pnpm CLI and was superseded before its baseline ran; its PR title failed the imperative rule and was corrected. No intentionally failing mutation or companion workflow will merge. This resolves the real-positive-control gap despite local CDN403. Normal release and the real FuturePay consumer remain separate required checks.
