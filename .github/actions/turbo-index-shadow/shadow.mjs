@@ -1,12 +1,11 @@
-import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { runBounded } from '../setup-playwright/install-playwright.mjs';
+import { readPrivateJson } from './bounded-output.mjs';
 import { decideRestore, makeIndex, SUPPORTED_TURBO } from './index.mjs';
 
-const MAX_INDEX = 4_000_000, MAX_PLAN = 32_000_000;
+const MAX_INDEX = 4_000_000;
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const safeKey = key => typeof key === 'string' && /^[A-Za-z0-9_.:/-]{1,512}$/.test(key);
 const usage = () => ({ time: performance.now(), cpu: process.cpuUsage(), io: process.resourceUsage() });
@@ -41,17 +40,9 @@ function inventory(root, key, version) {
 // The raw Turbo JSON can contain configured environment VALUES. Keep it in an
 // owned 0700 temporary directory, never print/upload it, and remove it finally.
 export async function currentPlan(directory, affected) {
-  const path = join(directory, 'private-dry-run.json'), fd = openSync(path, 'wx', 0o600);
-  try {
-    const args = ['exec', 'turbo', 'run', 'build', '--dry=json', '--no-daemon'];
-    if (affected) args.push('--affected');
-    const result = await runBounded('pnpm', args, { timeoutMs: 30_000, graceMs: 5_000,
-      spawnFn: (cmd, argv, options) => spawn(cmd, argv, { ...options, stdio: ['ignore', fd, 'ignore'] }),
-      log: () => {},
-    });
-    if (!result.ok || statSync(path).size > MAX_PLAN) throw new Error('bounded dry-run unavailable');
-    return JSON.parse(readFileSync(path, 'utf8'));
-  } finally { closeSync(fd); rmSync(path, { force: true }); }
+  const args = ['exec', 'turbo', 'run', 'build', '--dry=json', '--no-daemon'];
+  if (affected) args.push('--affected');
+  return readPrivateJson(directory, 'pnpm', args);
 }
 function observerEnvironment(plan) {
   const parts = [plan?.globalCacheInputs?.environmentVariables, ...(plan?.tasks ?? []).map(t => t.environmentVariables)];
@@ -111,6 +102,8 @@ export async function capture({ root, temp, matchedKey, cleanBeforeRestore, vers
     report.metrics = elapsed(started);
     return { report, ready: true, indexPath, statePath };
   } catch {
+    // Only this call's exclusive temporary directory is eligible for cleanup.
+    if (directory) rmSync(directory, { recursive: true, force: true });
     report.decision = { restore: true, reason: 'inventory, identity or bounded dry-run unavailable' };
     report.metrics = elapsed(started);
     return { report, ready: false };
