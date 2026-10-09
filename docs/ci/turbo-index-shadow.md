@@ -133,3 +133,21 @@ cleanup warnings and a terminated zombie waiting for PID 1); those tests and
 their action are unchanged. Hosted exact-head checks and independent review
 remain required. This tiny cross-job proof cannot establish representative
 Future Pay net savings or billed-cost reduction. Default rejection remains.
+
+## Paired build termination correction — 2026-10-09
+
+Before activating the cross-job probe, replace its synchronous build invocation:
+Node's synchronous timeout could wait forever for a SIGTERM-resistant child,
+and failure/summary parse errors left environment-bearing run summaries behind.
+The asynchronous build now owns a detached process group, sends TERM at 30s and
+KILL after at most 5s grace, sweeps remaining group members on wrapper exit,
+and removes its exclusively created summaries directory in `finally`. Existing
+summaries are refused and preserved. No runner-wide process killing is used.
+
+Nine new controls cover nonzero exit, missing/invalid/unreadable summaries,
+invalid summary shape/output, spawn failure, pre-existing ownership, and actual
+TERM-resistant processes/descendants. The focused action plus workflow set
+passes 74/74 locally (69 action controls and five unchanged workflow controls),
+zero skips/retries. The independent code review found no concrete blockers in
+the engine correction; hosted cross-job enrollment and final evidence remain
+separate review items. No normal Build behavior or action pins changed.

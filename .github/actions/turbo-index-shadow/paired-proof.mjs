@@ -1,6 +1,6 @@
 // Isolated correctness probe; never called by normal Build or production keys.
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -81,22 +81,66 @@ async function plan(root, turbo) {
     spawnFn: (command, args, options) => spawn(command, args, { ...options, cwd: root }),
   }); } finally { rmSync(privateDir, { recursive: true, force: true }); }
 }
-function build(root, turbo) {
-  const started = performance.now();
-  const result = spawnSync(turbo, ['run', 'build', '--no-daemon', '--summarize'], { cwd: root, encoding: 'utf8', timeout: 30_000, maxBuffer: 512_000 });
-  assert.equal(result.status, 0, 'all three actual tasks must succeed');
-  const files = readdirSync(join(root, '.turbo', 'runs')).filter(name => name.endsWith('.json')).sort();
-  const summary = JSON.parse(readFileSync(join(root, '.turbo', 'runs', files.at(-1)), 'utf8'));
-  const tasks = summary.tasks.map(task => ({ taskId: task.taskId, hash: task.hash, cacheStatus: task.cache.status, exitCode: task.execution?.exitCode ?? null }));
-  // Summary JSON may contain configured environment values. Read only the
-  // fields above and remove the owned summaries before any cache publication.
-  rmSync(join(root, '.turbo', 'runs'), { recursive: true });
-  assert.equal(tasks.length, 3);
-  for (const name of ['a', 'b', 'c']) {
-    const dir = join(root, 'packages', name), output = JSON.parse(readFileSync(join(dir, 'dist', 'out.json')));
-    assert.deepEqual(output, { name: `proof-${name}`, inputSha256: sha(readFileSync(join(dir, 'input.txt'))) });
+// Only this detached process group belongs to the probe. Never signal a
+// runner-wide process name or PID list; descendants inherit this group.
+async function runBuild(root, turbo, timeoutMs, graceMs) {
+  await new Promise((resolve, reject) => {
+    let child, deadline, hardKill, settled = false, failure;
+    const signal = kind => {
+      if (!child?.pid) return;
+      try { process.kill(-child.pid, kind); }
+      catch (error) { if (error.code !== 'ESRCH') failure = 'termination-unproved'; }
+    };
+    const finish = code => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline); clearTimeout(hardKill);
+      signal('SIGKILL');
+      if (failure || code !== 0) reject(new Error(`isolated build failed: ${failure ?? 'child-failed'}`));
+      else resolve();
+    };
+    try {
+      // No child output or environment-bearing summary reaches public logs.
+      child = spawn(turbo, ['run', 'build', '--no-daemon', '--summarize'], {
+        cwd: root, detached: true, stdio: 'ignore',
+      });
+    } catch { finish(null); return; }
+    child.once('error', () => { failure = 'spawn-failed'; finish(null); });
+    child.once('close', finish);
+    deadline = setTimeout(() => {
+      failure = 'timeout'; signal('SIGTERM');
+      hardKill = setTimeout(() => signal('SIGKILL'), graceMs);
+    }, timeoutMs);
+  });
+}
+
+export async function build(root, turbo, { timeoutMs = 30_000, graceMs = 5_000 } = {}) {
+  assert.ok(Number.isFinite(timeoutMs) && timeoutMs > 0 && Number.isFinite(graceMs) && graceMs >= 0);
+  assert.equal(readFileSync(join(root, '.owned-paired-proof'), 'utf8'), 'isolated-v1');
+  const started = performance.now(), runs = join(root, '.turbo', 'runs');
+  mkdirSync(join(root, '.turbo'), { recursive: true });
+  // Refuse an existing summary directory: finally owns only what we created.
+  mkdirSync(runs, { mode: 0o700 });
+  try {
+    await runBuild(root, turbo, timeoutMs, graceMs);
+    const files = readdirSync(runs).filter(name => name.endsWith('.json'));
+    assert.equal(files.length, 1, 'exactly one summary from this build');
+    const path = join(runs, files[0]);
+    assert.ok(statSync(path).size <= 512_000, 'isolated summary byte bound');
+    let summary;
+    try { summary = JSON.parse(readFileSync(path, 'utf8')); }
+    catch { throw new Error('isolated build summary unavailable'); }
+    const tasks = summary.tasks.map(task => ({ taskId: task.taskId, hash: task.hash, cacheStatus: task.cache.status, exitCode: task.execution?.exitCode ?? null }));
+    assert.equal(tasks.length, 3);
+    for (const name of ['a', 'b', 'c']) {
+      const dir = join(root, 'packages', name), output = JSON.parse(readFileSync(join(dir, 'dist', 'out.json')));
+      assert.deepEqual(output, { name: `proof-${name}`, inputSha256: sha(readFileSync(join(dir, 'input.txt'))) });
+    }
+    return { wallMs: performance.now() - started, tasks, hits: tasks.filter(task => task.cacheStatus === 'HIT').length, outputsVerified: 3 };
+  } finally {
+    // Includes nonzero exit, timeout, spawn, read, parse and output assertions.
+    rmSync(runs, { recursive: true, force: true });
   }
-  return { wallMs: performance.now() - started, tasks, hits: tasks.filter(task => task.cacheStatus === 'HIT').length, outputsVerified: 3 };
 }
 
 export function controlledDecision(name, index, current, key, now = Date.now()) {
@@ -112,7 +156,7 @@ export async function runPairedProof({ phase, root, tools, key, expectedSha, emi
   const cache = createRequire(join(tools, 'package.json'))('@actions/cache');
   const turbo = join(tools, 'node_modules', '.bin', 'turbo'), started = performance.now();
   if (phase === 'producer') {
-    fixture(root); const built = build(root, turbo);
+    fixture(root); const built = await build(root, turbo);
     assert.equal(built.hits, 0); emit({ phase: 'producer-build', ...built });
     const receipt = await savePaired({ root, key, cache, emit });
     emit({ phase: 'producer-total', wallMs: performance.now() - started }); return receipt;
@@ -142,7 +186,7 @@ export async function runPairedProof({ phase, root, tools, key, expectedSha, emi
     const payload = decision.restore ? await measured(() => cache.restoreCache([join(root, '.turbo')], key)) : { value: null, wallMs: 0 };
     if (decision.restore) assert.equal(payload.value, key);
     else assert.deepEqual(makeIndex(root, key, '2.7.5').hashes, [], 'zero case omitted actual payload transport');
-    const built = build(root, turbo);
+    const built = await build(root, turbo);
     assert.equal(built.hits, name === 'zero' ? 0 : name === 'partial' ? 2 : 3);
     emit({ phase: 'consumer-case', name, key, indexMatchedKey: indexTransport.value ?? null, indexRawBytes: rawBytes,
       originalTransportDigestVerified: transportVerified, corruptionScope: name === 'corrupt' ? 'owned received-file tamper; backend corruption not exercised' : null,
