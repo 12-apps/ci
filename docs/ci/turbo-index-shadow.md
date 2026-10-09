@@ -14,13 +14,15 @@ The optional enrollment is false by default. A consumer probe enrolls one normal
 Build through a comment-only change in a real Build input; it does not disable
 the existing fingerprint or force a full suite. Normal PR checks remain.
 
-Hard additional envelope: four assigned runner-minutes, consisting of a
+Hard explicit observer-step envelope: four minutes, consisting of a
 one-minute clean-overlay check before restore, two minutes for observation and
 one tiny-cache upload/lookup/restore, and one minute for post-Build inventory.
 The dry-run is bounded at 30 seconds plus five seconds termination grace,
 32 MB output, 100,000 inventory entries and a 4 MB raw index. No additional
-payload restore, dependency install or Build repetition occurs. This is a
-resource ceiling, not a billed-cost estimate or the cost of ordinary checks.
+payload restore, dependency install or Build repetition occurs. GitHub action
+preparation is outside these step timers; record it separately. The normal
+Build job's existing 45-minute timeout remains unchanged. Four minutes is not
+a bound on all incremental cost, an invoice estimate or ordinary-check cost.
 
 The before observation derives a receipt index from the current materialized
 normal restore's exact matched key and compares all actual planned hashes.
