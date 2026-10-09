@@ -110,3 +110,26 @@ restores are a sample lower bound, not lifetime/future fan-out. Seven empty
 graphs' 214 restore seconds are a separate opportunity because the conservative
 index retains restore for an empty graph. No repeated historical download or
 reconstruction was performed.
+# Streaming bound and separate-job proof continuation
+
+The private dry-run now enforces 32,000,000 bytes while reading stdout,
+exclusive 0600 output, 30-second timeout, owned group TERM/KILL and cleanup.
+The old post-exit cap counterexample allowed 35,651,584 bytes to finish;
+the new ten controls cover physical bounds, permissions and descendant cleanup.
+Both internal observer pins select the fixed action revision.
+
+`paired-proof.mjs` is an isolated three-task correctness probe, absent from
+normal workflow enrollment. It confirms a stable successful exact-key payload
+save before publishing its paired index, then exercises complete disjoint,
+useful, partial and five unsafe cases in a fresh dependent job. Six additional
+controls pin failed-save and pairing errors; hosted action tests discover both
+new files. The consumer append-only method and limits are in
+[draft-turbo-index-paired-proof.md](https://github.com/12-apps/future-pay/blob/ci/turbo-index-shadow-probe/docs/ci/log/draft-turbo-index-paired-proof.md).
+
+Local shadow/pairing/wiring controls pass 65/65 and a real Turbo rehearsal
+passes all eight cases with filesystem-only transport. Two unchanged local
+Playwright tests fail identically at the original engine head (extra local apt
+cleanup warnings and a terminated zombie waiting for PID 1); those tests and
+their action are unchanged. Hosted exact-head checks and independent review
+remain required. This tiny cross-job proof cannot establish representative
+Future Pay net savings or billed-cost reduction. Default rejection remains.

@@ -1454,7 +1454,7 @@ jobs:
         if: ${{ inputs.build-cache-index-shadow && steps.lane-verdict.outputs.hit != 'true' }}
         continue-on-error: true
         timeout-minutes: 2
-        uses: 12-apps/ci/.github/actions/turbo-index-shadow@74e7ccb6d5b1f886e68a5650dfc188fd6ceb2312
+        uses: 12-apps/ci/.github/actions/turbo-index-shadow@c61be55976bf4d266e6aae1af2ab8a58d3cfc8c1
         with:
           mode: before
           matched-key: ${{ steps.build-cache.outputs.cache-matched-key }}
@@ -1481,7 +1481,7 @@ jobs:
         if: ${{ inputs.build-cache-index-shadow && steps.lane-verdict.outputs.hit != 'true' }}
         continue-on-error: true
         timeout-minutes: 1
-        uses: 12-apps/ci/.github/actions/turbo-index-shadow@74e7ccb6d5b1f886e68a5650dfc188fd6ceb2312
+        uses: 12-apps/ci/.github/actions/turbo-index-shadow@c61be55976bf4d266e6aae1af2ab8a58d3cfc8c1
         with:
           mode: after
           save-key: turbo-build-${{ github.sha }}

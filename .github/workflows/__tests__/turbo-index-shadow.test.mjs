@@ -26,7 +26,7 @@ test('all advisory steps are opted in, verdict gated, warning only and bounded t
     assert.match(step, /continue-on-error: true/);
     assert.match(step, new RegExp(`timeout-minutes: ${bounds[i]}`));
   });
-  assert.equal(build.match(/turbo-index-shadow@74e7ccb6d5b1f886e68a5650dfc188fd6ceb2312/g)?.length, 2);
+  assert.equal(build.match(/turbo-index-shadow@c61be55976bf4d266e6aae1af2ab8a58d3cfc8c1/g)?.length, 2);
 });
 test('ordinary Build cannot consume any advisory decision', () => {
   assert.doesNotMatch(block(build, 'Build') + block(build, 'Restore turbo cache') + block(build, 'Save turbo cache'), /shadow|index/);
