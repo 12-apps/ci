@@ -78,6 +78,10 @@ jobs:
         shell: bash
         run: node --test .github/actions/setup-playwright/__tests__/*.test.mjs
 
+      - name: Turbo index shadow controls
+        shell: bash
+        run: node --test .github/actions/turbo-index-shadow/__tests__/*.test.mjs
+
       - name: vitest-signal-guard
         shell: bash
         run: node --test .github/actions/vitest-signal-guard/__tests__/check-test-signal.test.mjs
