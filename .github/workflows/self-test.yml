@@ -243,6 +243,10 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/turbo-cache-writes.test.mjs
 
+      - name: Turbo index shadow wiring
+        shell: bash
+        run: node --test .github/workflows/__tests__/turbo-index-shadow.test.mjs
+
       # No run: script pastes a secret — or an attacker-writable context — into
       # its own source.
       #

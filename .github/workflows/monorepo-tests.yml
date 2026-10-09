@@ -202,6 +202,11 @@ on:
         type: boolean
         required: false
         default: true
+      build-cache-index-shadow:
+        description: 'Bounded advisory observation only; retains normal restore/build/save. Experiment, not adoption.'
+        type: boolean
+        required: false
+        default: false
       pre-build-command:
         description: 'Shell run before the build (e.g. Prisma generate). Empty to skip.'
         type: string
@@ -1422,7 +1427,21 @@ jobs:
       # The prefix restore is unchanged and still does the work: a PR gets the
       # newest entry the default branch wrote, and turbo's own content hashes
       # decide what inside it is reusable. What a PR no longer does is WRITE.
+      - name: Check the Build shadow inventory baseline
+        id: build-shadow-baseline
+        if: ${{ inputs.build-cache-index-shadow && steps.lane-verdict.outputs.hit != 'true' }}
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          if [ -e .turbo ] || [ -L .turbo ]; then
+            echo 'clean=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'clean=true' >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Restore turbo cache
+        id: build-cache
         if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         uses: actions/cache/restore@v4
         with:
@@ -1430,6 +1449,17 @@ jobs:
           key: turbo-build-${{ github.sha }}
           restore-keys: |
             turbo-build-
+
+      - name: Observe the current Build index and tiny transport
+        if: ${{ inputs.build-cache-index-shadow && steps.lane-verdict.outputs.hit != 'true' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: 12-apps/ci/.github/actions/turbo-index-shadow@74e7ccb6d5b1f886e68a5650dfc188fd6ceb2312
+        with:
+          mode: before
+          matched-key: ${{ steps.build-cache.outputs.cache-matched-key }}
+          clean-before-restore: ${{ steps.build-shadow-baseline.outputs.clean }}
+          selection-base: ${{ steps.selection.outputs.base-sha }}
 
       - name: Build
         if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
@@ -1446,6 +1476,15 @@ jobs:
           else
             pnpm turbo run build 2>&1 | tee build.log
           fi
+
+      - name: Observe the normal Build producer inventory
+        if: ${{ inputs.build-cache-index-shadow && steps.lane-verdict.outputs.hit != 'true' }}
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: 12-apps/ci/.github/actions/turbo-index-shadow@74e7ccb6d5b1f886e68a5650dfc188fd6ceb2312
+        with:
+          mode: after
+          save-key: turbo-build-${{ github.sha }}
 
       # Write only off a pull request. The default branch's entry is what every
       # PR restores by prefix, so it is the only one worth the upload — and it

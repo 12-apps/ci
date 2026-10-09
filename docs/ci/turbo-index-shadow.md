@@ -6,6 +6,9 @@ evidence remain in Future Pay. No accepted ADR is contradicted.
 Default adoption of ci172 remains rejected. Its 8/8 useful-hit control added
 1.774 seconds; zero-hit frequency alone never establishes eligibility or cash.
 This experiment changes no normal restore, Build, save, lane verdict or gate.
+GitHub can prepare/download referenced actions even for disabled steps;
+default-false does not prove zero preparation overhead. Measure that before
+considering a release. This engine PR remains an unmerged experiment.
 
 The optional enrollment is false by default. A consumer probe enrolls one normal
 Build through a comment-only change in a real Build input; it does not disable
