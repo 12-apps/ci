@@ -148,15 +148,28 @@ test('selection globals work without skip-green configured', () => {
 for (const change of ['direct', 'transitive', 'inconclusive']) test(`selection-only ${change} inputs invalidate reusable proof`, () => {
   const options = config(['^runner/setup\\.mjs$']);
   options.lanes.unit.skipGreen.globals = [];
-  const { root, base } = repo(FILES, options);
-  selectAll(root, FILES);
+  const files = { ...FILES,
+    'src/reader.test.mjs': "import assert from 'node:assert/strict'; assert.equal(globalThis.setupValue, 1);\n",
+    'shared/setup.mjs': 'export function setup() { globalThis.setupValue = 1; }\n',
+  };
+  const { root, base } = repo(files, options);
+  selectAll(root, files);
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT; // Nested node --test must launch actual child tests.
+  const execute = () => spawnSync(process.execPath,
+    ['--import', './runner/setup.mjs', '--test', 'src/reader.test.mjs', 'src/other.test.mjs'],
+    { cwd: root, encoding: 'utf8', env });
+  const passing = execute();
+  assert.equal(passing.status, 0, passing.stderr);
+  assert.match(passing.stdout, /tests 2/);
   const first = plan(root, base).doc;
   const previous = record(first, root);
   commit(root, change === 'direct'
     ? { 'runner/setup.mjs': "globalThis.setupValue = 2;\n" }
     : { 'shared/setup.mjs': change === 'transitive'
-      ? 'export function setup() { console.log(3); }\n'
+      ? 'export function setup() { globalThis.setupValue = 2; }\n'
       : "import './missing.mjs';\n" });
+  assert.notEqual(execute().status, 0, 'changed runtime must actually break the previous assertion');
   const second = plan(root, base).doc;
   assert.deepEqual(second.tests, ['src/other.test.mjs', 'src/reader.test.mjs']);
   if (change === 'transitive') assert.ok(second.globalFiles.includes('shared/setup.mjs'));
