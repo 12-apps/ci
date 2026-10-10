@@ -144,3 +144,25 @@ test('selection globals work without skip-green configured', () => {
   assert.deepEqual(doc.tests, ['src/other.test.mjs', 'src/reader.test.mjs']);
   assert.equal(Object.hasOwn(doc, 'inputs'), false);
 });
+
+for (const change of ['direct', 'transitive', 'inconclusive']) test(`selection-only ${change} inputs invalidate reusable proof`, () => {
+  const options = config(['^runner/setup\\.mjs$']);
+  options.lanes.unit.skipGreen.globals = [];
+  const { root, base } = repo(FILES, options);
+  selectAll(root, FILES);
+  const first = plan(root, base).doc;
+  const previous = record(first, root);
+  commit(root, change === 'direct'
+    ? { 'runner/setup.mjs': "globalThis.setupValue = 2;\n" }
+    : { 'shared/setup.mjs': change === 'transitive'
+      ? 'export function setup() { console.log(3); }\n'
+      : "import './missing.mjs';\n" });
+  const second = plan(root, base).doc;
+  assert.deepEqual(second.tests, ['src/other.test.mjs', 'src/reader.test.mjs']);
+  if (change === 'transitive') assert.ok(second.globalFiles.includes('shared/setup.mjs'));
+  for (const file of second.tests) {
+    assert.notEqual(second.inputs[file], first.inputs[file]);
+    if (change === 'inconclusive') assert.equal(second.inputs[file], null);
+  }
+  assert.deepEqual(filter(second, previous).kept, second.tests);
+});

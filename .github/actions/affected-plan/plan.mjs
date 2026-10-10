@@ -498,6 +498,9 @@ if (skipGreen || Object.hasOwn(laneConfig, "selectionGlobals")) {
       throw new Error("selectionGlobals must be an array of regex strings");
     }
     selectionGlobals = declared.map((source) => new RegExp(source));
+    // Selection may be broader than skipGreen.globals. Every selection-global
+    // and its closure must invalidate proof; hash-only globals stay selection-neutral.
+    globals = [...globals, ...selectionGlobals];
     inputTree = treeIndex(repoRoot);
     const roots = [...inputTree.keys()].filter((file) => globals.some((re) => re.test(file)));
     // buildGraph follows source dependencies beyond these roots; data files

@@ -435,6 +435,9 @@ preserve the legacy behavior: all hash globals also select the lane. An explicit
 members or invalid regexes fail to a full plan with positive shards.
 
 Both sets close over transitive imports and static runtime-input routes.
+Selection globals also join the cache inputs: a runner-wide selection change
+must never reuse a proof from before that change, even when absent from
+`skipGreen.globals`. Hash-only inputs do not widen selection.
 Unresolved selection globals widen the lane; unresolved hash globals prohibit
 reuse without overriding a demonstrably targeted selection. Keep actual runner
 configs/setup dependencies in selection globals, and provide complete routes
