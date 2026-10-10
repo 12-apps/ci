@@ -483,20 +483,34 @@ let globals = [];
 let inputTree = null;
 let globalGraph = { edges: new Map(), unresolved: [] };
 let globalState = { files: new Set(), blind: false };
+let selectionGlobals = [];
+let selectionGraph = { edges: new Map(), unresolved: [] };
 const globalChanges = new Set();
 const globalTests = [...new Set(listSourceFiles(repoRoot, laneConfig.roots ?? dirs).filter(isTest))].sort();
-if (skipGreen) {
+if (skipGreen || Object.hasOwn(laneConfig, "selectionGlobals")) {
   try {
-    globals = (skipGreen.globals ?? []).map((source) => new RegExp(source));
+    globals = (skipGreen?.globals ?? []).map((source) => new RegExp(source));
+    // Absent preserves the legacy contract. Explicit [] opts into routes/source
+    // only; null or malformed input must never silently disable runner safety.
+    const declared = Object.hasOwn(laneConfig, "selectionGlobals")
+      ? laneConfig.selectionGlobals : (skipGreen?.globals ?? []);
+    if (!Array.isArray(declared) || declared.some((value) => typeof value !== "string")) {
+      throw new Error("selectionGlobals must be an array of regex strings");
+    }
+    selectionGlobals = declared.map((source) => new RegExp(source));
     inputTree = treeIndex(repoRoot);
     const roots = [...inputTree.keys()].filter((file) => globals.some((re) => re.test(file)));
     // buildGraph follows source dependencies beyond these roots; data files
     // are terminal inputs. Never bound this graph with isSource/sourceRoots.
     globalGraph = buildGraph(repoRoot, roots, { packages: loadPackages(repoRoot, dirs), aliasesFor });
+    const selectionRoots = [...inputTree.keys()].filter((file) => selectionGlobals.some((re) => re.test(file)));
+    selectionGraph = Object.hasOwn(laneConfig, "selectionGlobals")
+      ? buildGraph(repoRoot, selectionRoots, { packages: loadPackages(repoRoot, dirs), aliasesFor })
+      : globalGraph;
     globalState = globalInputs({
-      edges: globalGraph.edges,
-      blind: globalGraph.unresolved.map((item) => item.file),
-      globals, routes: inputRoutes, tree: inputTree,
+      edges: selectionGraph.edges,
+      blind: selectionGraph.unresolved.map((item) => item.file),
+      globals: selectionGlobals, routes: inputRoutes, tree: inputTree,
     });
   } catch (error) {
     console.error(`::warning::affected-plan (${lane}): could not resolve global inputs — running the FULL suite (${error.message})`);
@@ -505,7 +519,7 @@ if (skipGreen) {
   }
 }
 const isGlobalChange = (file) => globalState.blind || globalState.files.has(file) ||
-  (globalGraph.globs ?? []).some((glob) => glob.matches(file)) || globals.some((re) => re.test(file));
+  (selectionGraph.globs ?? []).some((glob) => glob.matches(file)) || selectionGlobals.some((re) => re.test(file));
 // If even the lane's inventory is unavailable, the runner must discover its
 // full suite. Do not turn a global change into an empty classified route.
 if (globalTests.length === 0 && [...changed, ...deleted].some(isGlobalChange)) {

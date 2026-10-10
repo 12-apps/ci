@@ -425,3 +425,22 @@ The `test-inputs-v2` format and green-manifest v2 retire earlier incomplete
 proofs. Source/runtime identity is separately included in the workflow's key.
 The caller must still declare runtime inputs that imports and database routing
 cannot discover; non-hermetic tests belong in the always-run list.
+
+### Selection globals and cache globals
+
+`lanes.<lane>.selectionGlobals` optionally declares runner-wide **selection**
+inputs separately from `skipGreen.globals` (cache invalidation). Omit it to
+preserve the legacy behavior: all hash globals also select the lane. An explicit
+`[]` selects through ordinary routes/source only. Null, a non-array, non-string
+members or invalid regexes fail to a full plan with positive shards.
+
+Both sets close over transitive imports and static runtime-input routes.
+Unresolved selection globals widen the lane; unresolved hash globals prohibit
+reuse without overriding a demonstrably targeted selection. Keep actual runner
+configs/setup dependencies in selection globals, and provide complete routes
+before removing datasets or manifests from them. Database-owned routing keeps
+its existing precedence. This option does not enable skip-green enforcement.
+
+Deploy the compatible engine first, wait for normal `v2` publication, then
+verify a fresh consumer run's resolved engine revision before consumer merge.
+Older engines ignore the new key and retain wider legacy selection.
