@@ -141,6 +141,10 @@ jobs:
             }
             const prNumber = pr.number;
             const headRef = pr.head.ref;
+            // Runs that start before this (a minute of slack for clock skew
+            // between the PR and Actions APIs) belong to an earlier PR on the
+            // same branch. Absent on a hand-built payload: then no bound.
+            const openedAt = pr.created_at ? Date.parse(pr.created_at) - 60_000 : null;
 
             // Lanes are optional; a rule that does not parse fails the job
             // rather than posting a table that silently files everything
@@ -210,13 +214,18 @@ jobs:
                 per_page: 100,
                 page,
               });
-              // `pull_requests` is populated for same-repo runs; for a fork the
-              // array is empty, so fall back to the head branch, which the API
-              // query already scoped us to.
+              // `pull_requests` is populated for same-repo runs of an OPEN PR.
+              // It is empty for a fork, and also for the runs of an earlier PR
+              // on the same branch once that PR closed: Renovate reopens every
+              // bump on one branch name (`chore/renovate-@12-apps-packages` held
+              // 23 PRs in two months), and the branch fallback billed all of
+              // them to the newest one — US$ 14.70 on a PR whose own runs cost
+              // US$ 0.47. So the fallback also needs the run to start after this
+              // PR was opened; a run from before it belongs to another PR.
               for (const r of data.workflow_runs) {
                 const tied = Array.isArray(r.pull_requests) && r.pull_requests.length
                   ? r.pull_requests.some((p) => p.number === prNumber)
-                  : r.head_branch === headRef;
+                  : r.head_branch === headRef && (!openedAt || Date.parse(r.created_at) >= openedAt);
                 if (tied) runs.push(r);
               }
               if (data.workflow_runs.length < 100) break;
