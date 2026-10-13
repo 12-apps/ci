@@ -1,6 +1,11 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { anomalies, category, diskChanges, disksInEffect, costByDay, offHours, reduceUsage, regionOf, renderHtml, taggedByDay, windowDays, windowUtilization } from "../daily-report.mjs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { anomalies, awsFromFile, category, diskChanges, disksInEffect, costByDay, offHours, reduceUsage, regionOf, renderHtml, taggedByDay, windowDays, windowUtilization } from "../daily-report.mjs";
 
 // The report is read as a phone notification and turned into tickets. A day
 // off by one, a cost filed under the wrong category or a rule that never fires
@@ -188,4 +193,49 @@ test("diskChanges folds one deploy across regions and finds when it was undone",
   assert.equal(moves[0].raised, true);
   assert.equal(moves[0].back, "2026-10-01T18:06:40Z");
   assert.equal(moves[1].raised, false);
+});
+
+// --aws-only / --aws-from split the report so the AWS half can run under an
+// OIDC role in a workflow and the GitHub half under a token with allowance.
+
+const saved = { v: 1, until: "2026-10-13", days: ["2026-10-11", "2026-10-12"], baseline: 0.69, cost: { all: {}, tagged: {} }, templates: [] };
+
+test("awsFromFile hands back the saved cost and templates for the same window", () => {
+  assert.deepEqual(awsFromFile(saved, { until: "2026-10-13", days: ["2026-10-11", "2026-10-12"], baseline: 0.69 }), { cost: saved.cost, templates: [] });
+});
+
+test("awsFromFile refuses a file read for another window, naming what differs", () => {
+  const want = { until: "2026-10-13", days: ["2026-10-11", "2026-10-12"], baseline: 0.69 };
+  assert.throws(() => awsFromFile(saved, { ...want, until: "2026-10-14" }), /until 2026-10-13, this run wants 2026-10-14/);
+  assert.throws(() => awsFromFile(saved, { ...want, days: ["2026-10-12"] }), /days/);
+  assert.throws(() => awsFromFile(saved, { ...want, baseline: 1 }), /baseline/);
+  assert.throws(() => awsFromFile({ ...saved, v: 2 }, want), /unknown format/);
+});
+
+test("--aws-only writes aws.json from the aws CLI alone: no GitHub token, no GitHub call", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "aws-only-"));
+  // A stand-in aws CLI: one Cost Explorer day, one template, no events.
+  const stub = path.join(dir, "aws");
+  writeFileSync(stub, `#!/usr/bin/env node
+const a = process.argv.slice(2);
+const day = { TimePeriod: { Start: "2026-10-12", End: "2026-10-13" }, Estimated: false,
+  Groups: [{ Keys: ["Amazon Elastic Compute Cloud - Compute", "EUN1-SpotUsage:m7a.2xlarge"], Metrics: { UnblendedCost: { Amount: "3" } } }] };
+const out = a[0] === "ce" ? { ResultsByTime: [day] }
+  : a[0] === "ec2" ? { LaunchTemplateVersions: [{ VersionNumber: 1, DefaultVersion: true, LaunchTemplateData: { BlockDeviceMappings: [{ Ebs: { VolumeType: "gp3", Iops: 3000, Throughput: 250, VolumeSize: 64 } }] } }] }
+  : { Events: [] };
+process.stdout.write(JSON.stringify(out));
+`);
+  chmodSync(stub, 0o755);
+  const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "daily-report.mjs");
+  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}` };
+  delete env.GITHUB_TOKEN;
+  execFileSync(process.execPath, [script, "--aws-only", "--until", "2026-10-13", "--days", "1", "--regions", "eu-north-1", "--out", dir], { env, stdio: "pipe" });
+  const file = JSON.parse(readFileSync(path.join(dir, "aws.json"), "utf-8"));
+  assert.equal(file.v, 1);
+  assert.equal(file.until, "2026-10-13");
+  assert.deepEqual(file.days, ["2026-10-12"]);
+  assert.equal(file.templates[0].region, "eu-north-1");
+  assert.ok(file.cost.all["2026-10-12"], "the day's cost is in the file");
+  // And it reads back for the same window.
+  assert.ok(awsFromFile(file, { until: "2026-10-13", days: ["2026-10-12"], baseline: 0.69 }).cost);
 });

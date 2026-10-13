@@ -8,12 +8,25 @@
 //     [--until YYYY-MM-DD] [--window 14-17] [--regions us-east-1,us-east-2,eu-north-1] \
 //     [--template ci-runner-fleet-future-pay-ci] [--label future-pay-ci] \
 //     [--workflow ci.yml] [--budget 100] [--baseline 0.69] [--out dir] [--pdf]
+//     [--aws-only | --aws-from aws.json]
 //
 // Writes report.json and report.html into --out (and report.pdf with --pdf,
 // through a headless Chromium: CHROME_PATH, else Playwright's, else
 // `chromium`). The AWS half shells out to the aws CLI, so the credentials stay
 // with whoever runs it; it needs ce:GetCostAndUsage, ec2:Describe* and
 // cloudtrail:LookupEvents.
+//
+// ## Splitting the AWS half off
+//
+// --aws-only reads Cost Explorer and the launch templates, writes them to
+// aws.json in --out and stops: no GitHub token, no GitHub call. --aws-from
+// aws.json takes that file in place of the aws CLI. So a workflow holding an
+// OIDC role can read AWS, and whoever holds a GitHub token with allowance to
+// spare (the usage half is ~3500 calls a week, past a workflow token's 1000 an
+// hour) builds the report, with no AWS credential on that side. The file
+// records the --until, days and --baseline it was read for, and --aws-from
+// refuses a file read for a different window: the cost would land on the
+// wrong days without anything looking wrong.
 //
 // ## The window
 //
@@ -45,7 +58,7 @@
 // over one week: a reader decides what becomes a ticket.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { collect, fetchRetrying, hostAndSlot, percentile, summarizeJobs } from "./usage-report.mjs";
@@ -631,6 +644,21 @@ async function spare(reserve) {
   await new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * The AWS half saved by --aws-only, checked against the window it is about to
+ * be used for. Throws naming the mismatch rather than reporting another
+ * window's cost under this one's days.
+ */
+export function awsFromFile(saved, { until, days, baseline }) {
+  if (saved?.v !== 1) throw new Error("aws file: unknown format (expected v 1, from --aws-only)");
+  const want = { until, days: days.join(","), baseline };
+  const got = { until: saved.until, days: (saved.days ?? []).join(","), baseline: saved.baseline };
+  for (const k of Object.keys(want)) {
+    if (want[k] !== got[k]) throw new Error(`aws file: read for ${k} ${got[k]}, this run wants ${want[k]}`);
+  }
+  return { cost: saved.cost, templates: saved.templates };
+}
+
 /** Cost Explorer, every page: a page holds a slice of the groups, so the days are merged. */
 function ce(args) {
   const byDay = new Map();
@@ -806,7 +834,8 @@ async function main() {
     process.argv.slice(2).reduce((acc, a, i, all) => (a.startsWith("--") ? [...acc, [a.slice(2), all[i + 1]?.startsWith("--") || all[i + 1] === undefined ? "true" : all[i + 1]]] : acc), []),
   );
   const repo = args.repo;
-  if (!repo || !process.env.GITHUB_TOKEN) {
+  const awsOnly = Boolean(args["aws-only"]);
+  if (!awsOnly && (!repo || !process.env.GITHUB_TOKEN)) {
     console.error("usage: GITHUB_TOKEN=… daily-report.mjs --repo owner/name [--days 7] [--until YYYY-MM-DD] [--out dir] [--pdf]");
     process.exit(64);
   }
@@ -822,10 +851,21 @@ async function main() {
   const out = args.out ?? ".";
   mkdirSync(out, { recursive: true });
 
-  console.error("cost explorer…");
-  const cost = costs(days, until, baseline);
-  console.error("launch templates…");
-  const tpl = templates((args.regions ?? "us-east-1,us-east-2,eu-north-1").split(","), args.template ?? "ci-runner-fleet-future-pay-ci", days[0]);
+  let cost;
+  let tpl;
+  if (args["aws-from"]) {
+    ({ cost, templates: tpl } = awsFromFile(JSON.parse(readFileSync(args["aws-from"], "utf-8")), { until, days, baseline }));
+  } else {
+    console.error("cost explorer…");
+    cost = costs(days, until, baseline);
+    console.error("launch templates…");
+    tpl = templates((args.regions ?? "us-east-1,us-east-2,eu-north-1").split(","), args.template ?? "ci-runner-fleet-future-pay-ci", days[0]);
+  }
+  if (awsOnly) {
+    writeFileSync(path.join(out, "aws.json"), JSON.stringify({ v: 1, until, days, baseline, cost, templates: tpl }, null, 2));
+    console.error(`wrote ${path.join(out, "aws.json")}`);
+    return;
+  }
 
   console.error("merges…");
   const merged = await mergesByDay(repo, days, until);
