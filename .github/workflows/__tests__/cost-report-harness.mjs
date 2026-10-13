@@ -32,7 +32,7 @@ export const job = (id, seconds, { selfHosted = true, labels = ["future-pay-ci"]
   runner_group_name: selfHosted ? "Default" : "GitHub Actions", runner_name: `runner-${id}`,
 });
 
-export async function report({ runs, jobs, usage = {}, rates = defaultRates, laneRules = "", pullRequest = true }) {
+export async function report({ runs, jobs, usage = {}, rates = defaultRates, laneRules = "", pullRequest = true, openedAt }) {
   const posted = [];
   const outputs = {};
   const listJobsForWorkflowRun = async () => {};
@@ -71,7 +71,7 @@ export async function report({ runs, jobs, usage = {}, rates = defaultRates, lan
   };
   const context = {
     repo: { owner: "o", repo: "r" }, runId: 1, eventName: "pull_request",
-    payload: { ...(pullRequest ? { pull_request: { number: 7, head: { ref: "b" } } } : {}), repository: { private: true } },
+    payload: { ...(pullRequest ? { pull_request: { number: 7, head: { ref: "b" }, ...(openedAt ? { created_at: openedAt } : {}) } } : {}), repository: { private: true } },
   };
   const env = { RUNNER_RATES: rates, COMMENT_MARKER: "<!-- m -->", REPORT_TITLE: "CI cost estimate", MAX_RUN_PAGES: "5", LANE_RULES: laneRules };
   const saved = { ...process.env };

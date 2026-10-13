@@ -73,3 +73,20 @@ test("a job cancelled before it got a runner bills nothing", async () => {
   assert.equal(billed, 1);
   assert.doesNotMatch(body, /FUTURE-PAY-CI/);
 });
+
+test("an earlier PR's runs on the same branch are not billed to this one", async () => {
+  // Renovate reopens every grouped bump on one branch name. Once an earlier PR
+  // closes its runs lose `pull_requests`, so only the branch ties them here, and
+  // the newest PR was billed every PR the branch ever held (US$ 14.70 on a PR
+  // whose own runs cost US$ 0.47).
+  const opened = "2026-09-24T12:00:00Z";
+  const earlier = { ...run(2), pull_requests: [], created_at: "2026-09-20T09:00:00Z" };
+  const unlinked = { ...run(3), pull_requests: [], created_at: "2026-09-24T12:30:00Z" };
+  const linked = { ...run(4), created_at: "2026-09-24T13:00:00Z" };
+  const jobs = { 2: [job(1, 600)], 3: [job(2, 60)], 4: [job(3, 60)] };
+  const bounded = await report({ runs: [earlier, unlinked, linked], jobs, openedAt: opened });
+  const unbounded = await report({ runs: [earlier, unlinked, linked], jobs });
+  assert.ok(bounded.cost < unbounded.cost, "the earlier PR's run must drop out once the PR's open time is known");
+  assert.equal(Math.round(bounded.cost * 1e6), Math.round((await report({ runs: [unlinked, linked], jobs, openedAt: opened })).cost * 1e6),
+    "exactly the earlier PR's run is excluded; this PR's unlinked and linked runs stay");
+});
