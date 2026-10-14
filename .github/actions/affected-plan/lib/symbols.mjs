@@ -9,7 +9,7 @@
  */
 import { createHash } from "node:crypto";
 
-import { boundOf, canonical, declarationsOf } from "./exports-dataflow.mjs";
+import { canonical } from "./exports-dataflow.mjs";
 import { parseImports, stripComments } from "./modules.mjs";
 
 /** Short content hash — collision risk is irrelevant at one repo's scale. */
@@ -31,22 +31,10 @@ const EXPORT_STAR = /^[ \t]*export\s*\*/;
  * object literals) or the statement is terminated. Returns null when depth
  * never balances, which the caller turns into "widen this file".
  */
-/** A line at depth 0 that opens a new top-level statement. */
-const STATEMENT = /^\s*(?:export|import|const|let|var|function|class|type|interface|enum|async|declare|abstract)\b/;
-/** A line ending in an operator or an opening bracket continues on the next. */
-const CONTINUES = /(=>|[=(,[{:?&|+\-*%<!])\s*$/;
-
 function declarationEnd(lines, startLine) {
   let depth = 0;
   let opened = false;
-  let previous = startLine;
   for (let i = startLine; i < lines.length; i += 1) {
-    // A statement written without its `;` is closed by the next one. A
-    // multi-line `type` union has no brace and no `;`, so without this it ran
-    // on into the next declaration and that declaration's edits were reported
-    // as the type's — a runtime change read as a type change.
-    if (i > startLine && depth === 0 && STATEMENT.test(lines[i]) && !CONTINUES.test(lines[previous])) return previous;
-    if (lines[i].trim()) previous = i;
     for (const ch of lines[i]) {
       if (ch === "{" || ch === "(" || ch === "[") {
         depth += 1;
@@ -109,10 +97,7 @@ export function exportedSymbols(source) {
       break;
     }
     const body = canonical(lines.slice(i, end + 1).join("\n"));
-    // A name may be declared more than once — `const Status` and `type Status`
-    // side by side is idiomatic. Every declaration feeds its hash; keeping
-    // only the last one hid a change to the value behind the unchanged type.
-    symbols.set(decl[2], hash(symbols.has(decl[2]) ? `${symbols.get(decl[2])}\n${body}` : body));
+    symbols.set(decl[2], hash(body));
     for (let k = i; k <= end; k += 1) owned.add(k);
   }
 
@@ -190,44 +175,6 @@ export function affectedExports(baseSource, headSource) {
     if (base.symbols.get(name) !== body) affected.add(name);
   for (const name of base.symbols.keys()) if (!head.symbols.has(name)) affected.add(name);
   return affected;
-}
-
-/** A declaration erased before any runtime sees it: `interface` and `type` only. */
-const TYPE_DECLARATION = /^(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:type|interface)\s/;
-
-/**
- * Is every changed name an `interface` or `type` declaration and nothing else,
- * on both sides — so the edit is erased before any runtime lane loads the file?
- *
- * `names` is {@link affectedExports}'s answer, so imports, re-exports and
- * module-level statements already compare equal. This re-brackets both sides
- * independently (exports-dataflow `declarationsOf`, which closes a
- * semicolon-less statement at the next one) and proves it twice:
- *   - every declaration binding a changed name is a type declaration on both
- *     sides — a same-named value (`const Status` beside `type Status`), an
- *     `enum`, a `const enum`, a `class`, a `declare const` all disqualify;
- *   - every declaration that is NOT a type declaration is byte-identical
- *     (comments and formatting aside), in order. A runtime statement a type
- *     span swallowed would differ here.
- * Anything that cannot be bracketed (a `namespace`, an unreadable file)
- * answers false, which keeps today's wide reading.
- *
- * @param {string | null} baseSource
- * @param {string | null} headSource
- * @param {Set<string>} names
- */
-export function typeOnlyChange(baseSource, headSource, names) {
-  if (baseSource == null || headSource == null || names.size === 0 || names.has("*")) return false;
-  const sides = [baseSource, headSource].map((source) => declarationsOf(source));
-  if (sides.includes(null)) return false;
-  const isType = (d) => !d.call && TYPE_DECLARATION.test(d.text.trim());
-  const typeOnly = (decls, name) => {
-    const binding = decls.filter((d) => boundOf(d).includes(name));
-    return binding.length > 0 && binding.every(isType);
-  };
-  if (![...names].every((name) => sides.every((decls) => typeOnly(decls, name)))) return false;
-  const runtime = (decls) => JSON.stringify(decls.filter((d) => !isType(d)).map((d) => canonical(d.text)));
-  return runtime(sides[0]) === runtime(sides[1]);
 }
 
 export { hash };
