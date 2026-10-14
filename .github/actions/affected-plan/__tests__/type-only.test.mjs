@@ -12,10 +12,12 @@
  * change selects nothing and reports green.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { selectAffected } from "../lib/select.mjs";
 import { affectedExports, typeOnlyChange } from "../lib/symbols.mjs";
@@ -131,4 +133,37 @@ test("a new or deleted file is never type-only", () => {
   assert.equal(typeOnlyChange(null, "export interface S {}\n", names), false);
   assert.equal(typeOnlyChange("export interface S {}\n", null, names), false);
   assert.equal(typeOnlyChange("export interface S {}\n", "export interface S { a: 1 }\n", new Set(["*"])), false);
+});
+
+test("the plan document names the type-only files and runs nothing for them", () => {
+  const root = mkdtempSync(join(tmpdir(), "affected-type-only-cli-"));
+  const git = (...args) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
+  const put = (path, body) => {
+    mkdirSync(join(root, path, ".."), { recursive: true });
+    writeFileSync(join(root, path), body);
+  };
+  git("init", "-q", "-b", "main");
+  git("config", "user.email", "t@example.test");
+  git("config", "user.name", "T");
+  put(".affected-plan.json", JSON.stringify({ workspaces: [], sourceRoots: ["src"], lanes: { unit: { roots: ["src"], test: String.raw`\.test\.ts$` } } }));
+  put("src/basket.ts", STATE('"delivery"'));
+  put("src/consumer.ts", CONSUMER);
+  put("src/consumer.test.ts", TEST);
+  git("add", "-A");
+  git("commit", "-qm", "base");
+  const base = git("rev-parse", "HEAD").stdout.trim();
+  put("src/basket.ts", STATE('"delivery" | "take-away"'));
+  git("commit", "-qam", "head");
+  const cli = join(dirname(fileURLToPath(import.meta.url)), "..", "plan.mjs");
+  const run = spawnSync("node", [cli, "--lane", "unit", "--base", base, "--out", "plan.json", "--explain", "false"], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, GITHUB_OUTPUT: "", GITHUB_STEP_SUMMARY: "" },
+  });
+  assert.equal(run.status, 0, run.stderr);
+  const document = JSON.parse(readFileSync(join(root, "plan.json"), "utf8"));
+  assert.equal(document.mode, "none");
+  assert.deepEqual(document.tests, []);
+  assert.deepEqual(document.typeOnly, ["src/basket.ts"]);
+  assert.match(run.stderr, /\[type-only\] 1 changed file\(s\)/);
 });

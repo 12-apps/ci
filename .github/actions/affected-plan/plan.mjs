@@ -651,6 +651,9 @@ function emit(plan) {
     // at six, the artifact does not.
     ...(plan.unclassified ? { unclassified: plan.unclassified } : {}),
     ...(plan.routes && Object.keys(plan.routes).length ? { routes: plan.routes } : {}),
+    // Changed files whose only edits were `interface`/`type` declarations:
+    // erased before any runtime lane, so they seeded nothing (lib/select.mjs).
+    ...(plan.typeOnly?.length ? { typeOnly: plan.typeOnly } : {}),
     // What each key-routed seeder change meant, and the non-source files (a
     // `.feature`) naming its keys — the part of the answer a caller outside
     // the import graph needs.
@@ -686,6 +689,8 @@ function emit(plan) {
   }
   console.error(`[affected-plan] ${plan.lane ?? lane}: ${plan.mode} — ${plan.why}`);
   console.error(`[affected-plan] ${tests.length} test file(s), ${shards.length} shard(s) → ${outPath}`);
+  if (plan.typeOnly?.length)
+    console.error(`[type-only] ${plan.typeOnly.length} changed file(s) edited only interface/type declarations — seeded nothing: ${plan.typeOnly.slice(0, 6).join(", ")}`);
   if (plan.gherkin) {
     console.error(`[gherkin] ${plan.gherkin.features.length} feature(s) speak a reached step definition`);
     for (const [file, s] of Object.entries(plan.gherkin.steps))
