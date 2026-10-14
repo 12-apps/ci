@@ -107,6 +107,16 @@ test("an import change beside an interface edit is a runtime change", () => {
   assert.deepEqual(result.symbols["src/basket.ts"], ["*"]);
 });
 
+test("an inline type binding: erased on an existing import, a new edge on a new one", () => {
+  const file = (imports, members) => `${imports}export interface S {\n  kind: ${members};\n  mark?: Mark;\n}\nexport function open(s?: S) {\n  return s ?? load();\n}\n`;
+  // The module was already evaluated for `load`; the `type` binding is erased.
+  narrow(select(file('import { load } from "./loader";\ntype Mark = 1;\n', '"a"'),
+    file('import { load, type Extra } from "./loader";\ntype Mark = 1;\n', '"a" | Extra')));
+  // An inline-only clause can still evaluate a module nothing imported before.
+  wide(select(file('import { load } from "./loader";\ntype Mark = 1;\n', '"a"'),
+    file('import { load } from "./loader";\nimport { type Extra } from "./extra";\ntype Mark = 1;\n', '"a" | Extra')), "a new module edge");
+});
+
 test("a value sharing its name with an unchanged type is a runtime change", () => {
   const file = (value) =>
     `export const Status = { open: ${value} } as const;\n` +
