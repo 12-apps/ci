@@ -12,7 +12,7 @@ import { join } from "node:path";
 
 import { boundOf, changedDeclarations, declarationsOf, reachableExports, spread, withinFile } from "./exports-dataflow.mjs";
 import { buildGraph, listSourceFiles, loadPackages, scan } from "./modules.mjs";
-import { affectedExports, exportedSymbols, importsChanged } from "./symbols.mjs";
+import { affectedExports, exportedSymbols, importsChanged, typeOnlyChange } from "./symbols.mjs";
 
 /** Everything selected, with the reason chain for each test. */
 export const FULL = "full";
@@ -277,6 +277,7 @@ export function selectAffected(options) {
   const moduleEffects = new Set();
   const symbolReport = {};
   const routeReport = {};
+  const typeOnly = [];
   for (const file of direct) {
     if (deleted.includes(file)) {
       affected.set(file, "*");
@@ -293,6 +294,15 @@ export function selectAffected(options) {
     }
     const base = baseSources.get(file);
     const names = affectedExports(base, head);
+    // Every changed name is an `interface` or `type` on both sides, with the
+    // imports and module context unchanged: erased before any runtime lane
+    // loads the file. Following its type references to the exports that
+    // annotate with it would select tests that cannot observe the edit.
+    if (typeOnlyChange(base, head, names)) {
+      typeOnly.push(file);
+      symbolReport[file] = [];
+      continue;
+    }
     // An export's hash covers its own body, so the exports that merely CALL a
     // changed one are found by following the file's own references. A lane
     // that brackets calls (Gherkin steps) also reads a module-level edit
@@ -337,12 +347,13 @@ export function selectAffected(options) {
   if (affected.size === 0) {
     return {
       ...(unobservable.length ? { unobservable } : {}),
+      ...(typeOnly.length ? { typeOnly } : {}),
       mode: "none",
       tests: [],
       reasons: {},
       symbols: symbolReport,
-      stats: { changed: relevant.length, affectedFiles: 0 },
-      why: "no exported symbol changed — every edit was a comment or left the same-file exports and module context unchanged",
+      stats: { changed: relevant.length, affectedFiles: 0, typeOnly: typeOnly.length },
+      why: "no exported symbol changed — every edit was a comment, a type-only declaration, or left the same-file exports and module context unchanged",
     };
   }
 
@@ -432,6 +443,9 @@ export function selectAffected(options) {
 
   return {
     ...(unobservable.length ? { unobservable } : {}),
+    // Changed files whose only edits were type-only declarations: reported,
+    // never seeded.
+    ...(typeOnly.length ? { typeOnly } : {}),
     mode: tests.length > 0 ? "narrowed" : "none",
     tests,
     reasons,
@@ -455,6 +469,7 @@ export function selectAffected(options) {
       graphFiles: edges.size,
       unresolved: unresolved.length,
       blindFiles: blind.length,
+      typeOnly: typeOnly.length,
       tests: tests.length,
     },
     // The blind count is reported even when it is the whole reason a test was
