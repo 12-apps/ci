@@ -90,3 +90,16 @@ test("an earlier PR's runs on the same branch are not billed to this one", async
   assert.equal(Math.round(bounded.cost * 1e6), Math.round((await report({ runs: [unlinked, linked], jobs, openedAt: opened })).cost * 1e6),
     "exactly the earlier PR's run is excluded; this PR's unlinked and linked runs stay");
 });
+
+test("an earlier PR's run that GitHub links to this PR is not billed to it either", async () => {
+  // GitHub fills a run's `pull_requests` with the PR open on its branch now, so
+  // a run of a closed PR on a reused branch lists the new PR. #3252 was billed
+  // 188 runs that way, the oldest from 2026-09-22.
+  const opened = "2026-10-20T18:37:00Z";
+  const relinked = { ...run(2), created_at: "2026-09-22T21:13:43Z" };
+  const own = { ...run(3), created_at: "2026-10-20T18:38:00Z" };
+  const jobs = { 2: [job(1, 600)], 3: [job(2, 60)] };
+  const bounded = await report({ runs: [relinked, own], jobs, openedAt: opened });
+  assert.equal(Math.round(bounded.cost * 1e6), Math.round((await report({ runs: [own], jobs, openedAt: opened })).cost * 1e6),
+    "a linked run from before the PR opened must drop out");
+});
