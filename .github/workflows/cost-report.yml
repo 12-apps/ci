@@ -222,10 +222,15 @@ jobs:
               // them to the newest one — US$ 14.70 on a PR whose own runs cost
               // US$ 0.47. So the fallback also needs the run to start after this
               // PR was opened; a run from before it belongs to another PR.
+              // The bound applies to linked runs too: GitHub fills an old
+              // run's `pull_requests` with whatever PR is open on its branch
+              // NOW, so a closed PR's run lists the new one (#3252 was billed
+              // 188 runs back to 2026-09-22 that way).
               for (const r of data.workflow_runs) {
-                const tied = Array.isArray(r.pull_requests) && r.pull_requests.length
+                const linked = Array.isArray(r.pull_requests) && r.pull_requests.length
                   ? r.pull_requests.some((p) => p.number === prNumber)
-                  : r.head_branch === headRef && (!openedAt || Date.parse(r.created_at) >= openedAt);
+                  : r.head_branch === headRef;
+                const tied = linked && (!openedAt || Date.parse(r.created_at) >= openedAt);
                 if (tied) runs.push(r);
               }
               if (data.workflow_runs.length < 100) break;
