@@ -11,7 +11,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { boundOf, changedDeclarations, declarationsOf, reachableExports, spread, withinFile } from "./exports-dataflow.mjs";
-import { buildGraph, listSourceFiles, loadPackages, scan } from "./modules.mjs";
+import { inertDeclaration, isBuiltin, loadsCleanly, moduleExports, narrowModuleContext } from "./module-context.mjs";
+import { buildGraph, EXTENSIONS, listSourceFiles, loadPackages } from "./modules.mjs";
 import { affectedExports, exportedSymbols, importsChanged } from "./symbols.mjs";
 
 /** Everything selected, with the reason chain for each test. */
@@ -46,50 +47,6 @@ function taintOf(record, symbols) {
   const names = symbols === "*" ? record.names : record.names.filter((n) => symbols.has(n));
   const locals = (record.bindings ?? []).filter(([name]) => names.includes(name)).map(([, local]) => local);
   return names.length === 0 ? "*" : [...names, ...locals, ...names.map((n) => `${record.spec}#${n}`)];
-}
-
-/**
- * A small allowlist of declarations whose evaluation cannot call user code.
- * Everything else (calls, property reads, classes, enums, destructuring, ...)
- * may throw or mutate state while the module loads. This is deliberately not
- * a purity claim about arbitrary expressions.
- */
-function inertDeclaration(text) {
-  const parsed = scan(text);
-  const code = parsed.masked.trim();
-  if (/^(?:export\s+)?(?:declare\s+)?(?:type|interface)\b/.test(code)) return true;
-  if (/^export\s*\{/.test(code)) return true; // reexport evaluation follows its graph edge
-  if (/^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\b/.test(code)) {
-    const open = code.indexOf("{");
-    if (open === -1) return false;
-    let depth = 0;
-    for (let i = open; i < code.length; i += 1) {
-      if (code[i] === "{") depth += 1;
-      else if (code[i] === "}" && --depth === 0) return /^\s*;?\s*$/.test(code.slice(i + 1));
-    }
-    return false;
-  }
-  const binding = /^(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$][\w$]*(?:\s*:[^=]+)?\s*=\s*/.exec(code);
-  if (!binding) return false;
-  const value = code.slice(binding[0].length).replace(/;\s*$/, "").trim();
-  if (/^(?:true|false|null|[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?n?)$/i.test(value)) return true;
-  // Literal contents are masked, but their quotes remain. Templates are not
-  // included: substitutions execute while constructing the value.
-  if (/^(["'])[ \r\n]*\1$/.test(value)) return true;
-  try {
-    const raw = parsed.code.trim().slice(binding[0].length).replace(/;\s*$/, "").trim();
-    const array = JSON.parse(raw);
-    const literal = (item) => item === null || typeof item !== "object" || (Array.isArray(item) && item.every(literal));
-    if (Array.isArray(array) && array.every(literal)) return true;
-  } catch { /* not a literal-only array: defer no purity assumptions */ }
-  if (!/^(?:async\s+)?(?:[A-Za-z_$][\w$]*|\([^()]*\))\s*(?::[^=]+)?=>/.test(value)) return false;
-  let depth = 0;
-  for (const ch of value) {
-    if ("({[".includes(ch)) depth += 1;
-    else if (")}]".includes(ch)) depth -= 1;
-    else if (depth === 0 && (ch === "," || ch === ";")) return false;
-  }
-  return depth === 0;
 }
 
 /** Can a changed binding alter eager module evaluation, not just an export? */
@@ -269,6 +226,25 @@ export function selectAffected(options) {
     }
   }
 
+  /**
+   * What a specifier in `from` loads: a repo source file, `"builtin"` for a
+   * `node:` module, or null (a package, an asset, a hole) — never pure.
+   */
+  const resolveEdge = (spec, from) => {
+    if (spec.startsWith("node:")) return isBuiltin(spec) ? "builtin" : null;
+    const edge = (edges.get(from) ?? []).find((e) => e.spec === spec && !e.dynamic && !e.glob);
+    const target = edge?.target;
+    if (!target || target.startsWith("../") || !EXTENSIONS.includes(target.slice(target.lastIndexOf(".")))) return null;
+    return target;
+  };
+  const exportsOf = (target) => (target === "builtin" ? null : moduleExports(headSourceOf(target)));
+  const pureSeen = new Map();
+  const loading = { resolve: resolveEdge, read: headSourceOf, exportsOf };
+  const narrowedContext = (file, base, head) => {
+    if (!affectedExports(base, head).has("*")) return null;
+    return narrowModuleContext(base, head, (spec, binding) => loadsCleanly(spec, file, binding, loading, pureSeen));
+  };
+
   /** file -> Set<symbol> | "*" */
   const affected = new Map();
   // Initialization effects cross EVERY runtime import, even when its named
@@ -292,7 +268,10 @@ export function selectAffected(options) {
       continue;
     }
     const base = baseSources.get(file);
-    const names = affectedExports(base, head);
+    // `*` from a module-context edit — a new import, a private helper — is
+    // re-proven over the whole file: when nothing new runs at load, only the
+    // exports that can reach the edit are affected (module-context.mjs).
+    const names = narrowedContext(file, base, head) ?? affectedExports(base, head);
     // An export's hash covers its own body, so the exports that merely CALL a
     // changed one are found by following the file's own references. A lane
     // that brackets calls (Gherkin steps) also reads a module-level edit
