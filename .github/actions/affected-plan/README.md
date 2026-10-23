@@ -39,7 +39,17 @@ behavior-preserving. The cost of that correction needs a new consumer run.
    eager initializer may throw before the imported binding is used. Unknown
    initialization and import rewrites therefore widen that module's importers,
    including barrels and unused imports.
-5. **Follow resolved source dependencies beyond the configured roots.** Roots
+5. **Re-prove a module-context edit before widening it.** A new import or a
+   private helper used to make its file `*`. `lib/module-context.mjs` now
+   cuts both versions of the file into top-level units on the literal-masked
+   text and narrows only when nothing new can run at load:
+   - load-time code is unchanged and cannot reach the edit;
+   - the modules evaluated stay the same, in the same order, plus additions;
+   - each added module is pure (only declarations, and imports of pure
+     modules or `node:` builtins) and exports every name the file binds from it.
+   Anything else stays `*`. `module-context.test.mjs` pins each shape that must
+   stay wide as an executable before/after counterexample.
+6. **Follow resolved source dependencies beyond the configured roots.** Roots
    discover the lane's test inventory; they do not truncate import closures.
    Computed imports are unbounded. Their owners and dependent tests run, and
    those closures cannot produce reusable per-test hashes.

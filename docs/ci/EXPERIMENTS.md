@@ -315,3 +315,106 @@ protection (`protection.enabled`) and the effective rule types
 fast-forward push; a protected branch whose rules cannot be read is skipped
 with the reason. A test pins the future-pay shape (protected, naming rules
 only → pushed), and reverting either half of the check turns it red.
+
+## E-004 — A module-context edit narrows when nothing new runs at load
+
+**Date:** 2026-10-22 · **Status:** Local, history and hosted proof complete; consumer run on `v2` pending
+
+**Question:** `affectedExports` answers `*` for any edit outside an exported
+declaration. future-pay#3351 added one import and one private helper to
+`tests/e2e/helpers/spa-session.ts`. The `*` reached `tests/e2e/warm-api.ts`
+through its import of the untouched `SUPER_ADMIN_USER`, and that file is a runner
+root. So both e2e selectors went full: all 65 Gherkin features and all 229 SPA
+specs, and the slowest leg took 24.8 minutes (future-pay run 39842217382). Can
+the engine prove a narrower answer without a new false negative?
+
+**Baseline:** engine `b25ce98` (`v2`). Running `plan.mjs --lane e2e` locally on
+future-pay `a7d8ef9` against `b101b95` reports `spa-session.ts: ["*"]`, 228
+test files, and reaches `warm-api.ts`.
+
+**Method:** `lib/module-context.mjs` re-proves the whole file whenever
+`affectedExports` says `*`.
+- **The cut.** It cuts base and head into top-level units on the
+  literal-masked text. A unit starts at column 0. Everything indented, inside a
+  literal or a template, or opening with a closing bracket belongs to the unit
+  above it.
+- **When it narrows.** Only when all of these hold:
+  - every unit balances and starts a fresh statement;
+  - opaque (load-time) units are identical and reach no tainted name;
+  - evaluated modules keep their order and their bindings;
+  - every added module is pure and exports each name the file binds from it;
+  - no runtime name is declared twice;
+  - every export list names a declared binding;
+  - head parses (`module.stripTypeScriptTypes`);
+  - nothing calls `eval` or `Function`.
+- **The answer.** The exported names the changed inert or erased declarations
+  can reach.
+- **`inertDeclaration` (moved from `select.mjs`).** It now finds a function's
+  body past a destructured parameter or an object return type. It refuses an
+  arrow, literal or type alias that a line break could end early by ASI.
+
+**Results:**
+- **future-pay#3351.** The same command now reports `spa-session.ts:
+  [signInAs, signInAsAdmin, signInAsAdminSuperuser, signInAsSuperAdmin,
+  signInAsWaiter]` and 94 test files, and `warm-api.ts` is not reached. Fed to
+  the consumer's selectors: Gherkin goes from full (65) to **42 features**, SPA
+  E2E from full (229) to **65 specs**.
+- **Why 94 and not 105.** A simulation that forced only `signInAs` gave 105.
+  The difference is the `inertDeclaration` fix. `journey-buyer.ts`'s
+  `startJourney(…, options: { … })` read as eager code, which widened every
+  importer of that module, including step files that bind only constants.
+- **Adversarial review, four rounds, VERDICT OK on round 4.** Rounds 1–3 found
+  18 new false negatives, each reproduced as a test that passes before the edit
+  and fails after it, and each selected by `b25ce98`. All are fixed:
+  - ASI after an expression arrow, a type alias or a postfix `++`;
+  - a regex at a line's end;
+  - `!`, `as(` or `satisfies(` starting the next line;
+  - `export default` or `new` above a column-0 function;
+  - an indented side effect inside an added "pure" module;
+  - `export default function foo` read as a named export;
+  - an `export const` line inside a template;
+  - a nonexistent `node:` builtin;
+  - a redeclared import binding;
+  - a syntax error in a private body;
+  - a direct `eval`;
+  - an export list naming a removed declaration;
+  - a value import of a type.
+
+  Each is a case in `module-context.test.mjs`. Ten of them were also run
+  against the pre-review snapshot and failed there. The reviewer's pre-existing
+  P1 (an indented statement after an inert arrow in an intermediate module)
+  is closed by the same `asiSafe` check. P2 (a syntax error inside an EXPORTED
+  body narrows to that export) predates this change and is unchanged.
+- **Guards are load-bearing.** Removing any one guard turns at least one test
+  red: the continuation check, the load-time reach check, the export-name
+  check, the purity recursion, the order check, the binding check, the
+  function-end check, the erased-end check, the opaque-identity check, cycle
+  impurity, and the unit-start check.
+- **Suite:** `node --test .github/actions/affected-plan/__tests__/*.test.mjs`
+  passes **346/346** (312 before this change).
+
+**Why:** a deferred function, an arrow or a literal does nothing when a
+module loads. A module made only of those runs nothing either, and binding a
+name it exports changes nothing for an importer that never calls it. What can
+run at load must be unchanged and must not reach the edit. Every shape the cut
+cannot read keeps `*`.
+
+**Regression watch:** `module-context.test.mjs`. Its "stays wide" cases are
+executable counterexamples, and each one must stay selected. The type-only
+counterexamples from #179/#180 still pass, unchanged.
+
+**Consumer history:** `plan.mjs` ran with `b25ce98` and with this change
+(the same engine bytes that were committed) on the last 15 first-parent
+commits of future-pay `main` (`56e4dc35`..`14261957`), each against its first
+parent, for the `e2e` and `unit` lanes. That is 30 plans.
+- **Containment.** In every one, the new selection is contained in the old:
+  **0** tests selected that `b25ce98` did not.
+- **Where it narrows.** It is smaller in one: `4167bb11` (#3351 merged),
+  e2e **228 → 94**.
+- **Where it does not.** The other 29 are identical, from 1 to 3,512 tests.
+  Those commits add no import or private helper to a file a test reaches.
+
+**Hosted:** Self Tests on this branch at `70e7667`: affected-plan
+**346/346** on Node v24.21.0 (job 120133147847).
+
+**Pending:** a consumer run once `v2` carries this change.
