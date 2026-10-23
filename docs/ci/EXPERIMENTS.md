@@ -318,7 +318,7 @@ only → pushed), and reverting either half of the check turns it red.
 
 ## E-004 — A module-context edit narrows when nothing new runs at load
 
-**Date:** 2026-10-22 · **Status:** Local proof complete; consumer history and hosted proof pending
+**Date:** 2026-10-22 · **Status:** Local, history and hosted proof complete; consumer run on `v2` pending
 
 **Question:** `affectedExports` answers `*` for any edit outside an exported
 declaration. future-pay#3351 added one import and one private helper to
@@ -403,6 +403,18 @@ cannot read keeps `*`.
 executable counterexamples, and each one must stay selected. The type-only
 counterexamples from #179/#180 still pass, unchanged.
 
-**Pending:** the old-versus-new comparison over recent future-pay `main`
-commits (does the new selection always fall inside the old one, and by how
-much is it smaller), and a hosted run once `v2` carries this change.
+**Consumer history:** `plan.mjs` ran with `b25ce98` and with this change
+(the same engine bytes that were committed) on the last 15 first-parent
+commits of future-pay `main` (`56e4dc35`..`14261957`), each against its first
+parent, for the `e2e` and `unit` lanes. That is 30 plans.
+- **Containment.** In every one, the new selection is contained in the old:
+  **0** tests selected that `b25ce98` did not.
+- **Where it narrows.** It is smaller in one: `4167bb11` (#3351 merged),
+  e2e **228 → 94**.
+- **Where it does not.** The other 29 are identical, from 1 to 3,512 tests.
+  Those commits add no import or private helper to a file a test reaches.
+
+**Hosted:** Self Tests on this branch at `70e7667`: affected-plan
+**346/346** on Node v24.21.0 (job 120133147847).
+
+**Pending:** a consumer run once `v2` carries this change.
