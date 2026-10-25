@@ -1,0 +1,79 @@
+name: Advisory Turbo index shadow
+description: Observe an already-required Build and a private tiny-index round-trip; never change payload or Build decisions.
+inputs:
+  mode:
+    description: before observes a normal restore; after inventories the normal producer's output.
+    required: true
+  matched-key:
+    description: Exact matched normal payload key returned by the unchanged restore.
+    default: ''
+  clean-before-restore:
+    description: true only when the caller observed no pre-existing .turbo tree.
+    default: 'false'
+  selection-base:
+    description: Same immutable affected selection base as normal Build.
+    default: ''
+  save-key:
+    description: Normal payload save key, for prospective producer measurement only.
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Capture bounded advisory metadata
+      id: capture
+      shell: bash
+      env:
+        SHADOW_MATCHED_KEY: ${{ inputs.matched-key }}
+        SHADOW_CLEAN: ${{ inputs.clean-before-restore }}
+        SHADOW_SAVE_KEY: ${{ inputs.save-key }}
+        SELECTION_BASE: ${{ inputs.selection-base }}
+        SHADOW_MODE: ${{ inputs.mode }}
+      run: node "$GITHUB_ACTION_PATH/main.mjs" "$SHADOW_MODE"
+
+    # Probe namespace and owned temporary file only: no normal payload/index
+    # key is saved, deleted, replaced or used to gate actual Build.
+    - name: Save the private tiny index
+      id: save
+      if: inputs.mode == 'before' && steps.capture.outputs.ready == 'true'
+      continue-on-error: true
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ steps.capture.outputs.index-path }}
+        key: index-shadow-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+
+    - name: Look up the exact private index
+      id: lookup
+      if: inputs.mode == 'before' && steps.capture.outputs.ready == 'true'
+      continue-on-error: true
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ steps.capture.outputs.index-path }}
+        key: index-shadow-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+        lookup-only: true
+
+    - name: Remove only the owned transport copy
+      id: clear
+      if: inputs.mode == 'before' && steps.lookup.outputs.cache-hit == 'true'
+      shell: bash
+      env:
+        SHADOW_STATE_PATH: ${{ steps.capture.outputs.state-path }}
+      run: node "$GITHUB_ACTION_PATH/main.mjs" clear
+
+    - name: Restore the exact private index
+      id: transport
+      if: inputs.mode == 'before' && steps.clear.outputs.cleared == 'true'
+      continue-on-error: true
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ steps.capture.outputs.index-path }}
+        key: index-shadow-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+
+    - name: Verify the transported bytes
+      if: inputs.mode == 'before' && steps.capture.outputs.ready == 'true'
+      shell: bash
+      env:
+        SHADOW_STATE_PATH: ${{ steps.capture.outputs.state-path }}
+        SHADOW_CLEAR: ${{ steps.clear.outputs.cleared }}
+        SHADOW_LOOKUP_HIT: ${{ steps.lookup.outputs.cache-hit }}
+        SHADOW_TRANSPORT_HIT: ${{ steps.transport.outputs.cache-hit }}
+      run: node "$GITHUB_ACTION_PATH/main.mjs" verify
