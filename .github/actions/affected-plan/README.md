@@ -487,3 +487,36 @@ edges, so an edit to them selects as before.
 An import passed straight to a call (`lazyRoute(import("./x"))`) loads eagerly
 and is never deferred, and neither is a wrapper the lane does not name. The
 plan's reasons mark each deferred hop: `(deferred — the test names …)`.
+
+### Keyed catalogs (`keyedCatalogs`)
+
+`lanes.<lane>.keyedCatalogs` optionally lists patterns (regex sources, OR-ed)
+for files whose objects are read one key at a time, typically copy packs:
+`export const EN_COPY = { tillAlreadyOpen: "…", operatorBusy: (n) => `…` }`,
+plus the accessors that pick a locale's pack. Omitted or empty, nothing changes.
+
+A pack is a module-scope object, so without this option any edit to it counts as
+an initialization effect, and that effect crosses every runtime import. On one
+consumer, rewording a single till refusal selected 385 of 646 integration tests.
+
+With the option, an edit to a declared catalog travels as the set of keys it
+changed (`lib/catalogs.mjs`):
+
+1. The diff qualifies only when every difference is an entry of a top-level
+   object literal whose old and new values are inert. Inert means a string, a
+   template without substitutions, a number, an arrow function, or an array or
+   object of those. An import, a function, a spread, a computed key or a
+   substitution in the diff sends the file down the ordinary path. The plan's
+   `affectedSymbols` lists the keys as `.key`.
+2. A declared catalog that imports the pack and only spreads it (`...PACK`), or
+   holds it under a key no `.` can read (`"pt-BR": PACK`), carries the same
+   keys onward.
+3. Any other importer is reached only through the declarations that read one of
+   those keys from the binding: `copy.key`, `copy().key`, `const c = copy();
+   c.key`, or `const { key } = copy()`. Any other use sends that file down the
+   ordinary path: the pack passed to a function, spread, indexed, returned or
+   re-exported.
+
+By declaring a file as a catalog, the lane trusts that its exports pass keys
+through unchanged. A locale accessor returns one of its packs; it does not
+rename their keys. Every other step either proves its claim or widens.

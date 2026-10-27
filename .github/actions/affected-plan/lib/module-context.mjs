@@ -189,6 +189,35 @@ export function inertDeclaration(text) {
   return depth === 0;
 }
 
+/**
+ * Is defining this class inert while the module loads, given the names `hot`
+ * that carry a change? Defining a class runs its `extends` expression, its
+ * computed member keys, its static members and its decorators; methods,
+ * accessors, constructors and instance fields run only when it is used. So a
+ * class qualifies when its heritage is a plain name not in `hot` (a changed
+ * base could stop being a constructor and throw at load) and its body has no
+ * `static`, no `@` and no `[` at member level. Kept apart from
+ * `inertDeclaration`, which module-context reasoning relies on unchanged.
+ */
+export function inertClass(text, hot) {
+  const code = scan(text).masked.trim();
+  const head = /^(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+[A-Za-z_$][\w$]*\s*(?:<[^{}()]*>)?\s*(?:extends\s+([A-Za-z_$][\w$]*)(?:\.[A-Za-z_$][\w$]*)*\s*(?:<[^{}()]*>)?)?\s*(?:implements\s+[^{}()]+)?\{/.exec(code);
+  if (!head || (head[1] && hot.has(head[1]))) return false;
+  const open = head[0].length - 1;
+  const close = matching(code, open);
+  if (close === -1 || !/^\s*;?\s*$/.test(code.slice(close + 1))) return false;
+  const body = code.slice(open + 1, close);
+  if (body.includes("@")) return false;
+  let depth = 0;
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body[i];
+    if (depth === 0 && (ch === "[" || (/\bstatic\b/y.test(body.slice(i, i + 7)) && !/[\w$]/.test(body[i - 1] ?? "")))) return false;
+    if ("({[".includes(ch)) depth += 1;
+    else if (")}]".includes(ch)) depth -= 1;
+  }
+  return true;
+}
+
 /** Brackets balance and never go negative across `masked`. */
 function balanced(masked) {
   let depth = 0;
