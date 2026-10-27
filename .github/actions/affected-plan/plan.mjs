@@ -543,6 +543,9 @@ const result = selectAffected({
   routeOf,
   aliasesFor,
   calls: gherkin?.calls ?? [],
+  // `lanes.<lane>.deferredImports`: calls whose arrow argument defers a dynamic
+  // import until a route renders (`lazyRoute`). See select.mjs, "deferred edges".
+  deferredCalls: Array.isArray(laneConfig.deferredImports) ? laneConfig.deferredImports : [],
 });
 
 if (globalChanges.size > 0 && result.mode === "narrowed") {

@@ -349,6 +349,7 @@ export function parseImports(rawSource) {
     push(literal ? literal[2] : `<computed ${m[1]}>`, "", m.index, true);
     out[out.length - 1].dynamic = true;
     if (!literal) out[out.length - 1].unbounded = true;
+    else if (m[1] === "import") Object.assign(out[out.length - 1], deferringCall(masked, m.index));
   }
   for (const m of inCode(GLOB_ACCESS)) {
     const glob = m[0].endsWith("glob") ? globArguments(source.slice(m.index + m[0].length)) : null;
@@ -356,6 +357,51 @@ export function parseImports(rawSource) {
     Object.assign(out[out.length - 1], { dynamic: true, glob: glob ?? true, unbounded: !glob });
   }
   return out.sort((a, b) => a.position - b.position).map(({ position, ...record }) => record);
+}
+
+/**
+ * The call a dynamic `import()` is deferred inside, when it is written as the
+ * body of an arrow function passed straight to that call:
+ *
+ *   const ConfigHoursPage = lazyRoute(() => import("./hours").then(…));
+ *   const Drawer = lazyRoute(async () => ({ default: (await import("./x")).X }));
+ *
+ * gives `{ wrapper: "lazyRoute", binding: "ConfigHoursPage" }`. The import runs
+ * when the arrow runs, not when this module loads, so a caller that knows what
+ * the wrapper does (select.mjs, `deferredCalls`) may treat the edge as deferred.
+ * Anything else — `foo(import("./x"))`, which loads eagerly, an import not
+ * inside a call, a wrapper this scan cannot read — answers nothing, and the
+ * edge stays an ordinary value edge. Read from `masked`, so neither a string
+ * nor a comment can open or close a parenthesis.
+ */
+function deferringCall(masked, index) {
+  // Walk out through the enclosing parentheses — `(await import(…))` and
+  // `({ default: … })` sit between the import and the call — until one opens
+  // an argument list whose first argument is an arrow function.
+  let depth = 0;
+  let open = -1;
+  let levels = 0;
+  for (let i = index - 1; i >= 0 && index - i < 2000; i -= 1) {
+    const ch = masked[i];
+    if (ch === ")") depth += 1;
+    else if (ch === "(") {
+      if (depth > 0) {
+        depth -= 1;
+        continue;
+      }
+      if (/^\s*(?:async\s*)?(?:\([^()]*\)|[\w$]+)\s*=>/.test(masked.slice(i + 1, index))) {
+        open = i;
+        break;
+      }
+      if ((levels += 1) > 4) return {};
+    }
+  }
+  if (open === -1) return {};
+  const before = masked.slice(0, open);
+  const wrapper = /([\w$]+)\s*$/.exec(before)?.[1];
+  if (!wrapper) return {};
+  const binding = /(?:const|let|var)\s+([\w$]+)\s*=\s*[\w$]+\s*$/.exec(before)?.[1];
+  return { wrapper, ...(binding ? { binding } : {}) };
 }
 
 /** Resolve a repo-relative path that may omit its extension or name a folder. */

@@ -49,6 +49,52 @@ function taintOf(record, symbols) {
   return names.length === 0 ? "*" : [...names, ...locals, ...names.map((n) => `${record.spec}#${n}`)];
 }
 
+/**
+ * The names a test can use to reach a deferred page: the last segment of the
+ * import's path (`"./hours"` → `hours`; an `index` file or `"."` answers its
+ * folder), every literal `path` segment on a `<Route>` whose `element` renders
+ * the lazy binding, and the binding itself. Route parameters (`:slug`) and
+ * splats name nothing and are left out.
+ */
+export function deferredNames(record, importerSource) {
+  const names = new Set();
+  const parts = record.spec.split("/").filter((p) => p && p !== ".");
+  let last = parts.pop() ?? "";
+  last = last.replace(/\.[cm]?[jt]sx?$/, "");
+  if ((last === "index" || last === "..") && parts.length) last = parts.pop();
+  if (last && last !== "." && last !== ".." && last !== "index") names.add(last);
+  if (record.binding) {
+    names.add(record.binding);
+    const tag = new RegExp(`<Route\\b[^>]*\\belement=\\{\\s*<\\s*${record.binding}\\b[^>]*>`, "g");
+    for (const m of (importerSource ?? "").matchAll(tag)) {
+      const path = /\bpath=["']([^"']+)["']/.exec(m[0])?.[1] ?? "";
+      for (const segment of path.split("/")) if (segment && !/[:*]/.test(segment)) names.add(segment);
+    }
+  }
+  return [...names].sort();
+}
+
+/**
+ * Does a test name a deferred page? A path name counts as a URL segment inside
+ * a string literal of the test (`"/acme/config/hours"`, `` `/${slug}/hours?x` ``),
+ * except a literal that is an API address (`/api/…`): a fetch mock for
+ * `/api/admin/acme/products` names the endpoint, not the products screen. The
+ * binding counts as a whole word anywhere. An unreadable test names nothing it
+ * can prove, so it is kept — the safe reading of a hole.
+ */
+export function namesPage(testSource, names) {
+  if (testSource == null) return true;
+  const literals = [...testSource.matchAll(/(["'`])((?:\\.|(?!\1)[^\\\n])*)\1/g)]
+    .map((m) => m[2])
+    .filter((text) => !text.includes("/api/"));
+  return names.some((name) => {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (/^[A-Z]/.test(name)) return new RegExp(`(?<![\\w$])${escaped}(?![\\w$])`).test(testSource);
+    const segment = new RegExp(`/${escaped}(?=[/?#\\s]|$)`);
+    return literals.some((text) => segment.test(text));
+  });
+}
+
 /** Can a changed binding alter eager module evaluation, not just an export? */
 function initializationMayObserve(source, tainted, calls) {
   if (source == null) return true;
@@ -92,6 +138,7 @@ export function selectAffected(options) {
     routeOf = () => [],
     aliasesFor,
     calls = [],
+    deferredCalls = [],
   } = options;
 
   // A glob observes membership as well as exported symbols. Discover it
@@ -357,40 +404,94 @@ export function selectAffected(options) {
     }
 
   // ── propagate ────────────────────────────────────────────────────────────
-  const via = new Map(); // file -> {from, line, text, spec}
-  const queue = [...affected.keys()]; // includes the blind files seeded above
-  const settled = new Set();
-  while (queue.length > 0) {
-    const current = queue.shift();
-    if (settled.has(current)) continue;
-    settled.add(current);
-    const symbols = affected.get(current);
-    for (const { file, record } of importers.get(current) ?? []) {
-      const evaluationEffect = moduleEffects.has(current);
-      if (!evaluationEffect && !importReaches(record, symbols)) continue;
-      const previous = affected.get(file);
-      const alreadyEffectful = moduleEffects.has(file);
-      if (previous === "*" && (!evaluationEffect || alreadyEffectful)) continue;
+  //
+  // A DEFERRED edge — a dynamic `import()` in an arrow handed to one of the
+  // caller's `deferredCalls` (`lazyRoute(() => import("./hours"))`) — is not
+  // walked here. The page it loads runs only when its route renders, so a test
+  // that mounts the whole app to check one screen does not execute every other
+  // screen, yet walking the edge selected it for all of them: on the admin
+  // SPA, 80% of a plan's tests arrived through App → routes → one page. Each
+  // such edge is collected instead and resolved below, test by test.
+  const isDeferred = (record) =>
+    deferredCalls.length > 0 && record.dynamic && !record.glob && Boolean(record.wrapper) &&
+    deferredCalls.includes(record.wrapper);
+  const deferredHits = [];
+  const walk = (aff, effects, viaMap, queue) => {
+    const settled = new Set();
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (settled.has(current)) continue;
+      settled.add(current);
+      const symbols = aff.get(current);
+      for (const { file, record } of importers.get(current) ?? []) {
+        const evaluationEffect = effects.has(current);
+        if (!evaluationEffect && !importReaches(record, symbols)) continue;
+        if (isDeferred(record)) {
+          deferredHits.push({ page: current, importer: file, record });
+          continue;
+        }
+        const previous = aff.get(file);
+        const alreadyEffectful = effects.has(file);
+        if (previous === "*" && (!evaluationEffect || alreadyEffectful)) continue;
 
-      // Which of THIS file's exports can see what it just bound? Answering
-      // "all of them" is what made hop two lose the precision hop one has, and
-      // compounded it over every hop after (see exports-dataflow.mjs). Every
-      // uncertainty in there answers `"*"`, so this can only ever narrow a
-      // claim the old walk was already making.
-      const source = headSourceOf(file);
-      const effectful = evaluationEffect || initializationMayObserve(source, taintOf(record, symbols), calls);
-      const next = effectful ? "*" : narrowedExports(source, record, symbols, calls);
-      if (effectful) moduleEffects.add(file);
-      // Nothing here can observe it: the chain genuinely ends at this file.
-      if (next !== "*" && next.size === 0) continue;
-      // Already knew everything this hop carries — re-queueing would not add.
-      if (next !== "*" && previous && [...next].every((n) => previous.has(n))) continue;
+        // Which of THIS file's exports can see what it just bound? Answering
+        // "all of them" is what made hop two lose the precision hop one has, and
+        // compounded it over every hop after (see exports-dataflow.mjs). Every
+        // uncertainty in there answers `"*"`, so this can only ever narrow a
+        // claim the old walk was already making.
+        const source = headSourceOf(file);
+        const effectful = evaluationEffect || initializationMayObserve(source, taintOf(record, symbols), calls);
+        const next = effectful ? "*" : narrowedExports(source, record, symbols, calls);
+        if (effectful) effects.add(file);
+        // Nothing here can observe it: the chain genuinely ends at this file.
+        if (next !== "*" && next.size === 0) continue;
+        // Already knew everything this hop carries — re-queueing would not add.
+        if (next !== "*" && previous && [...next].every((n) => previous.has(n))) continue;
 
-      affected.set(file, next === "*" ? "*" : new Set([...(previous ?? []), ...next]));
-      if (!via.has(file)) via.set(file, { from: current, line: record.line, text: record.text, spec: record.spec });
-      settled.delete(file);
-      queue.push(file);
+        aff.set(file, next === "*" ? "*" : new Set([...(previous ?? []), ...next]));
+        if (!viaMap.has(file)) viaMap.set(file, { from: current, line: record.line, text: record.text, spec: record.spec });
+        settled.delete(file);
+        queue.push(file);
+      }
     }
+  };
+  const via = new Map(); // file -> {from, line, text, spec}
+  walk(affected, moduleEffects, via, [...affected.keys()]); // includes the blind files seeded above
+
+  // ── deferred edges, resolved per test ────────────────────────────────────
+  //
+  // A test crosses a deferred edge only when it NAMES the page: a URL segment
+  // the page answers (`"/acme/config/hours"` for `import("./hours")`, or a
+  // `path` on the `<Route>` that renders the lazy binding), or the binding
+  // itself. That is how this repo's app tests reach a screen: they push its
+  // address and mount the app. A test that reaches a page only by clicking to
+  // it from another one is not selected; the daily full suite on `main` runs it
+  // (ADR 0211 in the consumer accepts that trade). Everything the importer
+  // reaches is found by the ordinary walk seeded at the importer, then kept or
+  // dropped by that one rule.
+  const deferredReport = {};
+  const seenHits = new Set();
+  for (let h = 0; h < deferredHits.length; h += 1) {
+    const { page, importer, record } = deferredHits[h];
+    const key = `${importer}\0${record.spec}\0${record.line}`;
+    if (seenHits.has(key)) continue;
+    seenHits.add(key);
+    const names = deferredNames(record, headSourceOf(importer));
+    const aff = new Map([[importer, "*"]]);
+    const viaMap = new Map();
+    walk(aff, new Set(), viaMap, [importer]);
+    const named = [];
+    for (const file of aff.keys()) {
+      if (!isTest(file) || affected.has(file)) continue;
+      if (!namesPage(headSourceOf(file), names)) continue;
+      named.push(file);
+      affected.set(file, "*");
+      for (let node = file; viaMap.has(node) && !via.has(node); node = viaMap.get(node).from) via.set(node, viaMap.get(node));
+    }
+    if (named.length > 0 && !via.has(importer)) {
+      via.set(importer, { from: page, line: record.line, text: `${record.text} (deferred — the test names ${names.join(" | ")})`, spec: record.spec });
+    }
+    deferredReport[`${importer}:${record.line}`] = { page, names, tests: named.length };
   }
 
   // ── the answer ───────────────────────────────────────────────────────────
@@ -419,6 +520,9 @@ export function selectAffected(options) {
     // entry -> the changed non-source paths that routed to it, so a reviewer
     // can see WHY a file nobody edited is seeded as fully changed.
     routes: routeReport,
+    // importer:line -> the deferred page, the names a test must use to reach
+    // it, and how many tests did (see "deferred edges, resolved per test").
+    ...(Object.keys(deferredReport).length ? { deferred: deferredReport } : {}),
     // The graph this selection walked, for a caller that needs to answer a
     // second question over the SAME edges — which files a selected test's
     // verdict can depend on (lib/inputs.mjs). Handed out rather than rebuilt:

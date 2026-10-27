@@ -438,3 +438,94 @@ test("an export that calls a changed export in the same file is changed too", ()
   const result = run({ repoRoot: root, changed: ["src/entry.ts"], readBase });
   assert.deepEqual(result.tests, ["src/entry.test.ts"]);
 });
+
+// ── deferred edges: `lazyRoute(() => import("./page"))` ─────────────────────
+//
+// A test that mounts the whole app reaches every lazy page through the route
+// table, though it executes only the one its address renders. With the wrapper
+// declared in `deferredCalls`, such a test is selected for a page only when it
+// names it: a URL segment the page answers, a `<Route path>` that renders it,
+// or the lazy binding.
+function deferredApp(extraTests = {}) {
+  const baseHours = 'export const copy = "Horários";\n';
+  const headHours = 'export const copy = "Horário de funcionamento";\n';
+  return scenario({
+    head: {
+      "src/lazy.ts": "export const lazyRoute = (load) => load;\n",
+      "src/pages/hours/index.ts": headHours,
+      "src/pages/stock/index.ts": 'export const copy = "Estoque";\n',
+      "src/routes.tsx":
+        'import { lazyRoute } from "./lazy";\n' +
+        'const HoursPage = lazyRoute(() => import("./pages/hours").then((m) => ({ default: m.copy })));\n' +
+        'const StockPage = lazyRoute(async () => ({ default: (await import("./pages/stock")).copy }));\n' +
+        'export const routes = [<Route path="horarios" element={<HoursPage />} />, <Route path="estoque" element={<StockPage />} />];\n',
+      "src/app.ts": 'import { routes } from "./routes";\nexport const app = () => routes;\n',
+      "src/stock.test.ts": 'import { app } from "./app";\nwindow.history.pushState({}, "", "/acme/estoque");\napp();\n',
+      "src/hours-by-dir.test.ts": 'import { app } from "./app";\nwindow.history.pushState({}, "", "/acme/config/hours");\napp();\n',
+      "src/hours-by-route.test.ts": 'import { app } from "./app";\nwindow.history.pushState({}, "", `/${slug}/horarios?x=1`);\napp();\n',
+      "src/hours-by-binding.test.ts": 'import { app } from "./app";\n// renders HoursPage\nconst page = "HoursPage";\napp();\n',
+      ...extraTests,
+    },
+    base: { "src/pages/hours/index.ts": baseHours },
+  });
+}
+
+test("a deferred page reaches only the tests that name it", () => {
+  const { root, readBase } = deferredApp();
+  const result = run({ repoRoot: root, changed: ["src/pages/hours/index.ts"], readBase, deferredCalls: ["lazyRoute"] });
+  assert.deepEqual(result.tests, ["src/hours-by-binding.test.ts", "src/hours-by-dir.test.ts", "src/hours-by-route.test.ts"]);
+  assert.ok(!result.tests.includes("src/stock.test.ts"), "a test that renders another page is not selected");
+  const deferred = Object.values(result.deferred ?? {});
+  assert.equal(deferred.length, 1);
+  assert.deepEqual(deferred[0].names, ["HoursPage", "horarios", "hours"]);
+  assert.match(result.reasons["src/hours-by-dir.test.ts"].map((hop) => hop.statement).join("\n"), /deferred — the test names/);
+});
+
+test("without deferredCalls the lazy edge is an ordinary edge: every app test runs", () => {
+  const { root, readBase } = deferredApp();
+  const result = run({ repoRoot: root, changed: ["src/pages/hours/index.ts"], readBase });
+  assert.ok(result.tests.includes("src/stock.test.ts"));
+  assert.equal(result.tests.length, 4);
+  assert.equal(result.deferred, undefined);
+});
+
+test("the async wrapper form is deferred too", () => {
+  const { root, readBase } = deferredApp();
+  const result = run({
+    repoRoot: root,
+    changed: ["src/pages/stock/index.ts"],
+    readBase: (f) => (f === "src/pages/stock/index.ts" ? 'export const copy = "Inventário";\n' : readBase(f)),
+    deferredCalls: ["lazyRoute"],
+  });
+  assert.deepEqual(result.tests, ["src/stock.test.ts"]);
+});
+
+test("an import passed straight to a call loads eagerly and is never deferred", () => {
+  const { root, readBase } = scenario({
+    head: {
+      "src/lazy.ts": "export const lazyRoute = (load) => load;\n",
+      "src/page.ts": 'export const copy = "b";\n',
+      "src/routes.ts": 'import { lazyRoute } from "./lazy";\nexport const routes = lazyRoute(import("./page"));\n',
+      "src/routes.test.ts": 'import { routes } from "./routes";\nroutes;\n',
+    },
+    base: { "src/page.ts": 'export const copy = "a";\n' },
+  });
+  const result = run({ repoRoot: root, changed: ["src/page.ts"], readBase, deferredCalls: ["lazyRoute"] });
+  assert.deepEqual(result.tests, ["src/routes.test.ts"]);
+});
+
+test("a wrapper the caller did not declare is never deferred", () => {
+  const { root, readBase } = deferredApp();
+  const result = run({ repoRoot: root, changed: ["src/pages/hours/index.ts"], readBase, deferredCalls: ["lazy"] });
+  assert.ok(result.tests.includes("src/stock.test.ts"));
+});
+
+test("an API address with the page's segment does not name the page", () => {
+  const { root, readBase } = deferredApp({
+    "src/hours-api-mock.test.ts":
+      'import { app } from "./app";\nfetchMock("/api/admin/acme/hours");\nwindow.history.pushState({}, "", "/acme/estoque");\napp();\n',
+  });
+  const result = run({ repoRoot: root, changed: ["src/pages/hours/index.ts"], readBase, deferredCalls: ["lazyRoute"] });
+  assert.ok(!result.tests.includes("src/hours-api-mock.test.ts"), "a fetch mock for /api/…/hours names the endpoint, not the screen");
+  assert.ok(result.tests.includes("src/hours-by-dir.test.ts"));
+});

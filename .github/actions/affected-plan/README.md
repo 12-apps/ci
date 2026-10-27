@@ -457,3 +457,33 @@ its existing precedence. This option does not enable skip-green enforcement.
 Deploy the compatible engine first, wait for normal `v2` publication, then
 verify a fresh consumer run's resolved engine revision before consumer merge.
 Older engines ignore the new key and retain wider legacy selection.
+
+### Deferred imports (`deferredImports`)
+
+`lanes.<lane>.deferredImports` optionally names calls whose arrow argument
+defers a dynamic import until a route renders, for example `["lazyRoute"]` for
+`const HoursPage = lazyRoute(() => import("./hours"))`. Omitted or empty, every
+dynamic import stays an ordinary value edge.
+
+Without it, a test that mounts a whole app reaches every lazy page through the
+route table, though it executes only the page its address renders. On one
+consumer's admin SPA, 80% of a unit plan's tests arrived that way.
+
+With it, the edge from a page to the call that loads it is not walked in the
+ordinary propagation. A test that reaches the importer is selected for that page
+only when it **names** it:
+
+- a URL segment inside one of its string literals: the last segment of the
+  import path (`./hours` → `/hours`), or a literal `path` segment on a
+  `<Route>` whose `element` renders the lazy binding. A literal that is an API
+  address (`/api/…`) does not count;
+- or the lazy binding as a whole word.
+
+A test that reaches a page only by clicking to it from another page is not
+selected for it. Run the full suite on the default branch to cover that. Only
+the page body is deferred: the route descriptor and the call site are ordinary
+edges, so an edit to them selects as before.
+
+An import passed straight to a call (`lazyRoute(import("./x"))`) loads eagerly
+and is never deferred, and neither is a wrapper the lane does not name. The
+plan's reasons mark each deferred hop: `(deferred — the test names …)`.
