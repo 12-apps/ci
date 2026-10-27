@@ -158,11 +158,19 @@ export function changedKeys(base, head) {
   const before = declarationsOf(base);
   const now = declarationsOf(head);
   if (before === null || now === null) return null;
-  const names = (decls) => decls.map((d) => boundOf(d).join(",")).join("\0");
-  if (names(before) !== names(now)) return null;
+  const shape = (decls, source) => [
+    ...decls.map((d) => `${d.exported ? "export " : ""}${boundOf(d).join(",")}`),
+    ...[...scan(source).code.matchAll(/\bexport\s*\{[^}]*\}(?!\s*from)/g)].map((m) => canonical(m[0])),
+  ].join("\0");
+  // Same declarations, exported the same way: `export { EN as EN_US }` is
+  // no declaration's text, and renaming it breaks importers of `EN`.
+  if (shape(before, base) !== shape(now, head)) return null;
   const keys = new Set();
+  const changed = [];
   for (let i = 0; i < now.length; i += 1) {
-    if (canonical(before[i].text) === canonical(now[i].text)) continue;
+    // Compared as written, comments aside: a newline after `return` is
+    // behaviour (ASI), so whitespace is never normalised here.
+    if (verbatim(before[i].text) === verbatim(now[i].text)) continue;
     const was = objectDeclaration(before[i].text);
     const is = objectDeclaration(now[i].text);
     if (!was || !is || was.shell !== is.shell) return null;
@@ -170,17 +178,42 @@ export function changedKeys(base, head) {
     if (spreads(was) !== spreads(is)) return null;
     const old = valuesOf(was);
     const neu = valuesOf(is);
-    if (!old || !neu) return null;
+    if (!old || !neu || old.has("__proto__") || neu.has("__proto__")) return null;
+    // Order is behaviour: a key after a spread overrides it, before it is
+    // overridden, and `Object.keys` reads the order itself.
+    const order = (o, other) => o.entries.map((e) => (e.spread ? `...${e.spread}` : e.key)).filter((k) => k.startsWith("...") || other.has(k));
+    if (order(was, neu).join("\0") !== order(is, old).join("\0")) return null;
     for (const key of new Set([...old.keys(), ...neu.keys()])) {
       const a = old.get(key);
       const b = neu.get(key);
-      if (a !== undefined && b !== undefined && canonical(a) === canonical(b)) continue;
+      if (a !== undefined && b !== undefined && verbatim(a) === verbatim(b)) continue;
       if ((a !== undefined && !inertValue(a)) || (b !== undefined && !inertValue(b))) return null;
       keys.add(key);
+    }
+    changed.push(now[i].name);
+  }
+  // A changed object reached any way but a reader's own key — read by a
+  // sibling entry (`welcome: () => `${EN.shop}``), nested in another
+  // declaration, or measured at load (`EN.a.length`) — is not a key change.
+  for (const name of changed) {
+    for (const decls of [before, now]) {
+      for (const d of decls) {
+        if (!d.refs.has(name)) continue;
+        const uses = occurrences(scan(d.text).masked, name).length;
+        if (d.name === name) {
+          if (uses !== 1) return null;
+          continue;
+        }
+        const holder = objectDeclaration(d.text);
+        if (!holder || holder.entries.filter((e) => e.spread === name).length !== uses) return null;
+      }
     }
   }
   return keys;
 }
+
+/** A declaration's source, comments stripped and otherwise as written. */
+const verbatim = (text) => scan(text).code.trim();
 
 /**
  * `source` scanned — `code` (comments stripped) and `masked` (literal contents
@@ -216,28 +249,47 @@ function memberAt(masked, at) {
 }
 
 /**
- * The keys read through `locals` in masked code, or null when any use is not
- * a plain key read (the module docblock lists the shapes).
+ * Every property a member chain reads from `at` in masked code — `.a().b?.c`
+ * is `a`, `b`, `c` — and where the chain ends. Calls in the chain are skipped
+ * over; a computed read (`[k]`) ends it, and the caller widens.
+ */
+function chainAt(masked, at) {
+  const segments = [];
+  let end = at;
+  for (;;) {
+    const call = /^\s*(?:\?\.)?\s*\(/.exec(masked.slice(end));
+    if (call) {
+      const close = closing(masked, end + call[0].length - 1);
+      if (close === -1) return null;
+      end = close + 1;
+      continue;
+    }
+    const member = new RegExp(`^\\s*\\??\\.\\s*(${IDENT})`).exec(masked.slice(end));
+    if (!member) return { segments, end };
+    segments.push(member[1]);
+    end += member[0].length;
+  }
+}
+
+/**
+ * The keys read through `locals` in masked code, with the aliases bound to
+ * them, or null when any use is not a plain key read (the module docblock
+ * lists the shapes). Every property along a chain counts as read: a pack
+ * reached one level down (`copy.till().key`) is still read by its key.
  */
 function keysRead(masked, locals) {
   const keys = new Set();
   const aliases = [];
   for (const local of locals) {
     for (const at of occurrences(masked, local)) {
-      let end = at + local.length;
-      const call = /^\s*(?:\?\.)?\s*\(/.exec(masked.slice(end));
-      if (call) {
-        const close = closing(masked, end + call[0].length - 1);
-        if (close === -1) return null;
-        end = close + 1;
-      }
-      const key = memberAt(masked, end);
-      if (key !== null) {
-        keys.add(key);
+      const chain = chainAt(masked, at + local.length);
+      if (chain === null) return null;
+      if (chain.segments.length > 0) {
+        chain.segments.forEach((key) => keys.add(key));
         continue;
       }
       const before = masked.slice(0, at);
-      if (!/^\s*(?:;|\n|$)/.test(masked.slice(end))) return null;
+      if (!/^\s*(?:;|\n|$)/.test(masked.slice(chain.end))) return null;
       const alias = new RegExp(`(?:const|let|var)\\s+(${IDENT})\\s*=\\s*$`).exec(before);
       if (alias) {
         aliases.push(alias[1]);
@@ -254,13 +306,22 @@ function keysRead(masked, locals) {
   }
   for (const alias of aliases) {
     for (const at of occurrences(masked, alias)) {
-      const key = memberAt(masked, at + alias.length);
-      if (key !== null) keys.add(key);
+      const chain = chainAt(masked, at + alias.length);
+      if (chain === null) return null;
+      if (chain.segments.length > 0) chain.segments.forEach((key) => keys.add(key));
       else if (!/(?:const|let|var)\s+$/.test(masked.slice(0, at))) return null;
     }
   }
-  return keys;
+  return { keys, aliases };
 }
+
+/**
+ * Does the masked text hide a use the code shows? The scanner can read JSX's
+ * `{a}/{b}` as a regex and blank what lies between; a use that vanishes that
+ * way must widen, not read as no use at all.
+ */
+const hidden = ({ code, masked }, locals) =>
+  locals.some((local) => occurrences(code, local).length > occurrences(masked, local).length);
 
 /** The local names a record binds — none for a wildcard (namespace, default, require). */
 const localsOf = (record) => (record.wildcard ? [] : (record.bindings ?? []).map(([, local]) => local));
@@ -283,7 +344,7 @@ function reexportsOf(masked, locals) {
     }
     return hit ? statement.replace(/[^\n]/g, " ") : statement;
   });
-  const fallback = new RegExp(`\\bexport\\s+default\\s+(?:${locals.map(escapeRegExp).join("|")})(?![\\w$])\\s*;?`, "g");
+  const fallback = new RegExp(`\\bexport\\s+default\\s+(?:${locals.map(escapeRegExp).join("|")})(?![\\w$])(?=[ \\t]*(?:;|\\n|$))`, "g");
   text = text.replace(fallback, (statement) => {
     names.add("default");
     return statement.replace(/[^\n]/g, " ");
@@ -303,8 +364,10 @@ export function keyedUse(source, record, keys) {
   const locals = localsOf(record);
   if (source == null || locals.length === 0) return null;
   if (/^export\b/.test(record.statement ?? "")) return { decls: new Set(), reexports: new Set(locals) };
-  const { names: reexports, text: code } = reexportsOf(scanned(source).masked, locals);
-  const hits = (read) => [...read].some((key) => keys.has(key));
+  const whole = scanned(source);
+  if (hidden(whole, locals)) return null;
+  const { names: reexports, text: code } = reexportsOf(whole.masked, locals);
+  const hits = (read) => [...read.keys].some((key) => keys.has(key));
   const decls = declarationsOf(source);
   if (decls === null) {
     const read = keysRead(code, locals);
@@ -316,8 +379,12 @@ export function keyedUse(source, record, keys) {
     if (!locals.some((local) => d.refs.has(local))) continue;
     if (d.name === "default" && reexports.has("default")) continue; // `export default copy`, handed on above
     if (boundOf(d).some((n) => locals.includes(n))) return null; // a local re-bound at the top level
-    const read = keysRead(scan(d.text).masked, locals);
-    if (read === null) return null;
+    const text = scan(d.text);
+    if (hidden(text, locals)) return null;
+    const read = keysRead(text.masked, locals);
+    // A top-level alias (`const COPY = PACK`) is read in other declarations,
+    // which this one-declaration reading cannot follow.
+    if (read === null || read.aliases.some((alias) => boundOf(d).includes(alias))) return null;
     if (hits(read)) boundOf(d).forEach((n) => out.add(n));
   }
   return { decls: out, reexports };
@@ -333,17 +400,25 @@ export function keyedUse(source, record, keys) {
 export function passesKeysThrough(source, record) {
   const locals = localsOf(record);
   if (source == null || locals.length === 0) return false;
-  const { code, masked } = scanned(source);
-  if (reexportsOf(masked, locals).names.size > 0) return false;
-  return locals.every((local) =>
-    occurrences(masked, local).every((at) => {
-      if (!/^\s*(?:[,}]|$)/.test(masked.slice(at + local.length))) return false;
-      const before = masked.slice(0, at);
-      if (/\.\.\.\s*$/.test(before)) return true;
-      const key = /(["'])\s*\1\s*:\s*$/.exec(before);
-      if (!key) return false;
-      const literal = code.slice(key.index + 1, key.index + key[0].indexOf(key[1], 1));
-      return !new RegExp(`^${IDENT}$`).test(literal);
-    }),
-  );
+  const whole = scanned(source);
+  if (hidden(whole, locals) || reexportsOf(whole.masked, locals).names.size > 0) return false;
+  const decls = declarationsOf(source);
+  if (decls === null) return false;
+  // Every use is a direct entry of a top-level object declaration: `...PACK`,
+  // or `"pt-BR": PACK`. Anywhere else — nested (`{ en: { ...PACK } }`), in a
+  // call (`Object.values({ ...PACK })`) — the keys could move a level.
+  const ident = new RegExp(`^${IDENT}$`);
+  return locals.every((local) => {
+    let counted = 0;
+    for (const d of decls) {
+      if (!d.refs.has(local)) continue;
+      const holder = objectDeclaration(d.text);
+      if (!holder) return false;
+      const uses = occurrences(scan(d.text).masked, local).length;
+      const direct = holder.entries.filter((e) => e.spread === local || (!e.spread && e.value.trim() === local && !ident.test(e.key))).length;
+      if (uses !== direct) return false;
+      counted += uses;
+    }
+    return counted === occurrences(whole.masked, local).length;
+  });
 }
