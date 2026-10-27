@@ -56,19 +56,35 @@ test("changedKeys widens on anything but inert entry edits", () => {
 
 const KEYS = new Set(["tillAlreadyOpen"]);
 const SPEC = "./copy";
-const use = (body) => {
+const useOf = (body, spec = SPEC) => {
   const source = `import { tillRefusal } from "${SPEC}";\n${body}`;
-  return keyedUse(source, record(source, SPEC), KEYS);
+  return keyedUse(source, record(source, spec), KEYS);
+};
+const decls = (body) => {
+  const result = useOf(body);
+  return result === null ? null : result.decls === "*" ? "*" : [...result.decls];
 };
 
 test("keyedUse finds the declarations reading a changed key", () => {
-  assert.deepEqual([...use("export function a() {\n  return tillRefusal().tillAlreadyOpen;\n}\nexport function b() {\n  return tillRefusal().operatorBusy(1);\n}\n")], ["a"]);
-  assert.deepEqual([...use("export function a() {\n  const copy = tillRefusal();\n  return { x: copy.tillAlreadyOpen, y: copy?.other };\n}\n")], ["a"]);
-  assert.deepEqual([...use("export function a() {\n  const { tillAlreadyOpen, other: o } = tillRefusal();\n  return tillAlreadyOpen;\n}\n")], ["a"]);
-  assert.deepEqual([...use("export function a() {\n  return `${tillRefusal().tillAlreadyOpen}!`;\n}\n")], ["a"]);
-  assert.deepEqual([...use("export function b() {\n  return tillRefusal().operatorBusy;\n}\n")], [], "reads only another key");
-  assert.equal(use('describe("x", () => {\n  expect(tillRefusal().tillAlreadyOpen).toBe("a");\n});\n'), "*", "a test file reading it");
-  assert.deepEqual([...use('describe("x", () => {\n  expect(tillRefusal().other).toBe("a");\n});\n')], [], "a test file reading another key");
+  assert.deepEqual(decls("export function a() {\n  return tillRefusal().tillAlreadyOpen;\n}\nexport function b() {\n  return tillRefusal().operatorBusy(1);\n}\n"), ["a"]);
+  assert.deepEqual(decls("export function a() {\n  const copy = tillRefusal();\n  return { x: copy.tillAlreadyOpen, y: copy?.other };\n}\n"), ["a"]);
+  assert.deepEqual(decls("export function a() {\n  const { tillAlreadyOpen, other: o } = tillRefusal();\n  return tillAlreadyOpen;\n}\n"), ["a"]);
+  assert.deepEqual(decls("export function a() {\n  return `${tillRefusal().tillAlreadyOpen}!`;\n}\n"), ["a"]);
+  assert.deepEqual(decls("export function b() {\n  return tillRefusal().operatorBusy;\n}\n"), [], "reads only another key");
+  assert.equal(decls('describe("x", () => {\n  expect(tillRefusal().tillAlreadyOpen).toBe("a");\n});\n'), "*", "a test file reading it");
+  assert.deepEqual(decls('describe("x", () => {\n  expect(tillRefusal().other).toBe("a");\n});\n'), [], "a test file reading another key");
+});
+
+test("keyedUse reports the names a file hands the binding on under", () => {
+  const local = useOf("export { tillRefusal as copy };\nexport function a() {\n  return tillRefusal().other;\n}\n");
+  assert.deepEqual([...local.reexports], ["copy"]);
+  assert.deepEqual([...local.decls], []);
+  assert.deepEqual([...useOf("export default tillRefusal;\n").reexports], ["default"]);
+  const barrel = 'import { tillRefusal } from "./copy";\nexport { tillRefusal } from "./copy";\nexport const a = () => tillRefusal().tillAlreadyOpen;\n';
+  const reexport = parseImports(barrel).find((r) => r.spec === SPEC && /^export/.test(r.statement));
+  assert.deepEqual([...keyedUse(barrel, reexport, KEYS).reexports], ["tillRefusal"]);
+  const imported = parseImports(barrel).find((r) => r.spec === SPEC && /^import/.test(r.statement));
+  assert.deepEqual([...keyedUse(barrel, imported, KEYS).decls], ["a"]);
 });
 
 test("keyedUse widens on every use that is not a plain key read", () => {
@@ -79,11 +95,9 @@ test("keyedUse widens on every use that is not a plain key read", () => {
     "returned": "export function a() {\n  return tillRefusal();\n}\n",
     "an alias passed on": "export function a() {\n  const copy = tillRefusal();\n  return render(copy);\n}\n",
     "a rest pattern": "export function a() {\n  const { ...all } = tillRefusal();\n  return all;\n}\n",
-    "re-exported": "export { tillRefusal };\n",
-    "a default export": "export default tillRefusal;\n",
     "Object.keys in a test": "describe(\"x\", () => {\n  Object.keys(tillRefusal());\n});\n",
   };
-  for (const [label, body] of Object.entries(cases)) assert.equal(use(body), null, label);
+  for (const [label, body] of Object.entries(cases)) assert.equal(useOf(body), null, label);
   const namespace = 'import * as copy from "./copy";\nexport const a = () => copy.tillRefusal().tillAlreadyOpen;\n';
   assert.equal(keyedUse(namespace, record(namespace, SPEC), KEYS), null, "a namespace import");
 });
@@ -197,4 +211,50 @@ test("a catalog also reached by an ordinary change carries everything", () => {
     isCatalog,
   });
   assert.deepEqual(result.tests, ["src/close.test.ts", "src/open.test.ts"]);
+});
+
+test("a barrel that re-exports the accessor hands the keys on", () => {
+  for (const errors of [
+    'export { tillRefusal } from "./copy/till";\nexport class ApiError extends Error {}\n',
+    'import { tillRefusal } from "./copy/till";\nexport { tillRefusal };\nexport class ApiError extends Error {}\n',
+  ]) {
+    const { root, readBase } = tillApp({
+      "src/errors.ts": errors,
+      "src/open.ts": 'import { tillRefusal } from "./errors";\nexport function refuseOpen() {\n  return tillRefusal().tillAlreadyOpen;\n}\n',
+      "src/close.ts": 'import { tillRefusal } from "./errors";\nexport function refuseClose() {\n  return tillRefusal().tillNotOpen;\n}\n',
+      "src/api.test.ts": 'import { ApiError } from "./errors";\nnew ApiError();\n',
+    });
+    const result = select({ repoRoot: root, changed: ["src/copy/till.en-US.ts"], readBase, isCatalog });
+    assert.deepEqual(result.tests, ["src/open.test.ts"], errors);
+  }
+});
+
+test("a barrel's own reader of a changed key is reached, and so is its importer", () => {
+  const { root, readBase } = tillApp({
+    "src/errors.ts":
+      'import { tillRefusal } from "./copy/till";\nexport { tillRefusal } from "./copy/till";\n' +
+      "export class OpenError extends Error {\n  constructor() {\n    super(tillRefusal().tillAlreadyOpen);\n  }\n}\n" +
+      "export class Other extends Error {}\n",
+    "src/raise.test.ts": 'import { OpenError } from "./errors";\nnew OpenError();\n',
+    "src/other.test.ts": 'import { Other } from "./errors";\nnew Other();\n',
+  });
+  const result = select({ repoRoot: root, changed: ["src/copy/till.en-US.ts"], readBase, isCatalog });
+  assert.deepEqual(result.tests, ["src/open.test.ts", "src/raise.test.ts"]);
+});
+
+test("a class reading a changed name in its constructor is not a load effect; a changed base is", () => {
+  const base = 'export const word = () => "a";\n';
+  const files = (errors) => scenario({
+    head: {
+      "src/word.ts": 'export const word = () => "b";\n',
+      "src/errors.ts": errors,
+      "src/raise.test.ts": 'import { Raise } from "./errors";\nnew Raise();\n',
+      "src/other.test.ts": 'import { Other } from "./errors";\nnew Other();\n',
+    },
+    base: { "src/word.ts": base },
+  });
+  const deferred = files('import { word } from "./word";\nexport class Raise extends Error {\n  constructor() {\n    super(word());\n  }\n}\nexport class Other extends Error {}\n');
+  assert.deepEqual(select({ repoRoot: deferred.root, changed: ["src/word.ts"], readBase: deferred.readBase }).tests, ["src/raise.test.ts"]);
+  const heritage = files('import { word } from "./word";\nexport class Raise extends word {}\nexport class Other extends Error {}\n');
+  assert.deepEqual(select({ repoRoot: heritage.root, changed: ["src/word.ts"], readBase: heritage.readBase }).tests, ["src/other.test.ts", "src/raise.test.ts"]);
 });

@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
-import { inertDeclaration, moduleExports, narrowModuleContext, pureModule, topLevelUnits } from "../lib/module-context.mjs";
+import { inertClass, inertDeclaration, moduleExports, narrowModuleContext, pureModule, topLevelUnits } from "../lib/module-context.mjs";
 import { selectAffected } from "../lib/select.mjs";
 
 const subject = "src/subject.test.mjs";
@@ -387,4 +387,23 @@ test("an import cycle is never pure", () => {
     exportsOf: (file) => new Set([file[0]]),
   };
   assert.equal(pureModule("a.mjs", context), false);
+});
+
+test("inertClass: a class body runs at use, its heritage and static parts at load", () => {
+  const hot = new Set(["Changed"]);
+  for (const source of [
+    "export class A extends ApiError {\n  constructor(c: string) {\n    super(409, refusal().x(c));\n  }\n}",
+    "class A {\n  x = make();\n  get y() { return 1; }\n}",
+    "export abstract class A<T> extends Base.Inner<T> implements I {\n  m(): T { return run(); }\n}",
+  ]) assert.equal(inertClass(source, hot), true, source);
+  for (const source of [
+    "export class A extends Changed {}",
+    "class A extends mixin(B) {}",
+    "class A {\n  static x = make();\n}",
+    "class A {\n  static {\n    run();\n  }\n}",
+    "class A {\n  [key] = 1;\n}",
+    "@dec\nclass A {}",
+    "class A {\n  @dec m() {}\n}",
+    "class A {}\nrun();",
+  ]) assert.equal(inertClass(source, hot), false, source);
 });

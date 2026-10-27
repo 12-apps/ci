@@ -265,40 +265,62 @@ function keysRead(masked, locals) {
 /** The local names a record binds — none for a wildcard (namespace, default, require). */
 const localsOf = (record) => (record.wildcard ? [] : (record.bindings ?? []).map(([, local]) => local));
 
-/** Does `masked` re-export one of `locals` (`export { copy }`, `export default copy`)? */
-const reexports = (masked, locals) =>
-  locals.some((local) =>
-    new RegExp(`\\bexport\\s*\\{[^}]*(?<![\\w$])${escapeRegExp(local)}(?![\\w$])`).test(masked) ||
-    new RegExp(`\\bexport\\s+default\\s+${escapeRegExp(local)}(?![\\w$])`).test(masked));
+/**
+ * The names under which `masked` hands one of `locals` on: `export { copy }`,
+ * `export { copy as other }`, `export default copy`. Each such statement is
+ * blanked in the returned text, so it is not read again as a use.
+ */
+function reexportsOf(masked, locals) {
+  const names = new Set();
+  let text = masked.replace(/\bexport\s*\{([^}]*)\}/g, (statement, list) => {
+    let hit = false;
+    for (const spec of list.split(",").map((part) => part.trim()).filter(Boolean)) {
+      const [orig, alias] = spec.split(/\s+as\s+/).map((part) => part.trim());
+      if (locals.includes(orig)) {
+        names.add(alias ?? orig);
+        hit = true;
+      }
+    }
+    return hit ? statement.replace(/[^\n]/g, " ") : statement;
+  });
+  const fallback = new RegExp(`\\bexport\\s+default\\s+(?:${locals.map(escapeRegExp).join("|")})(?![\\w$])\\s*;?`, "g");
+  text = text.replace(fallback, (statement) => {
+    names.add("default");
+    return statement.replace(/[^\n]/g, " ");
+  });
+  return { names, text };
+}
 
 /**
- * Which declarations of `source` read one of `keys` through what `record`
- * bound: a Set of declaration names (empty when none does), `"*"` for a file
- * with no declarations to bracket (a test) that reads one, or null when a use
- * is not a plain key read and the caller must fall back to the ordinary
- * analysis.
+ * What `source` does with what `record` bound from a catalog carrying `keys`:
+ * `decls`, the declarations that read one of the keys (`"*"` for a file with
+ * no declarations to bracket, a test, that reads one), and `reexports`, the
+ * names it hands the binding on under (an `export { x } from` record hands on
+ * all of its names). Null when a use is not a plain key read: the caller
+ * falls back to the ordinary analysis.
  */
 export function keyedUse(source, record, keys) {
   const locals = localsOf(record);
   if (source == null || locals.length === 0) return null;
-  const { masked: code } = scanned(source);
-  if (reexports(code, locals)) return null;
+  if (/^export\b/.test(record.statement ?? "")) return { decls: new Set(), reexports: new Set(locals) };
+  const { names: reexports, text: code } = reexportsOf(scanned(source).masked, locals);
   const hits = (read) => [...read].some((key) => keys.has(key));
   const decls = declarationsOf(source);
   if (decls === null) {
     const read = keysRead(code, locals);
     if (read === null) return null;
-    return hits(read) ? "*" : new Set();
+    return { decls: hits(read) ? "*" : new Set(), reexports };
   }
   const out = new Set();
   for (const d of decls) {
     if (!locals.some((local) => d.refs.has(local))) continue;
+    if (d.name === "default" && reexports.has("default")) continue; // `export default copy`, handed on above
     if (boundOf(d).some((n) => locals.includes(n))) return null; // a local re-bound at the top level
     const read = keysRead(scan(d.text).masked, locals);
     if (read === null) return null;
     if (hits(read)) boundOf(d).forEach((n) => out.add(n));
   }
-  return out;
+  return { decls: out, reexports };
 }
 
 /**
@@ -312,7 +334,7 @@ export function passesKeysThrough(source, record) {
   const locals = localsOf(record);
   if (source == null || locals.length === 0) return false;
   const { code, masked } = scanned(source);
-  if (reexports(masked, locals)) return false;
+  if (reexportsOf(masked, locals).names.size > 0) return false;
   return locals.every((local) =>
     occurrences(masked, local).every((at) => {
       if (!/^\s*(?:[,}]|$)/.test(masked.slice(at + local.length))) return false;
