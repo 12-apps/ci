@@ -10,6 +10,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { changedKeys, keyedUse, passesKeysThrough } from "./catalogs.mjs";
 import { boundOf, changedDeclarations, declarationsOf, reachableExports, spread, withinFile } from "./exports-dataflow.mjs";
 import { inertDeclaration, isBuiltin, loadsCleanly, moduleExports, narrowModuleContext } from "./module-context.mjs";
 import { buildGraph, EXTENSIONS, listSourceFiles, loadPackages } from "./modules.mjs";
@@ -36,6 +37,17 @@ function narrowedExports(source, record, symbols, calls) {
   const tainted = taintOf(record, symbols);
   if (source == null || tainted === "*") return "*";
   return reachableExports(source, tainted, { calls });
+}
+
+/**
+ * The exports of `file` that can see its declarations `hot` — the ones that
+ * read a changed catalog key (catalogs.mjs) — following its own references.
+ */
+function keyedExports(source, hot, calls) {
+  const decls = declarationsOf(source, { calls });
+  if (decls === null || !decls.some((d) => d.exported || d.call)) return "*";
+  const reach = spread(decls, hot);
+  return new Set(decls.filter((d) => (d.exported || d.call) && reach.has(d.name)).flatMap(boundOf));
 }
 
 /**
@@ -139,6 +151,7 @@ export function selectAffected(options) {
     aliasesFor,
     calls = [],
     deferredCalls = [],
+    isCatalog = () => false,
   } = options;
 
   // A glob observes membership as well as exported symbols. Discover it
@@ -298,6 +311,8 @@ export function selectAffected(options) {
   // binding is unused. Keep this separate from ordinary symbol taint, which
   // can still narrow through an intermediate file's deferred functions.
   const moduleEffects = new Set();
+  // file -> the catalog keys it carries, for a catalog reached ONLY by keys.
+  const catalogKeys = new Map();
   const symbolReport = {};
   const routeReport = {};
   for (const file of direct) {
@@ -315,6 +330,17 @@ export function selectAffected(options) {
       continue;
     }
     const base = baseSources.get(file);
+    // A declared catalog whose edit only moved inert entries carries KEYS, not
+    // an initialization effect (catalogs.mjs). Its exports are all "changed";
+    // the walk lets only the readers of those keys through.
+    const keys = isCatalog(file) ? changedKeys(base, head) : null;
+    if (keys !== null) {
+      if (keys.size === 0) continue;
+      affected.set(file, "*");
+      catalogKeys.set(file, keys);
+      symbolReport[file] = [...keys].sort().map((key) => `.${key}`);
+      continue;
+    }
     // `*` from a module-context edit — a new import, a private helper — is
     // re-proven over the whole file: when nothing new runs at load, only the
     // exports that can reach the edit are affected (module-context.mjs).
@@ -416,7 +442,7 @@ export function selectAffected(options) {
     deferredCalls.length > 0 && record.dynamic && !record.glob && Boolean(record.wrapper) &&
     deferredCalls.includes(record.wrapper);
   const deferredHits = [];
-  const walk = (aff, effects, viaMap, queue) => {
+  const walk = (aff, effects, viaMap, queue, keyed = new Map()) => {
     const settled = new Set();
     while (queue.length > 0) {
       const current = queue.shift();
@@ -430,7 +456,30 @@ export function selectAffected(options) {
           deferredHits.push({ page: current, importer: file, record });
           continue;
         }
-        const previous = aff.get(file);
+        const source = headSourceOf(file);
+        // A catalog reached only by keys (catalogs.mjs): another catalog that
+        // hands the pack on carries the same keys; any other importer is
+        // reached by the declarations that read one of them. Every use that
+        // is not a plain key read falls through to the ordinary hop below.
+        const keys = evaluationEffect ? undefined : keyed.get(current);
+        let keyedTaint = null;
+        if (keys && isCatalog(file) && (!aff.has(file) || keyed.has(file)) && passesKeysThrough(source, record)) {
+          const carried = keyed.get(file) ?? new Set();
+          if ([...keys].every((key) => carried.has(key))) continue;
+          keyed.set(file, new Set([...carried, ...keys]));
+          aff.set(file, "*");
+          if (!viaMap.has(file)) viaMap.set(file, { from: current, line: record.line, text: record.text, spec: record.spec });
+          settled.delete(file);
+          queue.push(file);
+          continue;
+        }
+        if (keys && !isCatalog(file)) {
+          keyedTaint = keyedUse(source, record, keys);
+          if (keyedTaint !== null && keyedTaint !== "*" && keyedTaint.size === 0) continue;
+        }
+        // Reached by anything but keys: a catalog here carries everything.
+        const wasKeyed = keyed.delete(file);
+        const previous = wasKeyed ? undefined : aff.get(file);
         const alreadyEffectful = effects.has(file);
         if (previous === "*" && (!evaluationEffect || alreadyEffectful)) continue;
 
@@ -439,9 +488,13 @@ export function selectAffected(options) {
         // compounded it over every hop after (see exports-dataflow.mjs). Every
         // uncertainty in there answers `"*"`, so this can only ever narrow a
         // claim the old walk was already making.
-        const source = headSourceOf(file);
-        const effectful = evaluationEffect || initializationMayObserve(source, taintOf(record, symbols), calls);
-        const next = effectful ? "*" : narrowedExports(source, record, symbols, calls);
+        const taint = keyedTaint === null ? taintOf(record, symbols) : keyedTaint;
+        const effectful = evaluationEffect || initializationMayObserve(source, taint, calls);
+        const next = effectful || wasKeyed
+          ? "*"
+          : keyedTaint === null
+            ? narrowedExports(source, record, symbols, calls)
+            : keyedTaint === "*" ? "*" : keyedExports(source, keyedTaint, calls);
         if (effectful) effects.add(file);
         // Nothing here can observe it: the chain genuinely ends at this file.
         if (next !== "*" && next.size === 0) continue;
@@ -456,7 +509,7 @@ export function selectAffected(options) {
     }
   };
   const via = new Map(); // file -> {from, line, text, spec}
-  walk(affected, moduleEffects, via, [...affected.keys()]); // includes the blind files seeded above
+  walk(affected, moduleEffects, via, [...affected.keys()], catalogKeys); // includes the blind files seeded above
 
   // ── deferred edges, resolved per test ────────────────────────────────────
   //

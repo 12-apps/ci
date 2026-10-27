@@ -530,6 +530,10 @@ if (globalTests.length === 0 && [...changed, ...deleted].some(isGlobalChange)) {
   process.exit(0);
 }
 
+const catalogPattern = Array.isArray(laneConfig.keyedCatalogs) && laneConfig.keyedCatalogs.length > 0
+  ? new RegExp(laneConfig.keyedCatalogs.map((source) => `(?:${source})`).join("|"))
+  : null;
+
 const result = selectAffected({
   repoRoot,
   changed,
@@ -546,6 +550,9 @@ const result = selectAffected({
   // `lanes.<lane>.deferredImports`: calls whose arrow argument defers a dynamic
   // import until a route renders (`lazyRoute`). See select.mjs, "deferred edges".
   deferredCalls: Array.isArray(laneConfig.deferredImports) ? laneConfig.deferredImports : [],
+  // `lanes.<lane>.keyedCatalogs`: patterns of the files whose objects are read
+  // one key at a time (copy packs). See lib/catalogs.mjs.
+  isCatalog: catalogPattern ? (f) => catalogPattern.test(f) : () => false,
 });
 
 if (globalChanges.size > 0 && result.mode === "narrowed") {
