@@ -197,3 +197,19 @@ test("CLI: an unreadable plan exits non-zero so the workflow runs the plan unfil
   const { code } = cli(dir, ["--lane", "unit", "--plan", "absent.json", "--manifest", "m.json"]);
   assert.notEqual(code, 0);
 });
+
+test("a long decision list reaches a piped stdout whole", () => {
+  // `process.exit(main())` ended the process while a pipe still held queued
+  // writes: 40 of 148 consumer unit plans logged as few as 382 of 3,536
+  // `would skip:` lines. The counts were right; the list was cut.
+  const n = 6000;
+  const tests = Array.from({ length: n }, (_, i) => `src/t${i}.test.ts`);
+  const inputs = Object.fromEntries(tests.map((t, i) => [t, H(i + 1)]));
+  const entries = Object.fromEntries(tests.map((t, i) => [t, { hash: H(i + 1), sha: SHA, run: "9" }]));
+  const dir = mkdtempSync(join(TMP, "long-"));
+  writeFileSync(join(dir, "plan.json"), JSON.stringify({ ...PLAN, tests, inputs, counts: { selected: n, shardTotal: 4 } }));
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest(entries)));
+  const out = spawnSync(process.execPath, [CLI, "--lane", "unit", "--plan", join(dir, "plan.json"), "--manifest", join(dir, "manifest.json"), "--policy", "shadow"], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  assert.equal(out.status, 0, out.stderr);
+  assert.equal(out.stdout.split("\n").filter((l) => l.includes("would skip:")).length, n);
+});
