@@ -95,4 +95,5 @@ function main() {
   return 0;
 }
 
-if (process.argv[1] && process.argv[1].endsWith("record.mjs")) process.exit(main());
+// `exitCode`, never `process.exit()` — see filter.mjs.
+if (process.argv[1] && process.argv[1].endsWith("record.mjs")) process.exitCode = main();

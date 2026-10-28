@@ -185,4 +185,6 @@ function main() {
   return 0;
 }
 
-if (process.argv[1] && process.argv[1].endsWith("filter.mjs")) process.exit(main());
+// `exitCode`, never `process.exit()`: exiting drops what a pipe still holds, and
+// a long decision list was cut short in the job log.
+if (process.argv[1] && process.argv[1].endsWith("filter.mjs")) process.exitCode = main();

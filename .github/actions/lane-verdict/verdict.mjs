@@ -142,4 +142,5 @@ function main(argv) {
   return 2;
 }
 
-if (process.argv[1] && process.argv[1].endsWith("verdict.mjs")) process.exit(main(process.argv.slice(2)));
+// `exitCode`, never `process.exit()`: exiting drops what a pipe still holds.
+if (process.argv[1] && process.argv[1].endsWith("verdict.mjs")) process.exitCode = main(process.argv.slice(2));
