@@ -129,7 +129,7 @@ test('identical base and HEAD trees with different ancestry cannot reuse narrowe
     const key = execute(fp, { BASE_SHA: base, MERGE_BASE: mergeBase, FP_CMD: 'git rev-parse HEAD^{tree}', PLAN_CONFIG: '.affected-plan.json' }, cwd);
     assert.equal(key.status, 0, key.stderr);
     assert.ok(key.outputs.value);
-    execFileSync(process.execPath, [cli, '--base', base, '--out', 'plan.json'], { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    execFileSync(process.execPath, [cli, '--base', base, '--out', 'plan.json'], { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GITHUB_EVENT_NAME: '' } });
     results.push({ tree: git('rev-parse', 'HEAD^{tree}'), mergeBase, key: key.outputs.value, tests: JSON.parse(readFileSync(join(cwd, 'plan.json'))).tests });
   }
   assert.equal(results[0].tree, results[1].tree);

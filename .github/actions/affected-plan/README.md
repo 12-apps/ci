@@ -116,7 +116,9 @@ sound when something unconditional runs afterwards.
 **No pull request runs a lane's whole suite** (FUT-3870). When
 `GITHUB_EVENT_NAME` is `pull_request`, a plan that would answer `full` (every
 row above that says so) fails the job instead: `::error title=affected-plan
-refused a full plan (<lane>)::<why>`, exit 1, no outputs, so no lane boots.
+refused a whole-suite plan::<lane>: <why>`, exit 1, no outputs, so no lane boots.
+A `narrowed` plan that lists every test of a lane holding more than one is
+the whole suite under another name, and is refused the same way.
 Fix the cause the message names (a config, a lane, a diff base); the whole
 suite belongs to the default branch's scheduled run.
 
