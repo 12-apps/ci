@@ -50,7 +50,7 @@ function fixture(t, files, config = CONFIG) {
 }
 function plan(root, base) {
   const result = spawnSync(process.execPath, [CLI, "--base", base, "--out", "plan.json", "--explain", "false"], {
-    cwd: root, encoding: "utf8", env: { ...process.env, GITHUB_OUTPUT: "", GITHUB_STEP_SUMMARY: "" },
+    cwd: root, encoding: "utf8", env: { ...process.env, GITHUB_EVENT_NAME: "", GITHUB_OUTPUT: "", GITHUB_STEP_SUMMARY: "" },
   });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   return JSON.parse(readFileSync(join(root, "plan.json"), "utf8"));

@@ -59,7 +59,7 @@ for (const [name, before, after, mode] of cases) test(`CLI: ${name} selects ${mo
   git("add", "-A");
   git("commit", "-qm", "test: change import context");
   const result = spawnSync(process.execPath, [CLI, "--repo-root", root, "--lane", "unit", "--base", base, "--out", "plan.json"], {
-    cwd: root, encoding: "utf8", env: { ...process.env, GITHUB_OUTPUT: "", GITHUB_STEP_SUMMARY: "" },
+    cwd: root, encoding: "utf8", env: { ...process.env, GITHUB_EVENT_NAME: "", GITHUB_OUTPUT: "", GITHUB_STEP_SUMMARY: "" },
   });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   const plan = JSON.parse(readFileSync(join(root, "plan.json"), "utf8"));
@@ -106,7 +106,7 @@ for (const example of [
   git("add", "-A");
   git("commit", "-qm", "test: establish passing TypeScript baseline");
   const base = git("rev-parse", "HEAD");
-  const env = { ...process.env, GITHUB_OUTPUT: "", GITHUB_STEP_SUMMARY: "" };
+  const env = { ...process.env, GITHUB_EVENT_NAME: "", GITHUB_OUTPUT: "", GITHUB_STEP_SUMMARY: "" };
   delete env.NODE_TEST_CONTEXT;
   const execute = () => spawnSync(process.execPath, ["--test", "src/entry.test.mjs"], { cwd: root, encoding: "utf8", env });
   const baseline = execute();

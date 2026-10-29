@@ -95,9 +95,9 @@ when its inventory or selection context cannot be established:
 
 | situation | result |
 |---|---|
-| config missing or unreadable | `full` |
-| unknown lane | `full` |
-| the diff cannot be computed | `full`, with a positive shard count even when the test list is unknown |
+| config missing or unreadable | `full` — **refused on a pull request** (below) |
+| unknown lane | `full` — refused on a pull request |
+| the diff cannot be computed | `full`, with a positive shard count even when the test list is unknown — refused on a pull request |
 | an import is unresolved/computed | run its owner and dependent tests; never reuse an unbounded closure |
 | a declaration cannot be bracketed | that file reports `*` (all exports) |
 | a changed path matching no rule | **`unclassified` — the action exits 1** |
@@ -112,6 +112,15 @@ sees it and adds one rule.
 
 Pair it with a full run on the default branch. Strict PR-time selection is only
 sound when something unconditional runs afterwards.
+
+**No pull request runs a lane's whole suite** (FUT-3870). When
+`GITHUB_EVENT_NAME` is `pull_request`, a plan that would answer `full` (every
+row above that says so) fails the job instead: `::error title=affected-plan
+refused a whole-suite plan::<lane>: <why>`, exit 1, no outputs, so no lane boots.
+A `narrowed` plan that lists every test of a lane holding more than one is
+the whole suite under another name, and is refused the same way.
+Fix the cause the message names (a config, a lane, a diff base); the whole
+suite belongs to the default branch's scheduled run.
 
 ## Usage
 

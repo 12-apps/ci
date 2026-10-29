@@ -62,14 +62,14 @@ try {
   config = JSON.parse(readFileSync(configPath, "utf8"));
 } catch (error) {
   console.error(`[affected-plan] cannot read ${configPath}: ${error.message}`);
-  console.error("[affected-plan] falling back to the FULL suite — a missing config must never narrow a lane.");
+  console.error("[affected-plan] falling back to the FULL suite (refused on a pull request) — a missing config must never narrow a lane.");
   emit({ mode: "full", tests: [], why: "no readable affected-plan config", stats: {}, symbols: {}, reasons: {} });
   process.exit(0);
 }
 
 const laneConfig = config.lanes?.[lane];
 if (!laneConfig) {
-  console.error(`[affected-plan] no lane "${lane}" in ${configPath} — running the FULL suite.`);
+  console.error(`[affected-plan] no lane "${lane}" in ${configPath} — running the FULL suite (refused on a pull request).`);
   emit({ mode: "full", tests: [], why: `lane "${lane}" is not configured`, stats: {}, symbols: {}, reasons: {} });
   process.exit(0);
 }
@@ -456,7 +456,7 @@ const nameOnly = (filter) => {
 const changed = nameOnly("d");
 const deleted = nameOnly("D") ?? [];
 if (changed === null) {
-  console.error(`[affected-plan] cannot diff against ${mergeBase} — running the FULL suite.`);
+  console.error(`[affected-plan] cannot diff against ${mergeBase} — running the FULL suite (refused on a pull request).`);
   emit({ mode: "full", tests: [], why: `no diff against ${mergeBase}`, stats: {}, symbols: {}, reasons: {} });
   process.exit(0);
 }
@@ -516,7 +516,7 @@ if (skipGreen || Object.hasOwn(laneConfig, "selectionGlobals")) {
       globals: selectionGlobals, routes: inputRoutes, tree: inputTree,
     });
   } catch (error) {
-    console.error(`::warning::affected-plan (${lane}): could not resolve global inputs — running the FULL suite (${error.message})`);
+    console.error(`::warning::affected-plan (${lane}): could not resolve global inputs — running the FULL suite, refused on a pull request (${error.message})`);
     emit({ mode: "full", tests: [], why: "global inputs could not be resolved", stats: {}, symbols: {}, reasons: {} });
     process.exit(0);
   }
@@ -612,6 +612,7 @@ if (skipGreen && result.mode === "narrowed" && result.graph) {
 
 emit({
   ...result,
+  inventory: globalTests.length,
   base: mergeBase,
   lane,
   changed,
@@ -635,7 +636,17 @@ if (result.mode === "unclassified") {
 
 /** Write the plan file, set the action outputs, and print the summary. */
 function emit(plan) {
+  // No pull request runs a lane's whole suite (FUT-3870, future-pay FUT-4159):
+  // a plan that cannot narrow fails the job and names why, never a wide run.
+  // A narrowed plan that lists the lane's whole inventory (more than one test)
+  // is the same whole suite under another name, and is refused the same way.
   const tests = plan.tests ?? [];
+  const whole = plan.mode === "full" || (plan.mode === "narrowed" && plan.inventory > 1 && tests.length >= plan.inventory);
+  if (whole && process.env.GITHUB_EVENT_NAME === "pull_request") {
+    const why = plan.mode === "full" ? plan.why : `every one of the ${plan.inventory} test file(s) selected (${plan.why})`;
+    console.error(`::error title=affected-plan refused a whole-suite plan::${lane}: ${why} — map the path instead; the whole suite runs only on the default branch.`);
+    process.exit(1);
+  }
   // A full fallback has no enumerated list, but MUST run a positive matrix.
   // Only a genuinely empty selection means an EMPTY matrix, not one idle
   // shard: the matrix is expanded before any runner exists, so a `1` here boots a machine to pay a

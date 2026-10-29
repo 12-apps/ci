@@ -57,7 +57,7 @@ function plan(root, base) {
     "node",
     [CLI, "--lane", "unit", "--base", base, "--config", ".affected-plan.json",
       "--out", "plan.json", "--max-shards", "4", "--min-tests-per-shard", "40"],
-    { cwd: root, encoding: "utf8", env: { ...process.env, GITHUB_OUTPUT: outputs, GITHUB_STEP_SUMMARY: "" } },
+    { cwd: root, encoding: "utf8", env: { ...process.env, GITHUB_EVENT_NAME: "", GITHUB_OUTPUT: outputs, GITHUB_STEP_SUMMARY: "" } },
   );
   const document = JSON.parse(readFileSync(join(root, "plan.json"), "utf8"));
   const emitted = Object.fromEntries(
@@ -155,6 +155,48 @@ test("E1: a lane the config does not declare is `full` with a positive matrix to
   assert.equal(document.mode, "full");
   assert.equal(emitted["shard-total"], "4");
   assert.notEqual(emitted.shards, "[]");
+});
+
+test("on a pull request a full plan is refused, never run: the job fails and names why", () => {
+  // No pull request runs a lane's whole suite (FUT-3870): the plan that cannot
+  // narrow fails the job instead of handing the lane a full matrix.
+  const { root, base } = repo({ "src/a.ts": "export const a = 1;\n" }, { "src/a.ts": "export const a = 2;\n" });
+  writeFileSync(join(root, ".affected-plan.json"), JSON.stringify({ ...CONFIG, lanes: {} }));
+  const outputs = join(root, "outputs.txt");
+  writeFileSync(outputs, "");
+  const result = spawnSync(
+    "node",
+    [CLI, "--lane", "unit", "--base", base, "--config", ".affected-plan.json", "--out", "plan.json"],
+    { cwd: root, encoding: "utf8", env: { ...process.env, GITHUB_EVENT_NAME: "pull_request", GITHUB_OUTPUT: outputs, GITHUB_STEP_SUMMARY: "" } },
+  );
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /::error title=affected-plan refused a whole-suite plan::unit: lane "unit" is not configured/);
+  assert.equal(readFileSync(outputs, "utf8"), "", "no shard outputs, so no lane boots");
+});
+
+test("on a pull request a narrowed plan listing the whole inventory is refused too", () => {
+  // Two tests, and a lane-global change selects both: the whole suite by
+  // another name. One test is a selection, not a widening, and stays allowed.
+  const config = { ...CONFIG, lanes: { unit: { ...CONFIG.lanes.unit, skipGreen: { globals: [String.raw`^src/setup\.ts$`] } } } };
+  const { root, base } = repo(
+    {
+      "src/setup.ts": "globalThis.__v = 1;\n",
+      "src/a.ts": "export const a = 1;\n",
+      "src/a.test.ts": 'import { a } from "./a";\n',
+      "src/b.test.ts": 'import { a } from "./a";\n',
+    },
+    { "src/setup.ts": "globalThis.__v = 2;\n" },
+  );
+  writeFileSync(join(root, ".affected-plan.json"), JSON.stringify(config));
+  const run = (event) => spawnSync(
+    "node",
+    [CLI, "--lane", "unit", "--base", base, "--config", ".affected-plan.json", "--out", "plan.json"],
+    { cwd: root, encoding: "utf8", env: { ...process.env, GITHUB_EVENT_NAME: event, GITHUB_OUTPUT: "", GITHUB_STEP_SUMMARY: "" } },
+  );
+  const pr = run("pull_request");
+  assert.equal(pr.status, 1, pr.stderr);
+  assert.match(pr.stderr, /refused a whole-suite plan::unit: every one of the 2 test file\(s\) selected/);
+  assert.equal(run("").status, 0, "off a pull request the whole inventory still runs");
 });
 
 test("F3a: a change to a lane-global input alone selects every known lane test", () => {

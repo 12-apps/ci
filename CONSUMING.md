@@ -918,7 +918,8 @@ inventory are followed; unbounded imports widen their owners and dependent
 tests, whose input hashes cannot be reused.
 
 Missing configuration or unavailable selection context produces `mode=full`
-with a positive shard count. Other uncertainty widens the affected module;
+with a positive shard count — except on a pull request, where that plan fails
+the job and names why instead (FUT-3870): no pull request runs a lane whole. Other uncertainty widens the affected module;
 unclassified paths stop the plan. Pair it with a full run on the default branch;
 strict PR-time selection still needs that unconditional safety net.
 
