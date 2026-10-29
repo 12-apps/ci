@@ -49,7 +49,7 @@ function plan(root, base, args = [], expectedStatus = 0) {
   const output = join(root, "outputs.txt");
   writeFileSync(output, "");
   const result = spawnSync(process.execPath, [CLI, "--base", base, "--out", "plan.json", "--explain", "false", ...args], {
-    cwd: root, encoding: "utf8", env: { ...process.env, GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: "" },
+    cwd: root, encoding: "utf8", env: { ...process.env, GITHUB_EVENT_NAME: "", GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: "" },
   });
   const doc = JSON.parse(readFileSync(join(root, "plan.json"), "utf8"));
   const outputs = Object.fromEntries(readFileSync(output, "utf8").trim().split("\n").map((line) => {

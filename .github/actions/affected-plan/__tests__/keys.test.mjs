@@ -104,7 +104,7 @@ function plan(root, base) {
   const r = spawnSync(
     "node",
     [CLI, "--lane", "e2e", "--base", base, "--config", ".affected-plan.json", "--out", "plan.json", "--explain", "false"],
-    { cwd: root, encoding: "utf8", env: { ...process.env, GITHUB_OUTPUT: "", GITHUB_STEP_SUMMARY: "" } },
+    { cwd: root, encoding: "utf8", env: { ...process.env, GITHUB_EVENT_NAME: "", GITHUB_OUTPUT: "", GITHUB_STEP_SUMMARY: "" } },
   );
   return { code: r.status, err: r.stderr, doc: JSON.parse(readFileSync(join(root, "plan.json"), "utf8")) };
 }

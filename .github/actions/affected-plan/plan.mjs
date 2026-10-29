@@ -635,6 +635,12 @@ if (result.mode === "unclassified") {
 
 /** Write the plan file, set the action outputs, and print the summary. */
 function emit(plan) {
+  // No pull request runs a lane's whole suite (FUT-3870, future-pay FUT-4159):
+  // a plan that cannot narrow fails the job and names why, never a wide run.
+  if (plan.mode === "full" && process.env.GITHUB_EVENT_NAME === "pull_request") {
+    console.error(`::error title=affected-plan refused a full plan (${lane})::${plan.why} — map the path instead; the whole suite runs only in the daily run.`);
+    process.exit(1);
+  }
   const tests = plan.tests ?? [];
   // A full fallback has no enumerated list, but MUST run a positive matrix.
   // Only a genuinely empty selection means an EMPTY matrix, not one idle
