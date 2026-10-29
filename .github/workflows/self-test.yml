@@ -177,6 +177,11 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/matrix-zero-guard.test.mjs
 
+      # A consumer deploys several droplets (qa, prod) through one Environment each.
+      - name: Deploy environment binding
+        shell: bash
+        run: node --test .github/workflows/__tests__/deploy-environment.test.mjs
+
       # The pin a reader copies, against the major this repo actually supports.
       #
       # These drifted apart and nothing compared them: README.md said `@v2` in

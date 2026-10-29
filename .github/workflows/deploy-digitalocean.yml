@@ -57,6 +57,14 @@ on:
         type: string
         required: false
         default: main
+      # The GitHub Environment the redeploy binds to (`qa`, `prod`, …). Its
+      # variables and secrets (DEPLOY_HOST, DOPPLER_TOKEN, DO_SSH_PRIVATE_KEY_B)
+      # override the repository's, so one consumer can deploy several droplets.
+      # Empty keeps the old behaviour: repository-level values, no environment.
+      environment:
+        type: string
+        required: false
+        default: ""
 
 # Least-privilege, enforced at the source. Two scopes, both read-only:
 #   - contents: the droplet shallow-syncs the consumer's repo for its compose
@@ -125,6 +133,7 @@ jobs:
   deploy:
     name: Redeploy
     if: inputs.action == 'deploy'
+    environment: ${{ inputs.environment }}
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
@@ -435,6 +444,8 @@ jobs:
     steps:
       - name: Trigger post-cd workflow
         uses: actions/github-script@v7
+        env:
+          DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
         with:
           script: |
             await github.rest.actions.createWorkflowDispatch({
@@ -442,9 +453,12 @@ jobs:
               repo: context.repo.repo,
               workflow_id: 'post-cd.yml',
               ref: context.ref,
-              inputs: {
-                deployment_sha: context.sha
-              }
+              // `environment` only when one was named: a consumer whose
+              // post-cd.yml declares no such input would refuse the dispatch.
+              inputs: Object.assign(
+                { deployment_sha: context.sha },
+                process.env.DEPLOY_ENVIRONMENT ? { environment: process.env.DEPLOY_ENVIRONMENT } : {},
+              )
             })
 
   destroy:
