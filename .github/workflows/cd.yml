@@ -43,6 +43,14 @@ on:
         type: string
         required: false
         default: deploy
+      environment:
+        description: >-
+          The GitHub Environment the DigitalOcean redeploy binds to (qa, prod).
+          Its DEPLOY_HOST, DOPPLER_TOKEN and DO_SSH_PRIVATE_KEY_B override the
+          repository's. Empty: repository-level values, as before.
+        type: string
+        required: false
+        default: ""
       aws_engine_ref:
         description: Tested immutable 12-apps/ci commit SHA, required for target aws
         type: string
@@ -509,9 +517,11 @@ jobs:
       image_tag: ${{ github.sha }}
       image_namespace: ${{ needs.discover.outputs.image_namespace }}
       skip_superseded: ${{ inputs.skip_superseded }}
+      environment: ${{ inputs.environment }}
     secrets: inherit
+    # One queue per environment: a qa deploy never waits on (or holds) prod's.
     concurrency:
-      group: deploy-digitalocean
+      group: deploy-digitalocean${{ inputs.environment && format('-{0}', inputs.environment) || '' }}
       cancel-in-progress: false
 
   # Same gate correction as digitalocean. The "only if there ARE statics" phrasing
