@@ -1,0 +1,201 @@
+name: Lane timings refresh (reusable)
+
+# Called as the LAST job of a consumer's daily full run, after every test lane:
+#
+#   lane-timings:
+#     needs: [tests, spa-e2e, bdd-journeys]
+#     if: ${{ always() && <the daily full run> }}
+#     uses: 12-apps/ci/.github/workflows/lane-timings-refresh.yml@v2
+#     with:
+#       title: 'chore(ci): refresh the lane timings (FUT-xxxx)'
+#     secrets:
+#       PR_TOKEN: ${{ secrets.<a PAT> }}
+#
+# It reads what every leg of THIS run measured (its artifacts) and how long
+# every leg's test step took (the Actions API), rewrites each lane's ledger in
+# the consumer's tree (`.lane-timings.json` names them), and lands the change
+# as an auto-merged PR through the post-merge-regen actions — the same
+# prepare/land halves, under their own branch prefix, so a ledger PR never
+# closes an ordinary regen PR or the other way round.
+#
+# The report — slow files, legs past the target, caps too small for a
+# full-width run — is written to the job summary and as annotations of the
+# `measure` job, every time, whether or not a PR lands.
+#
+# Why in the run and not on `workflow_run`: the daily run is dispatched with
+# GITHUB_TOKEN, and GitHub starts no `workflow_run` for a run that token caused.
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner label for every job. Empty: CI_RUNNER, else ubuntu-latest.'
+        type: string
+        required: false
+        default: ''
+      config:
+        description: 'The consumer''s lane config, repo-relative.'
+        type: string
+        required: false
+        default: '.lane-timings.json'
+      title:
+        description: 'The PR title and commit header — include what your commit rules demand (a ticket reference).'
+        type: string
+        required: true
+      body:
+        description: 'The PR body and commit body.'
+        type: string
+        required: false
+        default: 'The lane ledgers, re-measured by the daily full run (12-apps/ci lane-timings). Each item takes the cost this run measured; items it did not run keep theirs; deleted items are dropped.'
+      allow-paths:
+        description: 'Newline-separated globs the refresh may write — the ledgers.'
+        type: string
+        required: false
+        default: '.lane-timings/**'
+      base:
+        description: 'Base branch. Empty: the repository default branch.'
+        type: string
+        required: false
+        default: ''
+      branch-prefix:
+        description: 'Reserved head-branch prefix for ledger PRs.'
+        type: string
+        required: false
+        default: 'chore/lane-timings-'
+      commit-author:
+        description: 'The commit author, as "Name <email>".'
+        type: string
+        required: false
+        default: 'github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>'
+      node-version:
+        description: 'Node version the refresh runs on.'
+        type: string
+        required: false
+        default: '24'
+    secrets:
+      PR_TOKEN:
+        description: 'A PAT with contents and pull-requests write: a PR opened with GITHUB_TOKEN never gets its checks.'
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: lane-timings-refresh-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Pick the tip
+    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      action: ${{ steps.prepare.outputs.action }}
+      tip: ${{ steps.prepare.outputs.tip }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - id: prepare
+        uses: 12-apps/ci/.github/actions/post-merge-regen@v2
+        with:
+          mode: prepare
+          base: ${{ inputs.base }}
+          branch-prefix: ${{ inputs.branch-prefix }}
+
+  measure:
+    name: Measure the lanes
+    needs: prepare
+    # Measure (and report) even when an open ledger PR already covers the tip:
+    # the report is the part a human reads, and it is about THIS run.
+    if: ${{ always() && needs.prepare.result == 'success' }}
+    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      changed: ${{ steps.capture.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.tip || inputs.base || github.event.repository.default_branch }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Refresh the ledgers
+        uses: 12-apps/ci/.github/actions/lane-timings@v2
+        with:
+          mode: refresh
+          config: ${{ inputs.config }}
+          report: ${{ runner.temp }}/lane-timings-report.json
+      - name: Keep the report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: lane-timings-report
+          path: ${{ runner.temp }}/lane-timings-report.json
+          retention-days: 30
+          if-no-files-found: ignore
+          overwrite: true
+      - name: Capture the change
+        id: capture
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git diff --cached --binary > "$RUNNER_TEMP/lane-timings.patch"
+            git diff --cached --stat
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.capture.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lane-timings-patch
+          path: ${{ runner.temp }}/lane-timings.patch
+          retention-days: 1
+          if-no-files-found: error
+          overwrite: true
+
+  land:
+    name: Open and auto-merge the ledger PR
+    needs: [prepare, measure]
+    if: ${{ always() && needs.prepare.outputs.action == 'regen' && needs.measure.result == 'success' && needs.measure.outputs.changed == 'true' }}
+    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.tip }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: lane-timings-patch
+          path: ${{ runner.temp }}/lane-timings
+      - uses: 12-apps/ci/.github/actions/post-merge-regen@v2
+        with:
+          mode: land
+          base: ${{ inputs.base }}
+          branch-prefix: ${{ inputs.branch-prefix }}
+          tip: ${{ needs.prepare.outputs.tip }}
+          patch: ${{ runner.temp }}/lane-timings/lane-timings.patch
+          title: ${{ inputs.title }}
+          body: ${{ inputs.body }}
+          commit-author: ${{ inputs.commit-author }}
+          allow-paths: ${{ inputs.allow-paths }}
+          pr-token: ${{ secrets.PR_TOKEN }}

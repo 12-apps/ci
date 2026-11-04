@@ -58,7 +58,7 @@ import { join } from "node:path";
 import { changedBlocks, changedFields, schemaBlocks, schemaModels, delegateOf } from "../../migration-domains/lib/prisma-schema.mjs";
 import { loadRegistry } from "../../migration-domains/lib/registry.mjs";
 import { migrationEffects, readDeclaration, walkMigrations } from "../../migration-domains/lib/sql.mjs";
-import { entriesForMatches } from "./occurrences.mjs";
+import { entriesForMatches, matchCache, withAnchors } from "./occurrences.mjs";
 import { stripComments } from "./modules.mjs";
 
 /** Every Prisma delegate operation — a property access followed by one of these is a query. */
@@ -219,23 +219,37 @@ export function databaseRoutes(options) {
     return textCache.get(file);
   };
 
-  /** Files that open THIS migration by name, or the whole folder. */
-  const migrationReaders = (file) => {
-    const name = dirOf(file);
-    const out = [];
+  // What each source file says about migrations, read ONCE: the reader walk
+  // below runs per migration, and rescanning every file for every one of them
+  // (567 in future-pay) was a minute of the plan by itself.
+  let readerIndex = null;
+  const readers = () => {
+    if (readerIndex) return readerIndex;
+    readerIndex = { byName: new Map(), folder: [] };
     for (const f of sourceFiles) {
       const text = textOf(f);
       if (!text) continue;
-      // Naming ONE migration is reading that one, carrier or not: a backfill
-      // test that executes a specific file is about that file.
       const named = text.match(namedRe);
       if (named) {
-        if (named.includes(name)) out.push(f);
+        for (const n of new Set(named)) {
+          if (!readerIndex.byName.has(n)) readerIndex.byName.set(n, []);
+          readerIndex.byName.get(n).push(f);
+        }
         continue;
       }
-      if (!isCarrier(f) && markerRe?.test(text)) out.push(f);
+      if (!isCarrier(f) && markerRe?.test(text)) readerIndex.folder.push(f);
     }
-    return out;
+    return readerIndex;
+  };
+  const sourceOrder = new Map(sourceFiles.map((f, i) => [f, i]));
+
+  /** Files that open THIS migration by name, or the whole folder. */
+  const migrationReaders = (file) => {
+    // Naming ONE migration is reading that one, carrier or not: a backfill
+    // test that executes a specific file is about that file. A file that names
+    // any migration is never a folder reader, whatever its marker says.
+    const { byName, folder } = readers();
+    return [...(byName.get(dirOf(file)) ?? []), ...folder].sort((a, b) => sourceOrder.get(a) - sourceOrder.get(b));
   };
 
   // ── scanning: which declarations of which files touch a target ────────────
@@ -244,6 +258,7 @@ export function databaseRoutes(options) {
    *   a key `table:<name>` is a table no model maps (a dropped one)
    * @returns {string[]} entries, `file` or `file#a,b`
    */
+  const scanCache = matchCache();
   const scan = (targets) => {
     const specs = [];
     for (const [key, what] of targets) {
@@ -251,12 +266,24 @@ export function databaseRoutes(options) {
       const model = isTable ? null : models.get(key);
       const table = isTable ? key.slice(6) : model?.table;
       const mention = [];
+      // Every alternative starts with one of these as a whole word; a file
+      // with none of them cannot match, which lets the scan skip the regex.
+      const anchors = [];
       if (model) {
         mention.push(String.raw`\.\s*${escape(delegateOf(key))}\s*\.\s*(?:${OPS})\s*\(`);
-        for (const r of relationsInto(key)) mention.push(String.raw`\b${escape(r)}\s*:\s*(?:true\b|\{)`);
+        anchors.push(delegateOf(key));
+        // Deduplicated: many models carry a relation of the same name (`client`),
+        // and each copy was another alternative the engine tried at every offset.
+        for (const r of new Set(relationsInto(key))) {
+          mention.push(String.raw`\b${escape(r)}\s*:\s*(?:true\b|\{)`);
+          anchors.push(r);
+        }
       }
-      if (table) mention.push(String.raw`\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+"?${escape(table)}"?(?![\w])`);
-      const mentionRe = new RegExp(mention.join("|"), "i");
+      if (table) {
+        mention.push(String.raw`\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+"?${escape(table)}"?(?![\w])`);
+        anchors.push(table);
+      }
+      const mentionRe = withAnchors(new RegExp(mention.join("|"), "i"), anchors);
       if (what === "*") {
         specs.push({ re: mentionRe, mentionRe: null });
         continue;
@@ -269,12 +296,17 @@ export function databaseRoutes(options) {
         if (column && column !== field && column.includes("_")) names.push(column);
         const re = new RegExp(String.raw`\b(?:${names.map(escape).join("|")})\b`);
         // A shared or one-word field only counts beside the model itself.
-        specs.push({ re, mentionRe: specific ? null : new RegExp(`${mentionRe.source}${typeRe ? `|${typeRe.source}` : ""}`, "i") });
+        specs.push({
+          re,
+          mentionRe: specific
+            ? null
+            : withAnchors(new RegExp(`${mentionRe.source}${typeRe ? `|${typeRe.source}` : ""}`, "i"), [...anchors, ...(typeRe ? [key] : [])]),
+        });
       }
     }
     if (specs.length === 0) return [];
 
-    return entriesForMatches({ files: sourceFiles, textOf, isTest, specs });
+    return entriesForMatches({ files: sourceFiles, textOf, isTest, specs, cache: scanCache });
   };
 
   /** Merge table effects into model-keyed targets. */

@@ -102,6 +102,13 @@ jobs:
         shell: bash
         run: node --test .github/actions/affected-plan/__tests__/*.test.mjs
 
+      # lane-timings decides how many legs every sized lane gets and which files
+      # each runs; a wrong answer is green either way (too many legs only costs
+      # minutes, too few runs past the target), so the arithmetic is pinned.
+      - name: lane-timings
+        shell: bash
+        run: node --test .github/actions/lane-timings/__tests__/*.test.mjs
+
       # migration-domains stops a consumer's whole pipeline before any lane is
       # scheduled, and its parse is what affected-plan's database router trusts
       # to narrow a migration down to the tests that can observe it. Every
@@ -176,6 +183,12 @@ jobs:
       - name: Matrix zero guard
         shell: bash
         run: node --test .github/workflows/__tests__/matrix-zero-guard.test.mjs
+
+      # The measured-time sizing sits between skip-green's filter and the plan
+      # upload, and its count wins over the file count.
+      - name: Lane timings wiring
+        shell: bash
+        run: node --test .github/workflows/__tests__/lane-timings-wiring.test.mjs
 
       # A consumer deploys several droplets (qa, prod) through one Environment each.
       - name: Deploy environment binding
