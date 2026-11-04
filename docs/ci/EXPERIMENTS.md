@@ -548,3 +548,26 @@ from the wiring fails its case.
 
 **Pending:** hosted Self Tests, the consumer switching its legs to
 `LANE_LEG_FILE` and the `leg` step, and the refresh probe's PR.
+
+## E-008 — The ledger PR's commit body fits commitlint (FUT-4409)
+
+**Date:** 2026-11-04 · **Status:** Fixed; hosted proof is the next refresh
+
+**Question:** why was the first ledger PR into future-pay's `main` closed
+the moment it opened?
+
+**Evidence:** a one-off run of `lane-timings-refresh.yml` against main
+(future-pay run 41934916045, measuring daily run 41818675238): prepare,
+measure and land passed, and land opened future-pay#4155 with auto-merge,
+changing only the four ledgers. Then future-pay's commitlint enforcement
+closed it and deleted its branch: the `body` input's default was one
+185-character line, over `body-max-line-length` (100). The earlier probe
+(#4145) never met that check because its base was not `main`.
+
+**Change:** the default body is a literal block, three lines of at most 78
+characters, and the input's description states the limit.
+`lane-timings-wiring.test.mjs` asserts every line of the default is 100
+characters or fewer; it fails on the old default.
+
+This also closes E-007's pending refresh probe: future-pay#4146 ran the
+`leg` step on every leg (unit, integration, SPA E2E, Gherkin) and merged.
