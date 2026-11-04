@@ -78,6 +78,24 @@ for (const [lane, cap] of [["unit", "unit-shards"], ["integration", "integration
   });
 }
 
+for (const [lane, jobName, runStep] of [["unit", "unit-tests", "Run unit tests"], ["integration", "integration-tests", "Run integration tests"]]) {
+  test(`${jobName}: each leg reads its packed list after the plan lands, and hands it to the command`, () => {
+    const body = job(tests, jobName);
+    const download = body.indexOf("- name: Download the affected test plan");
+    const leg = body.indexOf("id: leg\n");
+    const run = body.indexOf(`- name: ${runStep}`);
+    assert.ok(download !== -1 && leg !== -1 && run !== -1, `${jobName} has the download, leg and run steps`);
+    assert.ok(download < leg && leg < run, "download → leg → run");
+    const step = body.slice(leg, run);
+    assert.match(step, /mode: leg/);
+    assert.match(step, new RegExp(`plan: \\.affected-plan/affected-plan\\.${lane}\\.json`));
+    assert.match(step, /leg: \$\{\{ matrix\.shard \}\}/);
+    assert.match(step, /when-sized: 'true'/);
+    assert.match(step, new RegExp(`inputs\\.${lane}-timings-ledger != ''`));
+    assert.match(body.slice(run), /LANE_LEG_FILE: \$\{\{ steps\.leg\.outputs\.file != '' && format/);
+  });
+}
+
 test("the inputs are declared, optional, and off by default", () => {
   for (const name of ["unit-timings-ledger", "integration-timings-ledger"]) {
     const block = tests.slice(tests.indexOf(`      ${name}:\n`), tests.indexOf(`      ${name}:\n`) + 1200);

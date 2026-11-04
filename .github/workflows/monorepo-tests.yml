@@ -1079,6 +1079,22 @@ jobs:
           name: affected-plan-unit
           path: .affected-plan
 
+      # The list lane-timings packed for THIS leg (its `size` step wrote the
+      # plan's `legs`), checked to cover the plan exactly once. The caller's
+      # command reads LANE_LEG_FILE and runs exactly those files, dropping
+      # its own `--shard`. A plan that was never sized hands back no file.
+      - name: Read this leg's list from the plan
+        id: leg
+        if: ${{ inputs.unit-timings-ledger != '' && inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/lane-timings@v2
+        with:
+          mode: leg
+          lane: unit
+          plan: .affected-plan/affected-plan.unit.json
+          leg: ${{ matrix.shard }}
+          out: .affected-plan/leg.txt
+          when-sized: 'true'
+
       - name: Run unit tests
         id: unit
         shell: bash
@@ -1090,6 +1106,8 @@ jobs:
           # Non-empty only when this lane opted in. The caller's command reads
           # it and runs exactly the `.tests` the plan lists.
           AFFECTED_PLAN_FILE: ${{ inputs.affected-plan-config != '' && github.event_name == 'pull_request' && format('{0}/.affected-plan/affected-plan.unit.json', github.workspace) || '' }}
+          # This leg's own list, when the plan was sized by measured time.
+          LANE_LEG_FILE: ${{ steps.leg.outputs.file != '' && format('{0}/{1}', github.workspace, steps.leg.outputs.file) || '' }}
           UNIT_FULL_CMD: ${{ inputs.unit-full-command }}
           SHARD_INDEX: ${{ matrix.shard }}
           SHARD_TOTAL: ${{ needs.unit-plan.outputs.count }}
@@ -1968,6 +1986,22 @@ jobs:
           name: affected-plan-integration
           path: .affected-plan
 
+      # The list lane-timings packed for THIS leg (its `size` step wrote the
+      # plan's `legs`), checked to cover the plan exactly once. The caller's
+      # command reads LANE_LEG_FILE and runs exactly those files, dropping
+      # its own `--shard`. A plan that was never sized hands back no file.
+      - name: Read this leg's list from the plan
+        id: leg
+        if: ${{ inputs.integration-timings-ledger != '' && inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/lane-timings@v2
+        with:
+          mode: leg
+          lane: integration
+          plan: .affected-plan/affected-plan.integration.json
+          leg: ${{ matrix.shard }}
+          out: .affected-plan/leg.txt
+          when-sized: 'true'
+
       - name: Run integration tests
         id: integration
         shell: bash
@@ -1978,6 +2012,8 @@ jobs:
           # Non-empty only when this lane opted in. The caller's command reads
           # it and runs exactly the `.tests` the plan lists.
           AFFECTED_PLAN_FILE: ${{ inputs.affected-plan-config != '' && github.event_name == 'pull_request' && format('{0}/.affected-plan/affected-plan.integration.json', github.workspace) || '' }}
+          # This leg's own list, when the plan was sized by measured time.
+          LANE_LEG_FILE: ${{ steps.leg.outputs.file != '' && format('{0}/{1}', github.workspace, steps.leg.outputs.file) || '' }}
           INT_FULL_CMD: ${{ inputs.integration-full-command }}
           SHARD_INDEX: ${{ matrix.shard }}
           SHARD_TOTAL: ${{ needs.integration-plan.outputs.count }}
