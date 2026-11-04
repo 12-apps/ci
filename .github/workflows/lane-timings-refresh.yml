@@ -51,10 +51,16 @@ on:
         type: string
         required: true
       body:
-        description: 'The PR body and commit body.'
+        description: >-
+          The PR body and commit body. Keep its lines to 100 characters or
+          fewer: commitlint's body-max-line-length rejects the commit, and a
+          consumer that enforces it closes the ledger PR.
         type: string
         required: false
-        default: 'The lane ledgers, re-measured by the daily full run (12-apps/ci lane-timings). Each item takes the cost this run measured; items it did not run keep theirs; deleted items are dropped.'
+        default: |-
+          The lane ledgers, re-measured by the daily full run (12-apps/ci lane-timings).
+          Each item takes the cost this run measured; items it did not run keep theirs;
+          deleted items are dropped.
       allow-paths:
         description: 'Newline-separated globs the refresh may write — the ledgers.'
         type: string

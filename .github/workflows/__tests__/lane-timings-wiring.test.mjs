@@ -118,3 +118,14 @@ test("refresh: measure reports even when no PR can land, and lands only a change
   assert.match(refresh, /default: 'chore\/lane-timings-'/, "its own prefix, so it never closes an ordinary regen PR");
   assert.match(refresh, /default: '\.lane-timings\/\*\*'/, "it may write the ledgers and nothing else by default");
 });
+
+test("refresh: the default commit body passes commitlint's body-max-line-length", () => {
+  // A consumer that enforces commitlint closes a ledger PR whose body has a line over 100 characters
+  // (future-pay#4155, closed on its first landing).
+  const input = refresh.match(/\n {6}body:\n([\s\S]*?)(?=\n {6}[a-z][\w-]*:\n)/)?.[1] ?? "";
+  const block = input.match(/default: \|-\n((?: {10}.*\n?)+)/)?.[1];
+  assert.ok(block, "the body's default is a literal block, one commit-body line per line");
+  const lines = block.split("\n").filter(Boolean).map((line) => line.slice(10));
+  assert.ok(lines.length > 0);
+  for (const line of lines) assert.ok(line.length <= 100, `over 100 characters: ${line}`);
+});
