@@ -418,3 +418,106 @@ parent, for the `e2e` and `unit` lanes. That is 30 plans.
 **346/346** on Node v24.21.0 (job 120133147847).
 
 **Pending:** a consumer run once `v2` carries this change.
+
+## E-005 — The database input pass tests each pattern once, not once per migration (FUT-4396)
+
+**Date:** 2026-11-04 · **Status:** Worked locally; hosted proof pending
+
+**Question:** why does future-pay's `Tests / Integration Plan` take 5m55s, and
+can it be made fast without changing a single selection or input hash?
+
+**Baseline:** future-pay PR 4096, run 41874433175: the job's only real step,
+`Compute the affected test plan`, took **329 s** (Unit Plan's took 122 s). A
+local `node --cpu-prof` of the same `plan.mjs` on the same commit and
+arguments took **8m38s** and put **94%** of it under `databaseInputRoutes`:
+skip-green's input hashing runs the database router over every tracked file as
+"changed", i.e. all **567** migrations, and for each one `migrationReaders`
+rescanned every source file for a migration name and `entriesForMatches`
+re-tested that migration's model patterns against the same ~4,000 files. That
+run's log line: `[inputs] 0 test(s) hashed`.
+
+**Method:** answer-preserving caching only, scoped to one router run:
+`matchCache()` in `lib/occurrences.mjs` memoizes which files a pattern
+matches (keyed by source and flags), each file's declarations, and
+`reachableExports(file, hot)`; a pattern that is exactly `\b(?:a|b)\b` over
+identifiers is answered from a per-file word set; a mention pattern carries its
+anchor words (`withAnchors`), a necessary condition checked case-insensitively
+before the regex runs; `relationsInto` is deduplicated (the `client` pattern
+repeated `\bclient\s*:` dozens of times); `migrationReaders` indexes every
+file's migration names once.
+
+**Results (local, 4 vCPU):**
+
+| step | integration plan, PR 4096 head |
+|---|---|
+| before | 8m38s |
+| + memo per pattern, readers index | 3m12s |
+| + word index | 2m42s |
+| + anchors, dedupe | 1m09s |
+| + reachable memo | **48 s** |
+
+Every row wrote a document **byte-identical** (`cmp`) to the baseline's.
+Old (`53e15c8`) against new on three more cases, same machine, every document
+byte-identical:
+
+| case | old | new | plan |
+|---|---|---|---|
+| integration, future-pay `6e17214` (adds a migration) vs its parent | 544 s | 62 s | narrowed, 748 tests, 748 hashed |
+| unit, the same commit | 169 s | 36 s | narrowed, 731 tests, 731 hashed |
+| unit, PR 4096's head | 163 s | 29 s | narrowed, 265 tests, 265 hashed |
+
+Mutations: making the
+anchor check case-sensitive fails 3 of `occurrences-cache.test.mjs`'s 7 cases;
+counting `$` as a word character fails 1.
+
+**Hosted evidence:** pending — the consumer's next PR run on a `v2` that
+carries this.
+
+## E-006 — Every matrix lane is sized by measured time, refreshed by the daily run (FUT-4395)
+
+**Date:** 2026-11-04 · **Status:** Engine half built and exercised against a real run; consumer half pending
+
+**Question:** can one mechanism size unit, integration, SPA E2E and Gherkin
+(and later load tests) to about 8–10 minutes of test step a leg, keep its
+numbers fresh without a human, and say which single file is too slow?
+
+**Baseline:** each lane counted (`ceil(files / 40)`, `ceil(specs / 26)`,
+`ceil(features / 4)`); the two cost-packed lanes read hand-refreshed ledgers
+(future-pay's integration ledger: 219 of 846 files).
+
+**Method:** `.github/actions/lane-timings` — `size` (legs =
+`ceil(Σ ledger seconds / concurrency / target)`, clamped, packed LPT into
+`legs[]` of the plan) and `refresh` (reads every leg's junit /
+`spec-durations.json` from the run's artifacts and every leg's test-step time
+from the Actions API, rewrites the ledgers, reports files over
+`slowFileSeconds`, legs over the target and caps too small). Reusable workflow
+`lane-timings-refresh.yml` lands the ledgers through the post-merge-regen
+halves under `chore/lane-timings-`. `monorepo-tests.yml` takes
+`unit-timings-ledger` / `integration-timings-ledger` (off by default).
+
+**Exercised:** `refresh.mjs` run locally against future-pay's daily run
+41818675238 (2026-11-04, main `85d3af9`):
+
+| lane | items | concurrency | full width | legs wanted / cap | legs that ran past 10 min |
+|---|---|---|---|---|---|
+| unit | 3110 | 1.01 | 32m49s* | 4 / 4 | 4 of 4 (10m01s–11m52s) |
+| integration | 846 | 1.56 | 91m43s | 10 / 24 | 1 of 24 |
+| spa-e2e | 252 | 1.06 | 67m13s | 7 / 4 | 4 of 4 (14m49s–21m00s) |
+| gherkin | 66 | 0.93 | 76m23s | 8 / 6 | 6 of 6 (12m23s–14m27s) |
+
+\* one unit leg's artifact had expired (1-day retention) when this was run
+after the fact; inside the run it will not have.
+
+Six files over 3 minutes, each annotated: `lista-de-pagamento.feature` 6m09s,
+`demo-consistency.test.ts` 5m34s, `cozinha-fluxos-edicao.feature` 4m43s,
+`infinitepay-activation.feature` 4m01s, `cozinha-fluxos-arrastar.feature`
+3m55s, `business-snapshot.e2e.ts` 3m06s.
+
+Two defects the real run found and the code now handles: the jobs API
+answered 502 once (retries, and a failed jobs call no longer discards the
+artifacts); and a leg whose artifact had expired was counted against nobody's
+measurements, reading concurrency 0.74 instead of 1.01 (concurrency now pairs
+each artifact `-s<n>` with its own leg's `shard <n>/<m>`).
+
+**Pending:** hosted Self Tests; the consumer wiring, a PR run sized by a
+ledger, and the first daily refresh PR.

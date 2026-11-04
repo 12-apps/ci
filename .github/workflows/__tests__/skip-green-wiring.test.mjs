@@ -43,7 +43,12 @@ for (const lane of LANES) {
   const verdict = jobs[`${lane}-verdict`];
 
   test(`${lane}-plan: the plan is not uploaded by affected-plan when skip-green is on`, () => {
-    assert.match(plan, /upload-artifact: \$\{\{ inputs\.skip-green == '' \}\}/, "affected-plan must leave the upload to the filter path");
+    // With a timings ledger the plan is rewritten after the filter, so affected-plan leaves the upload then too.
+    assert.match(
+      plan,
+      new RegExp(`upload-artifact: \\$\\{\\{ inputs\\.skip-green == '' && inputs\\.${lane}-timings-ledger == '' \\}\\}`),
+      "affected-plan must leave the upload to the filter path",
+    );
   });
 
   test(`${lane}-plan: restore → filter → upload, in that order, and all after affected-plan`, () => {

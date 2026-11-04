@@ -342,6 +342,31 @@ on:
         type: number
         required: false
         default: 1
+      unit-timings-ledger:
+        description: >-
+          Size the unit lane by MEASURED time (12-apps/ci lane-timings): the
+          caller's committed ledger of seconds per test file, refreshed by its
+          daily full run (`lane-timings-refresh.yml`). With it, on a pull
+          request with `affected-plan-config`, the shard count is
+          `ceil(estimated seconds / lane-target-seconds)` clamped to
+          `unit-shards` — which becomes a cap, not a count — and the plan names
+          each leg's files (`legs[i - 1]`, longest-first). The caller's command
+          reads its leg's list from the plan and must stop forwarding vitest's
+          own `--shard` once it does. Empty (default): sized by file count, as
+          before.
+        type: string
+        required: false
+        default: ''
+      integration-timings-ledger:
+        description: 'The same as `unit-timings-ledger`, for the integration lane, capped by `integration-shards`.'
+        type: string
+        required: false
+        default: ''
+      lane-target-seconds:
+        description: 'Test-step seconds one leg should take when a lane is sized by measured time. 600: the top of an 8–10 minute target.'
+        type: number
+        required: false
+        default: 600
       unit-shards:
         description: >-
           Fan the unit lane out over this many runners. 1 (default) keeps the
@@ -611,7 +636,7 @@ jobs:
           # With skip-green on, the plan is uploaded AFTER filtering, below —
           # the shards must run the list the filter left, and one artifact
           # name cannot hold two documents.
-          upload-artifact: ${{ inputs.skip-green == '' }}
+          upload-artifact: ${{ inputs.skip-green == '' && inputs.unit-timings-ledger == '' }}
 
       # ── Skip what this pull request already proved, per test (opt-in) ─────
       # Three steps, in this order, BEFORE the matrix is sized: restore the
@@ -666,10 +691,26 @@ jobs:
           policy: ${{ inputs.skip-green }}
           always-run: ${{ inputs.skip-green-always-run }}
           max-shards: ${{ inputs.unit-shards }}
+      # ── Size the matrix by MEASURED time (opt-in) ──────────────────────────
+      # After the selection and the skip-green filter, before the upload: the
+      # legs run the list the plan names for them (`legs[i - 1]`), and the
+      # shard count is the ledger's answer — about `lane-target-seconds` of
+      # test step a leg — clamped to `unit-shards`, instead of a file count.
+      - name: Size the lane by measured time
+        id: timings
+        if: ${{ inputs.unit-timings-ledger != '' && inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/lane-timings@v2
+        with:
+          mode: size
+          lane: unit
+          plan: affected-plan.unit.json
+          ledger: ${{ inputs.unit-timings-ledger }}
+          target-seconds: ${{ inputs.lane-target-seconds }}
+          max-shards: ${{ inputs.unit-shards }}
       - name: Upload the filtered plan
         # Also publish the unfiltered plan when identity/key generation stood
         # down. The affected action deferred upload whenever skip-green is on.
-        if: ${{ inputs.skip-green != '' && inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
+        if: ${{ (inputs.skip-green != '' || inputs.unit-timings-ledger != '') && inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
         uses: actions/upload-artifact@v4
         with:
           name: affected-plan-unit
@@ -795,6 +836,10 @@ jobs:
           # expression `||` would read "0" as nothing to say.
           SKIP_GREEN_FILTERED: ${{ steps.skipgreen.outputs.filtered }}
           SKIP_GREEN_ASKED: ${{ steps.skipgreen.outputs.shard-total }}
+          # The ledger's answer, when the lane is sized by measured time: it
+          # sized the list the legs run (after skip-green), so it wins over both.
+          TIMINGS_SIZED: ${{ steps.timings.outputs.sized }}
+          TIMINGS_ASKED: ${{ steps.timings.outputs.shard-total }}
           # PR-ONLY, and this is the load-bearing half of the input. The push
           # run is the post-merge safety net: it skips nothing, by definition.
           # A selector asked to size a push diff has no PR base to narrow
@@ -813,6 +858,9 @@ jobs:
           # is sized from it — zero included, which is the empty matrix below.
           if [ "${SKIP_GREEN_FILTERED:-}" = "true" ] && [[ "${SKIP_GREEN_ASKED:-}" =~ ^[0-9]+$ ]]; then
             PLAN_ASKED="$SKIP_GREEN_ASKED"
+          fi
+          if [ "${TIMINGS_SIZED:-}" = "true" ] && [[ "${TIMINGS_ASKED:-}" =~ ^[0-9]+$ ]]; then
+            PLAN_ASKED="$TIMINGS_ASKED"
           fi
           # Clamp rather than trust: a bad INPUT must never reach the matrix.
           if ! [[ "$SHARDS" =~ ^[0-9]+$ ]] || [ "$SHARDS" -lt 1 ]; then
@@ -1550,7 +1598,7 @@ jobs:
           max-shards: ${{ inputs.integration-shards }}
           artifact-name: affected-plan-integration
           # Uploaded after filtering when skip-green is on — see unit-plan.
-          upload-artifact: ${{ inputs.skip-green == '' }}
+          upload-artifact: ${{ inputs.skip-green == '' && inputs.integration-timings-ledger == '' }}
 
       # ── Skip what this pull request already proved, per test (opt-in) ─────
       # The integration twin of unit-plan's three steps; the argument is there.
@@ -1595,10 +1643,26 @@ jobs:
           policy: ${{ inputs.skip-green }}
           always-run: ${{ inputs.skip-green-always-run }}
           max-shards: ${{ inputs.integration-shards }}
+      # ── Size the matrix by MEASURED time (opt-in) ──────────────────────────
+      # After the selection and the skip-green filter, before the upload: the
+      # legs run the list the plan names for them (`legs[i - 1]`), and the
+      # shard count is the ledger's answer — about `lane-target-seconds` of
+      # test step a leg — clamped to `integration-shards`, instead of a file count.
+      - name: Size the lane by measured time
+        id: timings
+        if: ${{ inputs.integration-timings-ledger != '' && inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/lane-timings@v2
+        with:
+          mode: size
+          lane: integration
+          plan: affected-plan.integration.json
+          ledger: ${{ inputs.integration-timings-ledger }}
+          target-seconds: ${{ inputs.lane-target-seconds }}
+          max-shards: ${{ inputs.integration-shards }}
       - name: Upload the filtered plan
         # Also publish the unfiltered plan when identity/key generation stood
         # down. The affected action deferred upload whenever skip-green is on.
-        if: ${{ inputs.skip-green != '' && inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
+        if: ${{ (inputs.skip-green != '' || inputs.integration-timings-ledger != '') && inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
         uses: actions/upload-artifact@v4
         with:
           name: affected-plan-integration
@@ -1724,6 +1788,10 @@ jobs:
           # expression `||` would read "0" as nothing to say.
           SKIP_GREEN_FILTERED: ${{ steps.skipgreen.outputs.filtered }}
           SKIP_GREEN_ASKED: ${{ steps.skipgreen.outputs.shard-total }}
+          # The ledger's answer, when the lane is sized by measured time: it
+          # sized the list the legs run (after skip-green), so it wins over both.
+          TIMINGS_SIZED: ${{ steps.timings.outputs.sized }}
+          TIMINGS_ASKED: ${{ steps.timings.outputs.shard-total }}
           # PR-ONLY, and this is the load-bearing half of the input. The push
           # run is the post-merge safety net: it skips nothing, by definition.
           # A selector asked to size a push diff has no PR base to narrow
@@ -1741,6 +1809,9 @@ jobs:
           # skip-green rewrote the plan — see unit-plan.
           if [ "${SKIP_GREEN_FILTERED:-}" = "true" ] && [[ "${SKIP_GREEN_ASKED:-}" =~ ^[0-9]+$ ]]; then
             PLAN_ASKED="$SKIP_GREEN_ASKED"
+          fi
+          if [ "${TIMINGS_SIZED:-}" = "true" ] && [[ "${TIMINGS_ASKED:-}" =~ ^[0-9]+$ ]]; then
+            PLAN_ASKED="$TIMINGS_ASKED"
           fi
           # Clamp rather than trust: a bad INPUT must never reach the matrix.
           if ! [[ "$SHARDS" =~ ^[0-9]+$ ]] || [ "$SHARDS" -lt 1 ]; then

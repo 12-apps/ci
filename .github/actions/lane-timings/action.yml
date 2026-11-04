@@ -1,0 +1,129 @@
+name: 'Lane timings'
+description: >-
+  Size a test lane's matrix by MEASURED time, and keep the measurements fresh.
+
+  One mechanism for every lane that expands a matrix (unit, integration, E2E,
+  Gherkin, load tests): a committed per-item ledger of seconds, refreshed by
+  the consumer's daily full run, from which a plan job asks for
+  `ceil(estimate / target-seconds)` legs (8–10 minutes of test step each by
+  default) and deals the items longest-first onto them.
+
+  `size` (in a plan job, after the selection and any skip-green filter, before
+  the matrix): rewrites the plan with `legs` (leg i runs `legs[i - 1]`) and the
+  shard count. Needs no install and no token.
+
+  `refresh` (in the daily full run, after every test lane): reads every leg's
+  reports from this run's artifacts and its step times from the Actions API,
+  rewrites each lane's ledger, and reports — as annotations and in the job
+  summary — every file past `slowFileSeconds`, every leg past the target, and
+  every lane whose cap is too small for a full-width run. Needs
+  `actions: read`. Never fails the run over a measurement.
+
+  See README.md beside this file for the ledger and config shapes.
+inputs:
+  mode:
+    description: '`size` or `refresh`.'
+    required: true
+  lane:
+    description: '`size`: the lane name, for the log.'
+    required: false
+    default: 'lane'
+  plan:
+    description: '`size`: the plan JSON to rewrite in place, relative to working-directory.'
+    required: false
+    default: ''
+  items-key:
+    description: '`size`: dot path to the plan''s item array (`tests`, `features`, `specs`).'
+    required: false
+    default: 'tests'
+  ledger:
+    description: '`size`: the lane''s ledger, relative to working-directory. Missing or corrupt is an even split, never a failure.'
+    required: false
+    default: ''
+  target-seconds:
+    description: '`size`: test-step seconds one leg should take.'
+    required: false
+    default: '600'
+  max-shards:
+    description: '`size`: the cap. A selection that wants more legs gets the cap and a warning.'
+    required: false
+    default: '4'
+  min-shards:
+    description: '`size`: the fewest legs a non-empty selection gets.'
+    required: false
+    default: '1'
+  empty-shards:
+    description: '`size`: legs for an EMPTY selection — 0 for no matrix, 1 for a lane that must still start (a gate).'
+    required: false
+    default: '0'
+  config:
+    description: '`refresh`: the consumer''s lane config, relative to working-directory.'
+    required: false
+    default: '.lane-timings.json'
+  report:
+    description: '`refresh`: where to write the JSON report (slow files, slow legs, caps), relative to working-directory. Empty: none.'
+    required: false
+    default: ''
+  token:
+    description: '`refresh`: a token with `actions: read` on this run.'
+    required: false
+    default: ${{ github.token }}
+  working-directory:
+    description: 'Consumer checkout root.'
+    required: false
+    default: '.'
+outputs:
+  sized:
+    description: '`size`: `true` when the plan was rewritten (`false` for a full plan or a plan without items).'
+    value: ${{ steps.size.outputs.sized }}
+  shard-total:
+    description: '`size`: the leg count.'
+    value: ${{ steps.size.outputs.shard-total }}
+  shards:
+    description: '`size`: JSON array for the matrix.'
+    value: ${{ steps.size.outputs.shards }}
+  binding:
+    description: '`size`: `true` when the cap, not the measurement, set the leg count.'
+    value: ${{ steps.size.outputs.binding }}
+runs:
+  using: composite
+  steps:
+    - name: Size the lane by measured time
+      id: size
+      if: ${{ inputs.mode == 'size' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        LANE: ${{ inputs.lane }}
+        PLAN: ${{ inputs.plan }}
+        ITEMS_KEY: ${{ inputs.items-key }}
+        LEDGER: ${{ inputs.ledger }}
+        TARGET: ${{ inputs.target-seconds }}
+        MAX: ${{ inputs.max-shards }}
+        MIN: ${{ inputs.min-shards }}
+        EMPTY: ${{ inputs.empty-shards }}
+      run: |
+        set -euo pipefail
+        node "$GITHUB_ACTION_PATH/size.mjs" --lane "$LANE" --plan "$PLAN" --items-key "$ITEMS_KEY" \
+          --ledger "$LEDGER" --target-seconds "$TARGET" --max-shards "$MAX" --min-shards "$MIN" --empty-shards "$EMPTY"
+
+    - name: Refresh the lane ledgers from this run
+      if: ${{ inputs.mode == 'refresh' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CONFIG: ${{ inputs.config }}
+        REPORT: ${{ inputs.report }}
+        GITHUB_TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+        node "$GITHUB_ACTION_PATH/refresh.mjs" --config "$CONFIG" ${REPORT:+--report "$REPORT"}
+
+    - name: Refuse an unknown mode
+      if: ${{ inputs.mode != 'size' && inputs.mode != 'refresh' }}
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+      run: |
+        echo "::error title=lane-timings::mode '$MODE' is neither 'size' nor 'refresh'."
+        exit 1
