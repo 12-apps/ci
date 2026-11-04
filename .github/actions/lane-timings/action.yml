@@ -19,21 +19,25 @@ description: >-
   every lane whose cap is too small for a full-width run. Needs
   `actions: read`. Never fails the run over a measurement.
 
+  `leg` (in each leg, before its tests): writes the items the plan dealt to
+  leg n, one per line, to `out`, after checking that the legs cover the
+  plan's list exactly once. Fails rather than guesses.
+
   See README.md beside this file for the ledger and config shapes.
 inputs:
   mode:
-    description: '`size` or `refresh`.'
+    description: '`size`, `leg` or `refresh`.'
     required: true
   lane:
     description: '`size`: the lane name, for the log.'
     required: false
     default: 'lane'
   plan:
-    description: '`size`: the plan JSON to rewrite in place, relative to working-directory.'
+    description: '`size`: the plan JSON to rewrite in place. `leg`: the plan to read the leg from. Relative to working-directory.'
     required: false
     default: ''
   items-key:
-    description: '`size`: dot path to the plan''s item array (`tests`, `features`, `specs`).'
+    description: '`size` and `leg`: dot path to the plan''s item array (`tests`, `features`, `specs`).'
     required: false
     default: 'tests'
   ledger:
@@ -56,12 +60,28 @@ inputs:
     description: '`size`: legs for an EMPTY selection — 0 for no matrix, 1 for a lane that must still start (a gate).'
     required: false
     default: '0'
+  leg:
+    description: '`leg`: which leg, 1-based (the matrix shard number).'
+    required: false
+    default: ''
+  out:
+    description: '`leg`: where to write the leg''s items, one per line, relative to working-directory.'
+    required: false
+    default: 'lane-leg.txt'
+  when-sized:
+    description: '`leg`: `true` to hand back no file (and succeed) when the plan was never sized, instead of failing.'
+    required: false
+    default: 'false'
   config:
     description: '`refresh`: the consumer''s lane config, relative to working-directory.'
     required: false
     default: '.lane-timings.json'
   report:
     description: '`refresh`: where to write the JSON report (slow files, slow legs, caps), relative to working-directory. Empty: none.'
+    required: false
+    default: ''
+  run-id:
+    description: '`refresh`: the run to measure. Empty: this run. Another run measures that run''s artifacts and legs (a backfill, or a probe of the refresh itself).'
     required: false
     default: ''
   token:
@@ -85,6 +105,12 @@ outputs:
   binding:
     description: '`size`: `true` when the cap, not the measurement, set the leg count.'
     value: ${{ steps.size.outputs.binding }}
+  file:
+    description: '`leg`: the path of the leg''s list.'
+    value: ${{ steps.leg.outputs.file }}
+  count:
+    description: '`leg`: how many items the leg runs.'
+    value: ${{ steps.leg.outputs.count }}
 runs:
   using: composite
   steps:
@@ -107,6 +133,24 @@ runs:
         node "$GITHUB_ACTION_PATH/size.mjs" --lane "$LANE" --plan "$PLAN" --items-key "$ITEMS_KEY" \
           --ledger "$LEDGER" --target-seconds "$TARGET" --max-shards "$MAX" --min-shards "$MIN" --empty-shards "$EMPTY"
 
+    - name: Read this leg's list from the plan
+      id: leg
+      if: ${{ inputs.mode == 'leg' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        LANE: ${{ inputs.lane }}
+        PLAN: ${{ inputs.plan }}
+        ITEMS_KEY: ${{ inputs.items-key }}
+        LEG: ${{ inputs.leg }}
+        OUT: ${{ inputs.out }}
+        WHEN_SIZED: ${{ inputs.when-sized }}
+      run: |
+        set -euo pipefail
+        extra=()
+        if [ "$WHEN_SIZED" = "true" ]; then extra+=(--when-sized); fi
+        node "$GITHUB_ACTION_PATH/leg.mjs" --lane "$LANE" --plan "$PLAN" --items-key "$ITEMS_KEY" --leg "$LEG" --out "$OUT" "${extra[@]}"
+
     - name: Refresh the lane ledgers from this run
       if: ${{ inputs.mode == 'refresh' }}
       shell: bash
@@ -114,16 +158,17 @@ runs:
       env:
         CONFIG: ${{ inputs.config }}
         REPORT: ${{ inputs.report }}
+        RUN_ID: ${{ inputs.run-id }}
         GITHUB_TOKEN: ${{ inputs.token }}
       run: |
         set -euo pipefail
-        node "$GITHUB_ACTION_PATH/refresh.mjs" --config "$CONFIG" ${REPORT:+--report "$REPORT"}
+        node "$GITHUB_ACTION_PATH/refresh.mjs" --config "$CONFIG" ${REPORT:+--report "$REPORT"} ${RUN_ID:+--run-id "$RUN_ID"}
 
     - name: Refuse an unknown mode
-      if: ${{ inputs.mode != 'size' && inputs.mode != 'refresh' }}
+      if: ${{ inputs.mode != 'size' && inputs.mode != 'leg' && inputs.mode != 'refresh' }}
       shell: bash
       env:
         MODE: ${{ inputs.mode }}
       run: |
-        echo "::error title=lane-timings::mode '$MODE' is neither 'size' nor 'refresh'."
+        echo "::error title=lane-timings::mode '$MODE' is not 'size', 'leg' or 'refresh'."
         exit 1

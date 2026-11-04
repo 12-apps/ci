@@ -521,3 +521,30 @@ each artifact `-s<n>` with its own leg's `shard <n>/<m>`).
 
 **Pending:** hosted Self Tests; the consumer wiring, a PR run sized by a
 ledger, and the first daily refresh PR.
+
+## E-007 — A leg reads its list from the engine, and the refresh can measure any run (FUT-4409)
+
+**Date:** 2026-11-04 · **Status:** Built and tested locally; hosted proof pending
+
+**Question:** can the consumer stop carrying its own copies of the leg
+logic (future-pay validated `legs[i - 1]` twice and packed with its own
+longest-first copy twice), and can the daily refresh be exercised end to end
+before it first runs on its own?
+
+**Method:** `lane-timings` gains `leg` mode (`leg.mjs`): it writes leg n's
+items to a file after checking that the plan's legs cover its list exactly
+once and match its stated leg count, and fails otherwise; `when-sized` lets
+an unsized plan through with no file. `monorepo-tests.yml` runs it in the
+unit and integration legs and passes `LANE_LEG_FILE` to the caller's
+command. `refresh` and `lane-timings-refresh.yml` take a `run-id`, so the
+reusable workflow can measure an earlier run: the probe of the whole
+prepare → measure → land path that the consumer runs next.
+
+**Results (local):** `lane-timings` and `.github/workflows/__tests__`
+suites green, including `leg.test.mjs` (every untrustworthy plan refused,
+`--when-sized` passes an unsized plan and still refuses bad legs) and the
+leg wiring cases in `lane-timings-wiring.test.mjs`; dropping `when-sized`
+from the wiring fails its case.
+
+**Pending:** hosted Self Tests, the consumer switching its legs to
+`LANE_LEG_FILE` and the `leg` step, and the refresh probe's PR.

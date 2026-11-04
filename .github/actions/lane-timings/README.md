@@ -53,6 +53,30 @@ leg's expected seconds, the unknown items, the largest one) and, where the
 plan already has them, `counts.shardTotal`, `shardTotal` and `shards`. A
 `full` plan (nothing enumerated) is left alone.
 
+## `leg` — in each leg, before its tests
+
+```yaml
+- id: leg
+  uses: 12-apps/ci/.github/actions/lane-timings@v2
+  with:
+    mode: leg
+    lane: gherkin
+    plan: bdd-plan.json
+    items-key: features
+    leg: ${{ matrix.shard }}
+    out: leg.txt
+# then run exactly the files in ${{ steps.leg.outputs.file }}, one per line
+```
+
+It writes the items `size` dealt to this leg, after checking that the legs
+cover the plan's list exactly once and that the plan was sized for as many
+legs as it carries. Anything else fails the leg: a leg that fell back to a
+split of its own could drop files while every leg reports green.
+`when-sized: 'true'` lets a plan that was never sized (no ledger, a `none`
+plan) through with no file, so the runner splits as it always did.
+`monorepo-tests.yml` runs it for unit and integration and hands the file to
+the caller's command as `LANE_LEG_FILE`.
+
 ## `refresh` — in the daily full run
 
 Use the reusable workflow, as the last job of the run, after every test lane:
@@ -68,7 +92,8 @@ lane-timings:
     PR_TOKEN: ${{ secrets.<a PAT> }}
 ```
 
-It downloads every leg's reports from **this run's** artifacts, reads every
+`run-id` measures another run instead (a backfill, or a probe of the
+refresh itself). It downloads every leg's reports from **this run's** artifacts, reads every
 leg's test-step time from the Actions API, rewrites each ledger, and lands the
 change as an auto-merged PR (the `post-merge-regen` prepare/land halves, under
 the `chore/lane-timings-` prefix).

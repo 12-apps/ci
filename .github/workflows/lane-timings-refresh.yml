@@ -38,6 +38,14 @@ on:
         type: string
         required: false
         default: '.lane-timings.json'
+      run-id:
+        description: >-
+          The run to measure. Empty: this run (the normal case, as the last job
+          of the daily run). Naming another run measures that run's artifacts
+          and legs: a backfill, or a probe of this workflow itself.
+        type: string
+        required: false
+        default: ''
       title:
         description: 'The PR title and commit header — include what your commit rules demand (a ticket reference).'
         type: string
@@ -134,6 +142,7 @@ jobs:
         with:
           mode: refresh
           config: ${{ inputs.config }}
+          run-id: ${{ inputs.run-id }}
           report: ${{ runner.temp }}/lane-timings-report.json
       - name: Keep the report
         if: ${{ always() }}
