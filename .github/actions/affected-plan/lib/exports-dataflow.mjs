@@ -369,10 +369,22 @@ function substitutionEnd(text, j) {
     if (!/\s/.test(c)) {
       lastWord = /[\w$]/.test(c) ? (/[\w$]/.test(text[j - 1] ?? "") ? lastWord + c : c) : "";
       lastSig = c;
+      // A postfix `++` / `--` ends an operand, so a `/` after it divides
+      // (`${n-- / 2}`); and a word after `.` is a property, never the keyword
+      // it spells (`${w.of / 2}`). Read as a regex, either one swallows the
+      // substitution's `}` and the template's closing backtick.
+      if ((c === "+" || c === "-") && text[j - 1] === c && /[\w$)\]]/.test(prevSignificant(text, j - 2))) lastSig = ")";
+      if (lastWord && prevSignificant(text, j - lastWord.length) === ".") lastWord = "";
     }
     j += 1;
   }
   return text.length;
+}
+
+/** The last non-whitespace character at or before `k`, or "" at the start. */
+function prevSignificant(text, k) {
+  while (k >= 0 && /\s/.test(text[k])) k -= 1;
+  return k >= 0 ? text[k] : "";
 }
 
 /**

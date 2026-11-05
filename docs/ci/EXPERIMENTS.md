@@ -579,7 +579,7 @@ commit the measured daily run tested (`85d3af99`). With `--run-id`,
 `refresh-sha.test.mjs`), and null when the run cannot be read. Its CLI runs
 only when executed, so the helper can be imported.
 
-## E-009 — A template literal ends where its substitutions say it ends (FUT-4433)
+## E-010 — A template literal ends where its substitutions say it ends (FUT-4433)
 
 **Date:** 2026-11-05 · **Status:** Built and tested locally; hosted proof pending
 
@@ -606,13 +606,31 @@ block comments, regex literals (`regexLiteralEnd`'s operand rule, as the
 walker already uses) and nested templates, recursively. A substitution still
 stays inside the literal, so its text compares verbatim, as before. The other
 two callers (`canonical`, `firstArgument`) only change in where a template
-ends; none relied on the early close.
+ends. That end now depends on the regex-or-division guess inside a
+substitution, which the review below found wrong in two shapes.
 
 **Local results:** `template-substitution-literals.test.mjs`, 20 cases: each
 of the five shapes, on `canonical` and end to end; whitespace between tokens
 around them still reads as unchanged, now in every case. On 667ab0c 14 fail:
 all five `canonical` cases, end to end for the string, regex and nested
-shapes, four of the whitespace negatives (main had over-reported them as
-changed), and an unterminated template. With the fix all 20 pass, and
+shapes, five of the whitespace negatives (main had over-reported them as
+changed, including "whitespace between tokens after a closed substitution"),
+and an unterminated template. With the fix all 20 pass, and
 `node --test .github/actions/affected-plan/__tests__/*.test.mjs` passes
 419/419 across 23 files (399/399 across 22 on main).
+
+**Review round 1 (same day):** an independent adversarial review found one
+regression this change introduced. Inside a substitution, a `/` after a
+postfix `--` / `++`, or after a property spelled like a keyword (`.of`, `.in`,
+`.do`, `.new`), was guessed as a regex. The guessed regex swallowed the
+substitution's `}` and the template's closing backtick, so a later `}` closed
+the substitution and the NEXT template's backtick ended this one. That later
+template's text was then read as code, and a whitespace edit in it selected
+nothing, where main selected the test (``for (const r of rows) { out +=
+`${r.qty-- / 2}`; … } return `R$ ${total}`;``). Fix in `substitutionEnd`: a
+doubled `+` / `-` after an operand ends an operand, and a word right after
+`.` is a property, never a keyword. Pinned with six shapes, on `canonical` and
+end to end; 12 of the new cases fail on the round-1 code (0122ee3). The same
+weakness in `scan` (`modules.mjs`) predates this change and is untouched.
+Local: the file has 33 cases, all passing; the directory passes 432/432
+across 23 files.

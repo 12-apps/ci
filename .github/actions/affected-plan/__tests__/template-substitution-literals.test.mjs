@@ -100,3 +100,40 @@ test("canonical: a substitution's own text still compares verbatim", () => {
 test("canonical: an unterminated template runs to the end of the text", () => {
   assert.notEqual(canonical("`${ `a  b"), canonical("`${ `a b"));
 });
+
+// ── Review round 1 (FUT-4433): division inside a substitution read as a regex. ──
+// After a postfix `--`/`++`, or after a property spelled like a keyword
+// (`.of`, `.in`, `.do`, `.new`), a `/` divides. Read as a regex, it swallowed
+// the substitution's `}` and the template's backtick; a later `}` closed the
+// substitution, the NEXT template's backtick ended this one, and that template's
+// text was read as code with its whitespace collapsed: no test selected.
+const DIVISIONS = {
+  "a postfix --": "r.qty-- / 2",
+  "a postfix ++": "r.qty++ / 2",
+  "a property named of": "r.of / 2",
+  "a property named in": "r.in / 12",
+  "a property named do": "r.do / 2",
+  "a property named new": "r.new / 2",
+};
+const loop = (div, s) =>
+  "export function open(rows) {\n" +
+  '  let out = "", total = 0;\n' +
+  "  for (const r of rows) { out += `${" + div + "}`; total = out.length / 2; }\n" +
+  "  return `R$" + s + "${total}`;\n" +
+  "}\n";
+
+for (const [label, div] of Object.entries(DIVISIONS)) {
+  test(`canonical: whitespace in a later template after ${label} inside a substitution is a change`, () => {
+    assert.notEqual(canonical(loop(div, " ")), canonical(loop(div, "  ")));
+  });
+
+  test(`end to end: whitespace in a later template after ${label} inside a substitution selects the test`, () => {
+    const r = select(loop(div, " "), loop(div, "  "));
+    assert.ok(r.tests.includes(TEST), `selected: ${JSON.stringify(r.tests)} mode=${r.mode}`);
+  });
+}
+
+test("a regex after `(` inside a substitution is still skipped whole, backtick included", () => {
+  const re = (s) => "export const MD = `${(/`/).source} a" + s + "b `;\n" + TAIL;
+  assert.notEqual(canonical(re(" ")), canonical(re("  ")));
+});
