@@ -128,6 +128,21 @@ function readReports(dir, lane) {
 export const legOfArtifact = (name) => Number(/-s(\d+)$/.exec(name)?.[1] ?? 1);
 export const legOfJob = (name) => Number(/shard (\d+)\//.exec(name)?.[1] ?? 1);
 
+/**
+ * The commit the measured run tested. This run's own sha when it measures
+ * itself; another run's head_sha when `--run-id` names one, since this run's
+ * checkout (a probe or backfill branch) is not what produced the timings.
+ * Null when the run cannot be read: the ledger never records a wrong commit.
+ */
+export async function measuredSha(run, { ownRunId, ownSha, readRun }) {
+  if (String(run) === String(ownRunId)) return ownSha || null;
+  try {
+    return (await readRun(run))?.head_sha ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function measureLane(name, lane, { artifacts, jobs, scratch }) {
   const re = new RegExp(lane.artifacts);
   const mine = artifacts.filter((a) => re.test(a.name) && !a.expired);
@@ -200,7 +215,11 @@ async function main() {
 
   const meta = {
     run: `${process.env.GITHUB_SERVER_URL || "https://github.com"}/${REPO}/actions/runs/${RUN}`,
-    sha: process.env.GITHUB_SHA || null,
+    sha: await measuredSha(RUN, {
+      ownRunId: process.env.GITHUB_RUN_ID,
+      ownSha: process.env.GITHUB_SHA,
+      readRun: (id) => api(`/repos/${REPO}/actions/runs/${id}`),
+    }),
     at: new Date().toISOString(),
   };
   const results = [];
@@ -237,7 +256,9 @@ async function main() {
   if (reportPath) writeFileSync(reportPath, `${JSON.stringify({ targetSeconds, slowFileSeconds, run: meta, lanes: results }, null, 2)}\n`);
 }
 
-main().catch((error) => {
-  // A measurement is never worth a red run.
-  console.log(`::warning title=lane-timings::refresh stopped: ${error.stack || error.message}`);
-});
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((error) => {
+    // A measurement is never worth a red run.
+    console.log(`::warning title=lane-timings::refresh stopped: ${error.stack || error.message}`);
+  });
+}

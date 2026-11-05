@@ -571,3 +571,10 @@ characters or fewer; it fails on the old default.
 
 This also closes E-007's pending refresh probe: future-pay#4146 ran the
 `leg` step on every leg (unit, integration, SPA E2E, Gherkin) and merged.
+
+**Addendum (same day):** the first ledgers on future-pay's `main` (#4157)
+record `measured.sha` as the one-off branch's commit (`f74dc4d`), not the
+commit the measured daily run tested (`85d3af99`). With `--run-id`,
+`refresh` now records that run's `head_sha` (`measuredSha`, tested in
+`refresh-sha.test.mjs`), and null when the run cannot be read. Its CLI runs
+only when executed, so the helper can be imported.
