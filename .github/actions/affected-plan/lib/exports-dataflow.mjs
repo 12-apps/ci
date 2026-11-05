@@ -321,21 +321,6 @@ export function canonical(text) {
   return out.trim();
 }
 
-/**
- * {@link canonical} that keeps WHERE lines break: runs of spaces collapse and
- * blank lines go, but two tokens a line break separated stay separated by
- * one. A line break decides ASI (`return\nx` is not `return x`), so a
- * comparison that proves runtime text identical must not erase it.
- */
-export function canonicalLines(text) {
-  let out = "";
-  walkLiterals(text, (kind, start, end) => {
-    const part = text.slice(start, end);
-    out += kind === "literal" ? part : part.replace(/[ \t\r]+/g, " ").replace(/ ?\n[ \n]*/g, "\n");
-  });
-  return out.trim();
-}
-
 /** The source of a call's first argument — `Given(<this>, fn)` — canonical. */
 function firstArgument(text) {
   const open = text.indexOf("(");

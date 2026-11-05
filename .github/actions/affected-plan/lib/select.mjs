@@ -317,6 +317,9 @@ export function selectAffected(options) {
   const routeReport = {};
   // Changed files whose every edit is erased TypeScript: reported, never seeded.
   const typeOnly = [];
+  // Files an importer reaches through a query suffix (`./x.ts?raw`).
+  const queried = new Set();
+  for (const list of edges.values()) for (const e of list) if (e.target && /[?#]/.test(e.spec ?? "")) queried.add(e.target);
   for (const file of direct) {
     if (deleted.includes(file)) {
       affected.set(file, "*");
@@ -350,9 +353,13 @@ export function selectAffected(options) {
     // annotate with them, then widening on their initializers, selected 92
     // integration files for one union member (FUT-3586). `typeOnlyEdit` proves
     // the erasure three ways (module-context.mjs); any doubt keeps the walk.
-    // A changed test still runs as itself.
+    // A changed test still runs as itself. Only a `.ts`/`.mts`/`.cts` file
+    // qualifies: Node's stripper parses TypeScript, not JSX, and reads JSX
+    // text as code or comments. A file some importer loads through a query
+    // (`?raw`, `?url`, any `?…`) is read as TEXT or an asset, where a type
+    // edit is a change.
     const changedNames = affectedExports(base, head);
-    if (!isTest(file) && typeOnlyEdit(base, head, changedNames)) {
+    if (!isTest(file) && /\.[mc]?ts$/.test(file) && !queried.has(file) && typeOnlyEdit(base, head, changedNames)) {
       typeOnly.push(file);
       symbolReport[file] = [];
       continue;

@@ -631,3 +631,31 @@ const on one line, type and call on one line).
 
 **Pending:** hosted Self Tests, and a consumer branch with an interface-only
 edit planning `none` with the file under `typeOnly`.
+
+**Addendum (round-2 review, same day):** an independent review of 09c8340
+found four runtime edits the rule reported as `typeOnly` with no test, each
+selected on main. All four are now refused, pinned in
+`__tests__/type-only-review.test.mjs` (each failed on 09c8340, passes now):
+
+- B1, a `?raw` importer: `import text from "./basket.ts?raw"` reads the
+  file's text, so a type edit changes a value. A file any importer reaches
+  through a `?…` specifier is never type-only; a `?raw` glob importer stays
+  selected through its route.
+- B2, proof 3 shared a literal walker: `canonicalLines` reused
+  `walkLiterals`, which misreads a backtick inside a template substitution
+  (`${"`"}`, `${/`/.source}`, `${ /* ` */ 1}`, `${1 // `}`) and then
+  collapsed whitespace inside a later real string. Strip mode keeps every
+  byte at its position (checked: output length equals input length), so
+  proof 3 now requires each erased unit's lines to strip to whitespace and
+  compares the remaining lines byte for byte; `canonicalLines` is gone.
+- B3, a `.tsx` file stripped as TypeScript: a JSX element whose opening tag
+  also parses as a generic arrow got through with its text read as a
+  comment. Only `.ts`, `.mts` and `.cts` files qualify.
+- B4, decorators: under `emitDecoratorMetadata` a changed `type Id` changes
+  the emitted `design:type`. A file with an `@` outside literals and
+  comments is never type-only. A decorated class in another file that
+  annotates with the type is not covered; the README says so.
+
+Local: `node --test .github/actions/affected-plan/__tests__/*.test.mjs`, 24
+files, 423/423; `type-only-counterexamples.test.mjs` and
+`type-only.test.mjs` unchanged and green.

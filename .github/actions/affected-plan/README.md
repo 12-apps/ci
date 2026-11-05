@@ -64,12 +64,25 @@ both sides seeds nothing, and the plan lists it under `typeOnly`: the edit is
 erased before a runtime lane loads the file (FUT-3586). Three proofs must all
 agree (`typeOnlyEdit` in `lib/module-context.mjs`): the changed names are
 declared only by erased units, every other top-level unit (imports included)
-is identical, and Node's type stripper erases both sides to the same
-JavaScript. An `enum`, a `const enum`, a `declare` value, a class, a
-namespace, a value sharing the type's name, any import change, a JSX file and
-a changed test file keep the ordinary reading. A lane that runs vitest's
-`typecheck` mode or other type tests is judged by the compiler, not by this
-selection; do not narrow it with this action.
+is identical, and Node's type stripper, which blanks types in place, leaves
+both sides byte-identical once the erased lines are removed. An `enum`, a
+`const enum`, a `declare` value, a class, a namespace, a value sharing the
+type's name and any import change keep the ordinary reading, and so do:
+
+- any file but `.ts`, `.mts` and `.cts`: a `.tsx` or `.jsx` file never
+  qualifies, because the stripper does not parse JSX;
+- a file some importer loads through a query (`./x.ts?raw`, `?url`, any
+  `?…`), which reads its text, not its runtime;
+- a file holding a decorator (an `@` outside literals and comments), whose
+  annotations `emitDecoratorMetadata` turns into `design:type` values;
+- a changed test file, which runs as itself.
+
+Not covered: under `emitDecoratorMetadata`, a decorated class in ANOTHER file
+that annotates with the edited type also emits it as metadata. A lane whose
+build emits decorator metadata (tsc, or swc with `decoratorMetadata`; esbuild
+and Vite never do) should not rely on this narrowing. A lane that runs
+vitest's `typecheck` mode or other type tests is judged by the compiler, not
+by this selection; do not narrow it with this action.
 
 ## Vite glob inputs
 

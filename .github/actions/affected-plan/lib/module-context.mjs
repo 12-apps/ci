@@ -50,7 +50,7 @@
  */
 import { builtinModules, stripTypeScriptTypes } from "node:module";
 
-import { canonical, canonicalLines } from "./exports-dataflow.mjs";
+import { canonical } from "./exports-dataflow.mjs";
 import { parseImports, scan } from "./modules.mjs";
 
 const IDENT = /[A-Za-z_$][\w$]*/g;
@@ -251,7 +251,8 @@ function erasedEndsCleanly(masked) {
  * The file's top-level units, or null when it cannot be cut safely.
  *
  * @returns {{kind: "import"|"erased"|"inert"|"exports"|"opaque", code: string, masked: string,
- *   names: string[], exported: boolean, refs: Set<string>, records?: object[], list?: string[][]}[] | null}
+ *   names: string[], exported: boolean, refs: Set<string>, from: number, to: number,
+ *   records?: object[], list?: string[][]}[] | null}  `from`/`to`: the unit's first and last line
  */
 export function topLevelUnits(source) {
   const { code, masked } = scan(source);
@@ -279,7 +280,7 @@ export function topLevelUnits(source) {
     const previous = units[units.length - 1];
     if (previous && CONTINUES.test(previous.masked)) return null;
     const refs = new Set(unitMasked.match(IDENT) ?? []);
-    const unit = { code: unitCode, masked: unitMasked, names: [], exported: /^export\b/.test(head), refs };
+    const unit = { code: unitCode, masked: unitMasked, names: [], exported: /^export\b/.test(head), refs, from, to };
 
     if (/^(?:import|export)\b/.test(head) && !/^import\s*[(.]/.test(head) && /\bfrom\s*["']|^import\s*["']/.test(head)) {
       // Import and re-export statements, and nothing else.
@@ -521,9 +522,18 @@ function erasedToJavaScript(source) {
  *      column-0 unit, and compares here, or on the type's own line, where the
  *      end checks reject it.
  *   3. EMIT. Node's own type stripper (`stripTypeScriptTypes`, a real parser)
- *      erases both sides to the same JavaScript, literals byte for byte and
- *      line breaks kept. A file it cannot strip (JSX, a non-erasable form)
- *      is not type-only.
+ *      blanks types in place, keeping every other byte at its position. On
+ *      each side, every line of an erased unit must strip to whitespace
+ *      only; with those lines removed, the two outputs must be equal byte
+ *      for byte, comments and whitespace included. No literal walker is
+ *      involved, so a misread backtick cannot hide an edit (round-2 review:
+ *      `${"`"}` once made whitespace inside a later string compare equal). A
+ *      file it cannot strip (a non-erasable form) is not type-only. The
+ *      caller keeps JSX files, decorators and `?query` importers out (see
+ *      select.mjs), since the strip cannot see what those read.
+ *   4. No decorator: under `emitDecoratorMetadata` a type annotation becomes
+ *      `design:type` metadata, so an `@` outside literals and comments on
+ *      either side answers false.
  *
  * @param {string | null} base
  * @param {string | null} head
@@ -550,10 +560,20 @@ export function typeOnlyEdit(base, head, names) {
   const kept = (units) => units.filter((u) => u.kind !== "erased").map((u) => canonical(u.code));
   if (JSON.stringify(kept(sides[0])) !== JSON.stringify(kept(sides[1]))) return false;
 
-  const emitted = [base, head].map(erasedToJavaScript);
-  if (emitted.includes(null)) return false;
-  const [was, now] = emitted.map((js) => canonicalLines(scan(js).code));
-  return was === now;
+  if (sides.some((units) => units.some((u) => u.masked.includes("@")))) return false;
+
+  const runtimeText = (source, units) => {
+    const js = erasedToJavaScript(source);
+    if (js == null || js.length !== source.length) return null;
+    const lines = js.split("\n");
+    const erased = new Set();
+    for (const u of units) if (u.kind === "erased") for (let i = u.from; i <= u.to; i += 1) erased.add(i);
+    for (const i of erased) if (/\S/.test(lines[i] ?? "")) return null;
+    return lines.filter((_, i) => !erased.has(i)).join("\n");
+  };
+  const was = runtimeText(base, sides[0]);
+  const now = runtimeText(head, sides[1]);
+  return was !== null && was === now;
 }
 
 /**
