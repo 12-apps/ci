@@ -687,3 +687,77 @@ skips its test on the PR and is caught by the daily full suite.
 
 **Status:** Built and tested locally; hosted proof pending (Self Tests on the
 PR, then a consumer plan reporting `typeOnly`).
+
+## E-010 — A template literal ends where its substitutions say it ends (FUT-4433)
+
+**Date:** 2026-11-05 · **Status:** Built and tested locally; hosted proof pending
+
+**Question:** why did a whitespace edit inside a string literal of
+`src/basket.ts` select none of its consumers' tests?
+
+**Evidence:** on main (667ab0c), with `src/consumer.ts` importing
+`src/basket.ts` and `src/consumer.test.ts` importing the consumer, base
+``export const MD = `${"`"}x` + " ";`` and head with `"  "` in place of
+`" "` gave `selectAffected` `names=[]`, `tests=[]`. `walkLiterals` (in
+`lib/exports-dataflow.mjs`, behind `canonical`, `changedDeclarations` and
+`affectedExports`) closed a template at the first backtick it met, so a
+backtick inside a substitution's string, regex, comment or nested template
+ended it early. Everything after it was read with the wrong parity: the later
+literal's text was collapsed as code, and the edit compared as no change.
+The regex form (`` `${/`/.source} a b ` ``) and an edit inside a nested
+template failed end to end the same way. The comment forms are wrong in
+`canonical` only: every caller passes it `stripComments` output, and `scan`
+already lexes substitutions.
+
+**Change:** the walker finds a template's end with `templateEnd`, which lexes
+each `${…}` as code up to its matching `}` by brace depth: strings, line and
+block comments, regex literals (`regexLiteralEnd`'s operand rule, as the
+walker already uses) and nested templates, recursively. A substitution still
+stays inside the literal, so its text compares verbatim, as before. The other
+two callers (`canonical`, `firstArgument`) only change in where a template
+ends. That end now depends on the regex-or-division guess inside a
+substitution, which the review below found wrong in two shapes.
+
+**Local results:** `template-substitution-literals.test.mjs`, 20 cases: each
+of the five shapes, on `canonical` and end to end; whitespace between tokens
+around them still reads as unchanged, now in every case. On 667ab0c 14 fail:
+all five `canonical` cases, end to end for the string, regex and nested
+shapes, five of the whitespace negatives (main had over-reported them as
+changed, including "whitespace between tokens after a closed substitution"),
+and an unterminated template. With the fix all 20 pass, and
+`node --test .github/actions/affected-plan/__tests__/*.test.mjs` passes
+419/419 across 23 files (399/399 across 22 on main).
+
+**Review round 1 (same day):** an independent adversarial review found one
+regression this change introduced. Inside a substitution, a `/` after a
+postfix `--` / `++`, or after a property spelled like a keyword (`.of`, `.in`,
+`.do`, `.new`), was guessed as a regex. The guessed regex swallowed the
+substitution's `}` and the template's closing backtick, so a later `}` closed
+the substitution and the NEXT template's backtick ended this one. That later
+template's text was then read as code, and a whitespace edit in it selected
+nothing, where main selected the test (``for (const r of rows) { out +=
+`${r.qty-- / 2}`; … } return `R$ ${total}`;``). Fix in `substitutionEnd`: a
+doubled `+` / `-` after an operand ends an operand, and a word right after
+`.` is a property, never a keyword. Pinned with six shapes, on `canonical` and
+end to end; 12 of the new cases fail on the round-1 code (0122ee3). The same
+weakness in `scan` (`modules.mjs`) predates this change and is untouched.
+Local: the file has 33 cases, all passing; the directory passes 432/432
+across 23 files.
+
+**Review round 2 (same day):** the round-1 fix cleared a property only at its
+first character and kept appending the rest, so `.min` left `in` as the last
+word, a keyword, and `${w.min / 2}` (also `.bin`, `.sin`, `.knew`, `.xof`,
+`.ado`, `?.min`) was guessed as a regex again: a whitespace edit in a later
+template selected nothing, where main and the round-1 head selected the test.
+Now whether a word is a property is decided once, at its first character
+(the previous significant character is `.`), and holds until the word ends.
+Pinned with `r.min`, `r.knew` and `r?.min`; those 6 cases fail on the round-2
+head (07835ed). Local: the file has 39 cases, all passing; the directory
+passes 438/438 across 23 files.
+
+**Review round 3 (same day):** verification found no regression from the
+round-2 fix. It found one edge left from round 1: the word test was ASCII
+(`[\w$]`), so in `${w.éin / 2}` the `in` after `é` started a new word and read
+as a keyword. That is a miss where main selects. The word test is now
+`\p{ID_Continue}` plus `$`, ZWNJ and ZWJ. Pinned with `r.éin` and `ðin`; those
+4 cases fail on the round-2 fix (b94914c). Local: 43 cases in the file.
