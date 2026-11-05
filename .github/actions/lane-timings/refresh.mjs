@@ -124,9 +124,14 @@ function readReports(dir, lane) {
   return reports;
 }
 
-/** Leg n of an artifact (`…-s3`) or a job (`… · shard 3/6`); a lone unsharded leg is 1. */
+/**
+ * Leg n of an artifact (`…-s3`) or a job: `… · shard 3/6`, or a matrix job
+ * GitHub names `SPA E2E (3)`. A lone unsharded leg is 1. Without the `(n)`
+ * form every such job read as leg 1, so pairing added leg 1's measured
+ * seconds once per job and skewed the lane's concurrency.
+ */
 export const legOfArtifact = (name) => Number(/-s(\d+)$/.exec(name)?.[1] ?? 1);
-export const legOfJob = (name) => Number(/shard (\d+)\//.exec(name)?.[1] ?? 1);
+export const legOfJob = (name) => Number((/shard (\d+)\//.exec(name) ?? /\((\d+)(?:,[^)]*)?\)\s*$/.exec(name))?.[1] ?? 1);
 
 /**
  * The commit the measured run tested. This run's own sha when it measures
