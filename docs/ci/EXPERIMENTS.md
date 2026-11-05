@@ -578,3 +578,56 @@ commit the measured daily run tested (`85d3af99`). With `--run-id`,
 `refresh` now records that run's `head_sha` (`measuredSha`, tested in
 `refresh-sha.test.mjs`), and null when the run cannot be read. Its CLI runs
 only when executed, so the helper can be imported.
+
+## E-009 — A type-only edit seeds no runtime work, re-landed on three proofs (FUT-3586)
+
+**Date:** 2026-11-05 · **Status:** Built and tested locally; hosted proof pending
+
+**Question:** can an edit confined to `interface` and `type` declarations
+stop selecting runtime tests without reopening the five false negatives
+that reverted 12-apps/ci#179 (#180)? On a future-pay branch one added union
+member in an interface selected 92 integration files: `withinFile` followed
+the name to the exports annotating with it, and `initializationMayObserve`
+widened the file to `*` on a non-inert initializer.
+
+**Method:** `typeOnlyEdit` (`lib/module-context.mjs`) runs in
+`selectAffected` before the module-context and `withinFile` steps, on a
+changed non-test file, and answers yes only when three independent proofs
+agree; otherwise the file takes the old path unchanged.
+
+1. Names: every name `affectedExports` reports is declared by an erased unit
+   (`type`/`interface`) and by no runtime unit, export list or import
+   binding, on both sides; `*` is never type-only.
+2. Units: both sides cut with `topLevelUnits` (#182's literal masking, the
+   template-literal backtick tracking, `erasedEndsCleanly` and `asiSafe`),
+   and every non-erased unit, imports included, is identical in order.
+3. Emit: Node's `stripTypeScriptTypes` erases both sides to the same
+   JavaScript, compared with literals byte for byte and line breaks kept
+   (`canonicalLines`, new beside `canonical`). JSX or a non-erasable form
+   cannot be stripped and is not type-only.
+
+#179's single bracketer was the failure: both it and the runtime proof put
+the same swallowed text in the type span. Here the runtime text is compared
+by a different cut and by a real parser.
+
+**New counterexamples** (`__tests__/type-only.test.mjs`), each a runtime
+edit that must stay selected: an indented IIFE after a semicolon-less union,
+with no `;` of its own; a column-0 `;(() => …)()` after a semicolon-less
+type; a generic default holding a template literal with `${` and a call
+after it, on its line and indented below it; a comment holding `}` inside an
+interface with a call after the real close; a comment holding `{` inside an
+interface over a changed const; an interface and an exported const on one
+line; a `;`-terminated type and a call on one line; a string-literal type
+holding a backtick over a changed const. In four of them `affectedExports`
+blames only the type name.
+
+**Results (local):** `node --test .github/actions/affected-plan/__tests__/*.test.mjs`:
+23 files, 418/418 pass, with `type-only-counterexamples.test.mjs` unchanged.
+The new file against main (667ab0c): the three narrowed cases and the plan
+document case fail (`'narrowed' !== 'none'`), the 14 wide cases pass.
+Against #179's code (7e31e38): five fail, the added `import type` and four
+of the new counterexamples (indented IIFE, `}` in a comment, interface and
+const on one line, type and call on one line).
+
+**Pending:** hosted Self Tests, and a consumer branch with an interface-only
+edit planning `none` with the file under `typeOnly`.

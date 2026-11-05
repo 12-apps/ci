@@ -59,6 +59,18 @@ not runtime edges. Inline-only clauses such as `import { type Foo }` can still
 evaluate the target module (including under Node's TypeScript stripping), so
 they retain a module-evaluation edge even though they bind no runtime value.
 
+A file whose every changed export is an `interface` or `type` declaration on
+both sides seeds nothing, and the plan lists it under `typeOnly`: the edit is
+erased before a runtime lane loads the file (FUT-3586). Three proofs must all
+agree (`typeOnlyEdit` in `lib/module-context.mjs`): the changed names are
+declared only by erased units, every other top-level unit (imports included)
+is identical, and Node's type stripper erases both sides to the same
+JavaScript. An `enum`, a `const enum`, a `declare` value, a class, a
+namespace, a value sharing the type's name, any import change, a JSX file and
+a changed test file keep the ordinary reading. A lane that runs vitest's
+`typecheck` mode or other type tests is judged by the compiler, not by this
+selection; do not narrow it with this action.
+
 ## Vite glob inputs
 
 Literal [`import.meta.glob`](https://vite.dev/guide/features#glob-import) calls
