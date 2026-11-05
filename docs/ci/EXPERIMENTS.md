@@ -634,3 +634,15 @@ end to end; 12 of the new cases fail on the round-1 code (0122ee3). The same
 weakness in `scan` (`modules.mjs`) predates this change and is untouched.
 Local: the file has 33 cases, all passing; the directory passes 432/432
 across 23 files.
+
+**Review round 2 (same day):** the round-1 fix cleared a property only at its
+first character and kept appending the rest, so `.min` left `in` as the last
+word, a keyword, and `${w.min / 2}` (also `.bin`, `.sin`, `.knew`, `.xof`,
+`.ado`, `?.min`) was guessed as a regex again: a whitespace edit in a later
+template selected nothing, where main and the round-1 head selected the test.
+Now whether a word is a property is decided once, at its first character
+(the previous significant character is `.`), and holds until the word ends.
+Pinned with `r.min`, `r.knew` and `r?.min`; those 6 cases fail on the round-2
+head (07835ed). Local: the file has 39 cases, all passing; the directory
+passes 438/438 across 23 files.
+

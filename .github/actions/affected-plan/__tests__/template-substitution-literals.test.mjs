@@ -114,6 +114,10 @@ const DIVISIONS = {
   "a property named in": "r.in / 12",
   "a property named do": "r.do / 2",
   "a property named new": "r.new / 2",
+  // Review round 2: a property whose TAIL spells a keyword.
+  "a property named min (ends in in)": "r.min / 2",
+  "a property named knew (ends in new)": "r.knew / 2",
+  "an optional property named min": "r?.min / 2",
 };
 const loop = (div, s) =>
   "export function open(rows) {\n" +

@@ -336,6 +336,7 @@ function substitutionEnd(text, j) {
   let depth = 0;
   let lastSig = "{";
   let lastWord = "";
+  let property = false;
   while (j < text.length) {
     const c = text[j];
     let end = -1;
@@ -367,14 +368,18 @@ function substitutionEnd(text, j) {
       depth -= 1;
     }
     if (!/\s/.test(c)) {
-      lastWord = /[\w$]/.test(c) ? (/[\w$]/.test(text[j - 1] ?? "") ? lastWord + c : c) : "";
+      // A word after `.` is a property, never the keyword it spells, nor one
+      // its tail spells (`${w.of / 2}`, `${w.min / 2}`): decided once, at the
+      // word's first character, and kept until the word ends.
+      const word = /[\w$]/.test(c);
+      const starts = word && !/[\w$]/.test(text[j - 1] ?? "");
+      if (starts) property = prevSignificant(text, j - 1) === ".";
+      lastWord = !word || property ? "" : starts ? c : lastWord + c;
       lastSig = c;
       // A postfix `++` / `--` ends an operand, so a `/` after it divides
-      // (`${n-- / 2}`); and a word after `.` is a property, never the keyword
-      // it spells (`${w.of / 2}`). Read as a regex, either one swallows the
+      // (`${n-- / 2}`). Read as a regex, either shape swallows the
       // substitution's `}` and the template's closing backtick.
       if ((c === "+" || c === "-") && text[j - 1] === c && /[\w$)\]]/.test(prevSignificant(text, j - 2))) lastSig = ")";
-      if (lastWord && prevSignificant(text, j - lastWord.length) === ".") lastWord = "";
     }
     j += 1;
   }
