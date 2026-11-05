@@ -59,6 +59,48 @@ not runtime edges. Inline-only clauses such as `import { type Foo }` can still
 evaluate the target module (including under Node's TypeScript stripping), so
 they retain a module-evaluation edge even though they bind no runtime value.
 
+A file whose every changed export is an `interface` or `type` declaration on
+both sides seeds nothing, and the plan lists it under `typeOnly`: the edit is
+erased before a runtime lane loads the file (FUT-3586). Three proofs must all
+agree (`typeOnlyEdit` in `lib/module-context.mjs`): the changed names are
+declared only by erased units, every other top-level unit (imports included)
+is identical, and Node's type stripper, which blanks types in place, leaves
+both sides byte-identical once the erased lines are removed. An `enum`, a
+`const enum`, a `declare` value, a class, a namespace, a value sharing the
+type's name and any import change keep the ordinary reading, and so do:
+
+- any file but `.ts`, `.mts` and `.cts`: a `.tsx` or `.jsx` file never
+  qualifies, because the stripper does not parse JSX;
+- a file some importer loads through a query (`./x.ts?raw`, `?url`, any
+  `?…`), which reads its text, not its runtime;
+- a file holding a decorator, whose annotations `emitDecoratorMetadata`
+  turns into `design:type` values: any `@` in its raw text refuses, a string
+  or a JSDoc included;
+- a changed test file, which runs as itself.
+
+And for the whole plan: one computed `import()` or `require()` anywhere in
+the graph whose argument holds a `?` or `#` (``import(`./${n}.ts?raw`)``)
+could read any file as text, so no file is type-only; the plan names the
+call under `typeOnlyOff`.
+
+Not covered, by decision (FUT-3586): a computed `import()` or `require()`
+that receives its query INDIRECTLY, through a loader helper
+(`const load = (p) => import(p)`), a constant (``import(`./${n}.ts${RAW}`)``)
+or an escape (`\x3f`), is not seen by the check above. Reading the call's
+text cannot prove a value holds no query, and refusing every computed import
+would switch the rule off in any repo that has one. When the rule was
+accepted, no consumer had such an import (future-pay: 35 computed imports,
+none with a query; every `?raw` read is a literal import or a literal glob).
+A file loaded that way as text is the one way a type-only edit can skip a
+test it changes, and the daily full suite still runs it.
+
+Not covered: under `emitDecoratorMetadata`, a decorated class in ANOTHER file
+that annotates with the edited type also emits it as metadata. A lane whose
+build emits decorator metadata (tsc, or swc with `decoratorMetadata`; esbuild
+and Vite never do) should not rely on this narrowing. A lane that runs
+vitest's `typecheck` mode or other type tests is judged by the compiler, not
+by this selection; do not narrow it with this action.
+
 ## Vite glob inputs
 
 Literal [`import.meta.glob`](https://vite.dev/guide/features#glob-import) calls

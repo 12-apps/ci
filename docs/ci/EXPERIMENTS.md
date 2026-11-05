@@ -578,3 +578,112 @@ commit the measured daily run tested (`85d3af99`). With `--run-id`,
 `refresh` now records that run's `head_sha` (`measuredSha`, tested in
 `refresh-sha.test.mjs`), and null when the run cannot be read. Its CLI runs
 only when executed, so the helper can be imported.
+
+## E-009 — A type-only edit seeds no runtime work, re-landed on three proofs (FUT-3586)
+
+**Date:** 2026-11-05 · **Status:** Built and tested locally; hosted proof pending
+
+**Question:** can an edit confined to `interface` and `type` declarations
+stop selecting runtime tests without reopening the five false negatives
+that reverted 12-apps/ci#179 (#180)? On a future-pay branch one added union
+member in an interface selected 92 integration files: `withinFile` followed
+the name to the exports annotating with it, and `initializationMayObserve`
+widened the file to `*` on a non-inert initializer.
+
+**Method:** `typeOnlyEdit` (`lib/module-context.mjs`) runs in
+`selectAffected` before the module-context and `withinFile` steps, on a
+changed non-test file, and answers yes only when three independent proofs
+agree; otherwise the file takes the old path unchanged.
+
+1. Names: every name `affectedExports` reports is declared by an erased unit
+   (`type`/`interface`) and by no runtime unit, export list or import
+   binding, on both sides; `*` is never type-only.
+2. Units: both sides cut with `topLevelUnits` (#182's literal masking, the
+   template-literal backtick tracking, `erasedEndsCleanly` and `asiSafe`),
+   and every non-erased unit, imports included, is identical in order.
+3. Emit: Node's `stripTypeScriptTypes` erases both sides to the same
+   JavaScript, compared with literals byte for byte and line breaks kept
+   (`canonicalLines`, new beside `canonical`). JSX or a non-erasable form
+   cannot be stripped and is not type-only.
+
+#179's single bracketer was the failure: both it and the runtime proof put
+the same swallowed text in the type span. Here the runtime text is compared
+by a different cut and by a real parser.
+
+**New counterexamples** (`__tests__/type-only.test.mjs`), each a runtime
+edit that must stay selected: an indented IIFE after a semicolon-less union,
+with no `;` of its own; a column-0 `;(() => …)()` after a semicolon-less
+type; a generic default holding a template literal with `${` and a call
+after it, on its line and indented below it; a comment holding `}` inside an
+interface with a call after the real close; a comment holding `{` inside an
+interface over a changed const; an interface and an exported const on one
+line; a `;`-terminated type and a call on one line; a string-literal type
+holding a backtick over a changed const. In four of them `affectedExports`
+blames only the type name.
+
+**Results (local):** `node --test .github/actions/affected-plan/__tests__/*.test.mjs`:
+23 files, 418/418 pass, with `type-only-counterexamples.test.mjs` unchanged.
+The new file against main (667ab0c): the three narrowed cases and the plan
+document case fail (`'narrowed' !== 'none'`), the 14 wide cases pass.
+Against #179's code (7e31e38): five fail, the added `import type` and four
+of the new counterexamples (indented IIFE, `}` in a comment, interface and
+const on one line, type and call on one line).
+
+**Pending:** hosted Self Tests, and a consumer branch with an interface-only
+edit planning `none` with the file under `typeOnly`.
+
+**Addendum (round-2 review, same day):** an independent review of 09c8340
+found four runtime edits the rule reported as `typeOnly` with no test, each
+selected on main. All four are now refused, pinned in
+`__tests__/type-only-review.test.mjs` (each failed on 09c8340, passes now):
+
+- B1, a `?raw` importer: `import text from "./basket.ts?raw"` reads the
+  file's text, so a type edit changes a value. A file any importer reaches
+  through a `?…` specifier is never type-only; a `?raw` glob importer stays
+  selected through its route.
+- B2, proof 3 shared a literal walker: `canonicalLines` reused
+  `walkLiterals`, which misreads a backtick inside a template substitution
+  (`${"`"}`, `${/`/.source}`, `${ /* ` */ 1}`, `${1 // `}`) and then
+  collapsed whitespace inside a later real string. Strip mode keeps every
+  byte at its position (checked: output length equals input length), so
+  proof 3 now requires each erased unit's lines to strip to whitespace and
+  compares the remaining lines byte for byte; `canonicalLines` is gone.
+- B3, a `.tsx` file stripped as TypeScript: a JSX element whose opening tag
+  also parses as a generic arrow got through with its text read as a
+  comment. Only `.ts`, `.mts` and `.cts` files qualify.
+- B4, decorators: under `emitDecoratorMetadata` a changed `type Id` changes
+  the emitted `design:type`. A file with an `@` outside literals and
+  comments is never type-only. A decorated class in another file that
+  annotates with the type is not covered; the README says so.
+
+Local: `node --test .github/actions/affected-plan/__tests__/*.test.mjs`, 24
+files, 423/423; `type-only-counterexamples.test.mjs` and
+`type-only.test.mjs` unchanged and green.
+
+**Round 3 (same day):** two round-2 fixes were incomplete, pinned in
+`type-only-review.test.mjs` (both failed on 3de7a62): R2-1, a computed
+`import()` holding `?raw` is recorded as `<computed import>`, so the query
+check never saw it; now one computed `import()`/`require()` whose argument
+holds `?` or `#` turns type-only off for the whole plan, named under
+`typeOnlyOff`. R2-2, `scan` read `z++ / 2; @Col() …` as a regex and masked
+the decorator away; the `@` check now reads the raw text of both sides, so
+an `@` in a string or a JSDoc refuses too. Local: 24 files, 426/426.
+
+**Round-3 verification and decision (same day):** R2-2 is closed. R2-1 still
+misses a computed import that receives its query indirectly: a loader helper
+(`load(\`./${n}.ts?raw\`)` with `const load = (p) => import(p)`), a
+same-file or imported constant (``import(`./${n}.ts${RAW}`)``) or an escaped
+`?` (`\x3f`, `\u{3f}`, `String.fromCharCode(63)`). Each narrows on e056729
+where main selects the test. The cause is structural: no reading of the
+call's text can prove its argument holds no query. The only total fix,
+refusing whenever any computed import exists, would switch the rule off in
+future-pay, which has 35 computed imports (route registry, script loaders,
+child-process probes, 21 of them in `scripts/__tests__`). None of them carries
+a query, and every one of future-pay's `?raw` reads is a literal import or a
+literal glob, both refused. So the shape has zero instances. The owner
+accepted the limit as documented (README, "Not covered, by decision"), next
+to the cross-file decorator gap; a type-only edit to a file read that way
+skips its test on the PR and is caught by the daily full suite.
+
+**Status:** Built and tested locally; hosted proof pending (Self Tests on the
+PR, then a consumer plan reporting `typeOnly`).
