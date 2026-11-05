@@ -118,6 +118,9 @@ const DIVISIONS = {
   "a property named min (ends in in)": "r.min / 2",
   "a property named knew (ends in new)": "r.knew / 2",
   "an optional property named min": "r?.min / 2",
+  // Review round 3: a non-ASCII letter is part of the word, so `éin` is not `in`.
+  "a property named éin": "r.éin / 2",
+  "an identifier named ðin": "ðin / 2",
 };
 const loop = (div, s) =>
   "export function open(rows) {\n" +

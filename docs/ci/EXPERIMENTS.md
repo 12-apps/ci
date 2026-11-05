@@ -646,3 +646,10 @@ Pinned with `r.min`, `r.knew` and `r?.min`; those 6 cases fail on the round-2
 head (07835ed). Local: the file has 39 cases, all passing; the directory
 passes 438/438 across 23 files.
 
+**Review round 3 (same day):** verification found no regression from the
+round-2 fix. It found one edge left from round 1: the word test was ASCII
+(`[\w$]`), so in `${w.éin / 2}` the `in` after `é` started a new word and read
+as a keyword. That is a miss where main selects. The word test is now
+`\p{ID_Continue}` plus `$`, ZWNJ and ZWJ. Pinned with `r.éin` and `ðin`; those
+4 cases fail on the round-2 fix (b94914c). Local: 43 cases in the file.
+

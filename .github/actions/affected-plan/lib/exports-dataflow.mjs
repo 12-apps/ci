@@ -332,6 +332,9 @@ function templateEnd(text, i) {
 }
 
 /** The index just past the `}` closing the substitution whose code starts at `j`. */
+/** An identifier character, Unicode included (`${w.éin / 2}` is one word, not `é` + `in`). */
+const WORD = /[\p{ID_Continue}$\u200c\u200d]/u;
+
 function substitutionEnd(text, j) {
   let depth = 0;
   let lastSig = "{";
@@ -371,8 +374,8 @@ function substitutionEnd(text, j) {
       // A word after `.` is a property, never the keyword it spells, nor one
       // its tail spells (`${w.of / 2}`, `${w.min / 2}`): decided once, at the
       // word's first character, and kept until the word ends.
-      const word = /[\w$]/.test(c);
-      const starts = word && !/[\w$]/.test(text[j - 1] ?? "");
+      const word = WORD.test(c);
+      const starts = word && !WORD.test(text[j - 1] ?? "");
       if (starts) property = prevSignificant(text, j - 1) === ".";
       lastWord = !word || property ? "" : starts ? c : lastWord + c;
       lastSig = c;
