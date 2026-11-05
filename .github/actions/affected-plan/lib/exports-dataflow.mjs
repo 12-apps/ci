@@ -268,8 +268,10 @@ export function spread(decls, tainted) {
 /**
  * Walk `text`, calling `visit(kind, start, end)` for each literal (`"str"`,
  * `'str'`, a template, a regex) and each run of code between them. Template
- * substitutions are kept inside the literal: a misplaced boundary only ever
- * makes more text compare verbatim, which reads as "changed".
+ * substitutions are kept inside the literal, so their text compares verbatim,
+ * which can only read as "changed". The template's END is found by lexing each
+ * `${…}` as code (see templateEnd): a backtick, quote or `/` inside one does
+ * not close the template, and the text after the substitution stays literal.
  */
 function walkLiterals(text, visit) {
   let i = 0;
@@ -282,7 +284,9 @@ function walkLiterals(text, visit) {
   while (i < text.length) {
     const c = text[i];
     let end = -1;
-    if (c === '"' || c === "'" || c === "`") {
+    if (c === "`") {
+      end = templateEnd(text, i);
+    } else if (c === '"' || c === "'") {
       end = i + 1;
       while (end < text.length && text[end] !== c) end += text[end] === "\\" ? 2 : 1;
       end = Math.min(end + 1, text.length);
@@ -305,6 +309,70 @@ function walkLiterals(text, visit) {
     i += 1;
   }
   flush(text.length);
+}
+
+/**
+ * The end (exclusive) of the template literal whose backtick is at `i`, or
+ * `text.length` when it never closes. Each `${…}` is lexed as code up to its
+ * matching `}`, counting braces: strings, line and block comments, regex
+ * literals (regexLiteralEnd's operand rule, as the walker uses) and nested
+ * templates (recursively) are skipped whole, so nothing inside them can close
+ * the substitution or the template early.
+ */
+function templateEnd(text, i) {
+  let j = i + 1;
+  while (j < text.length) {
+    const c = text[j];
+    if (c === "\\") j += 2;
+    else if (c === "`") return j + 1;
+    else if (c === "$" && text[j + 1] === "{") j = substitutionEnd(text, j + 2);
+    else j += 1;
+  }
+  return text.length;
+}
+
+/** The index just past the `}` closing the substitution whose code starts at `j`. */
+function substitutionEnd(text, j) {
+  let depth = 0;
+  let lastSig = "{";
+  let lastWord = "";
+  while (j < text.length) {
+    const c = text[j];
+    let end = -1;
+    if (c === "`") end = templateEnd(text, j);
+    else if (c === '"' || c === "'") {
+      end = j + 1;
+      while (end < text.length && text[end] !== c) end += text[end] === "\\" ? 2 : 1;
+      end = Math.min(end + 1, text.length);
+    } else if (c === "/" && text[j + 1] === "/") {
+      end = text.indexOf("\n", j);
+      if (end === -1) return text.length;
+      j = end;
+      continue;
+    } else if (c === "/" && text[j + 1] === "*") {
+      end = text.indexOf("*/", j + 2);
+      if (end === -1) return text.length;
+      j = end + 2;
+      continue;
+    } else if (c === "/") end = regexLiteralEnd(text, j, lastSig, lastWord);
+    if (end > j) {
+      j = end;
+      lastSig = ")";
+      lastWord = "";
+      continue;
+    }
+    if (c === "{") depth += 1;
+    else if (c === "}") {
+      if (depth === 0) return j + 1;
+      depth -= 1;
+    }
+    if (!/\s/.test(c)) {
+      lastWord = /[\w$]/.test(c) ? (/[\w$]/.test(text[j - 1] ?? "") ? lastWord + c : c) : "";
+      lastSig = c;
+    }
+    j += 1;
+  }
+  return text.length;
 }
 
 /**
