@@ -659,3 +659,12 @@ selected on main. All four are now refused, pinned in
 Local: `node --test .github/actions/affected-plan/__tests__/*.test.mjs`, 24
 files, 423/423; `type-only-counterexamples.test.mjs` and
 `type-only.test.mjs` unchanged and green.
+
+**Round 3 (same day):** two round-2 fixes were incomplete, pinned in
+`type-only-review.test.mjs` (both failed on 3de7a62): R2-1, a computed
+`import()` holding `?raw` is recorded as `<computed import>`, so the query
+check never saw it; now one computed `import()`/`require()` whose argument
+holds `?` or `#` turns type-only off for the whole plan, named under
+`typeOnlyOff`. R2-2, `scan` read `z++ / 2; @Col() …` as a regex and masked
+the decorator away; the `@` check now reads the raw text of both sides, so
+an `@` in a string or a JSDoc refuses too. Local: 24 files, 426/426.

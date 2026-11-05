@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { changedKeys, keyedUse, passesKeysThrough } from "./catalogs.mjs";
 import { boundOf, changedDeclarations, declarationsOf, reachableExports, spread, withinFile } from "./exports-dataflow.mjs";
 import { inertClass, inertDeclaration, isBuiltin, loadsCleanly, moduleExports, narrowModuleContext, typeOnlyEdit } from "./module-context.mjs";
-import { buildGraph, EXTENSIONS, listSourceFiles, loadPackages } from "./modules.mjs";
+import { buildGraph, EXTENSIONS, listSourceFiles, loadPackages, scan } from "./modules.mjs";
 import { affectedExports, exportedSymbols, importsChanged } from "./symbols.mjs";
 
 /** Everything selected, with the reason chain for each test. */
@@ -105,6 +105,38 @@ export function namesPage(testSource, names) {
     const segment = new RegExp(`/${escaped}(?=[/?#\\s]|$)`);
     return literals.some((text) => segment.test(text));
   });
+}
+
+/**
+ * The first computed `import()`/`require()` whose argument holds a `?` or a
+ * `#`, as `file:line — reason`, or null. The argument runs from the call's
+ * `(` to its closing `)`, bracketed on the masked text (a paren inside a
+ * string does not count) and read in the RAW text, so a query inside a
+ * literal is seen. A call that never closes, or whose line already shows a
+ * `?`/`#`, counts too. Every call in a file holding a computed one is
+ * checked, literal ones included: that only refuses more.
+ */
+export function computedQueryImport(unresolved, sourceOf) {
+  const files = [...new Set(unresolved.filter((u) => /^<computed /.test(u.spec ?? "")).map((u) => u.file))];
+  for (const file of files) {
+    const source = sourceOf(file);
+    const reason = (line) => `${file}:${line} — a computed import or require holds a query, so any file may be read as text`;
+    if (source == null) return reason(0);
+    const lines = source.split("\n");
+    for (const u of unresolved) if (u.file === file && /^<computed /.test(u.spec) && /[?#]/.test(lines[u.line - 1] ?? "")) return reason(u.line);
+    const { masked } = scan(source);
+    for (const m of masked.matchAll(/(?<![\w$.])(?:import|require)\s*\(/g)) {
+      let depth = 1;
+      let i = m.index + m[0].length;
+      for (; i < masked.length && depth > 0; i += 1) {
+        if (masked[i] === "(") depth += 1;
+        else if (masked[i] === ")") depth -= 1;
+      }
+      const line = source.slice(0, m.index).split("\n").length;
+      if (depth > 0 || /[?#]/.test(source.slice(m.index, i))) return reason(line);
+    }
+  }
+  return null;
 }
 
 /** Can a changed binding alter eager module evaluation, not just an export? */
@@ -320,6 +352,10 @@ export function selectAffected(options) {
   // Files an importer reaches through a query suffix (`./x.ts?raw`).
   const queried = new Set();
   for (const list of edges.values()) for (const e of list) if (e.target && /[?#]/.test(e.spec ?? "")) queried.add(e.target);
+  // A computed `import()`/`require()` names no target, so a query in it
+  // (``import(`./${n}.ts?raw`)``) could read ANY file as text: one such call
+  // anywhere in the graph turns type-only narrowing off for the whole plan.
+  const typeOnlyOff = computedQueryImport(unresolved, headSourceOf);
   for (const file of direct) {
     if (deleted.includes(file)) {
       affected.set(file, "*");
@@ -359,7 +395,7 @@ export function selectAffected(options) {
     // (`?raw`, `?url`, any `?…`) is read as TEXT or an asset, where a type
     // edit is a change.
     const changedNames = affectedExports(base, head);
-    if (!isTest(file) && /\.[mc]?ts$/.test(file) && !queried.has(file) && typeOnlyEdit(base, head, changedNames)) {
+    if (!typeOnlyOff && !isTest(file) && /\.[mc]?ts$/.test(file) && !queried.has(file) && typeOnlyEdit(base, head, changedNames)) {
       typeOnly.push(file);
       symbolReport[file] = [];
       continue;
@@ -410,6 +446,7 @@ export function selectAffected(options) {
     return {
       ...(unobservable.length ? { unobservable } : {}),
       ...(typeOnly.length ? { typeOnly } : {}),
+      ...(typeOnlyOff ? { typeOnlyOff } : {}),
       mode: "none",
       tests: [],
       reasons: {},
@@ -618,6 +655,8 @@ export function selectAffected(options) {
   return {
     ...(unobservable.length ? { unobservable } : {}),
     ...(typeOnly.length ? { typeOnly } : {}),
+    // Why no file was read as type-only, when a computed query import forbade it.
+    ...(typeOnlyOff ? { typeOnlyOff } : {}),
     mode: tests.length > 0 ? "narrowed" : "none",
     tests,
     reasons,

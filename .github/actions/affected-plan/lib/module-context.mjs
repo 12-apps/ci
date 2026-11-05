@@ -532,8 +532,8 @@ function erasedToJavaScript(source) {
  *      caller keeps JSX files, decorators and `?query` importers out (see
  *      select.mjs), since the strip cannot see what those read.
  *   4. No decorator: under `emitDecoratorMetadata` a type annotation becomes
- *      `design:type` metadata, so an `@` outside literals and comments on
- *      either side answers false.
+ *      `design:type` metadata, so any `@` in either side's raw text, even in
+ *      a string or a comment, answers false.
  *
  * @param {string | null} base
  * @param {string | null} head
@@ -560,7 +560,10 @@ export function typeOnlyEdit(base, head, names) {
   const kept = (units) => units.filter((u) => u.kind !== "erased").map((u) => canonical(u.code));
   if (JSON.stringify(kept(sides[0])) !== JSON.stringify(kept(sides[1]))) return false;
 
-  if (sides.some((units) => units.some((u) => u.masked.includes("@")))) return false;
+  // The RAW text, not the masked one: a misread regex once masked a real
+  // decorator away (round-3 review, `z++ / 2; @Col() …`). An `@` in a string
+  // or a JSDoc refuses too; that only loses a narrowing.
+  if (base.includes("@") || head.includes("@")) return false;
 
   const runtimeText = (source, units) => {
     const js = erasedToJavaScript(source);

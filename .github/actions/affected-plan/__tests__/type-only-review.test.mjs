@@ -65,9 +65,36 @@ test("B4: a decorated file is never type-only (emitDecoratorMetadata reads the a
   wide(select(file("number"), file("string")), "design:type follows the alias");
 });
 
-test("an `@` inside a string or comment is not a decorator", () => {
+test("any `@` refuses, even in a string or a comment: only the raw text is trusted", () => {
   const file = (m) => `// see @types/node\nexport interface S {\n  kind: ${m};\n}\nexport const MAIL = "a@b.test";\nexport function open(s?: S) {\n  return s ?? MAIL;\n}\n`;
-  const result = select(file('"a"'), file('"a" | "b"'));
-  assert.deepEqual(result.tests, []);
+  wide(select(file('"a"'), file('"a" | "b"')), "an `@` the masking would call a literal");
+});
+
+// Round 3: the two round-2 fixes the review found incomplete.
+
+test("R2-1: a computed dynamic import holding a query turns type-only off for the plan", () => {
+  const consumers = [
+    "export const use = (n: string) => import(`./${n}.ts?raw`);\n",
+    'export const use = (n: string) => import("./" + n + ".ts?raw");\n',
+    "export const use = () => import(`./basket.ts?raw`);\n",
+    "export const use = (n: string) => import(\n  `./${n}.ts` +\n    \"?raw\"\n);\n",
+  ];
+  for (const consumer of consumers) {
+    const result = select(S('"a"'), S('"a" | "b"'), { consumer });
+    wide(result, consumer);
+    assert.match(result.typeOnlyOff ?? "", /^src\/consumer\.ts:1 — a computed import/, consumer);
+  }
+});
+
+test("R2-1: a computed import with no query leaves type-only narrowing on", () => {
+  const consumer = 'import { open } from "./basket";\nexport const use = (n: string) => open() || import(`./${n}.ts`);\n';
+  const file = (m) => `export interface S {\n  kind: ${m};\n}\nexport function open(s?: S) {\n  return s;\n}\n`;
+  const result = select(file('"a"'), file('"a" | "b"'), { consumer });
+  assert.equal(result.typeOnlyOff, undefined);
   assert.deepEqual(result.typeOnly, ["src/basket.ts"]);
+});
+
+test("R2-2: a decorator the masking reads as a regex after `z++ /` still refuses", () => {
+  const cls = (t) => `export type Id = ${t};\nfunction Col(): PropertyDecorator { return () => {}; }\nlet z = 1\nexport class Row {\n  w = z++ / 2; @Col() id!: Id; v = z / 1\n}\nexport function open() {\n  return Row;\n}\n`;
+  wide(select(cls("number"), cls("string")), "decorator hidden by a misread regex");
 });

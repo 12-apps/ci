@@ -73,9 +73,15 @@ type's name and any import change keep the ordinary reading, and so do:
   qualifies, because the stripper does not parse JSX;
 - a file some importer loads through a query (`./x.ts?raw`, `?url`, any
   `?…`), which reads its text, not its runtime;
-- a file holding a decorator (an `@` outside literals and comments), whose
-  annotations `emitDecoratorMetadata` turns into `design:type` values;
+- a file holding a decorator, whose annotations `emitDecoratorMetadata`
+  turns into `design:type` values: any `@` in its raw text refuses, a string
+  or a JSDoc included;
 - a changed test file, which runs as itself.
+
+And for the whole plan: one computed `import()` or `require()` anywhere in
+the graph whose argument holds a `?` or `#` (``import(`./${n}.ts?raw`)``)
+could read any file as text, so no file is type-only; the plan names the
+call under `typeOnlyOff`.
 
 Not covered: under `emitDecoratorMetadata`, a decorated class in ANOTHER file
 that annotates with the edited type also emits it as metadata. A lane whose
