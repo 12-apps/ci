@@ -668,3 +668,22 @@ holds `?` or `#` turns type-only off for the whole plan, named under
 `typeOnlyOff`. R2-2, `scan` read `z++ / 2; @Col() …` as a regex and masked
 the decorator away; the `@` check now reads the raw text of both sides, so
 an `@` in a string or a JSDoc refuses too. Local: 24 files, 426/426.
+
+**Round-3 verification and decision (same day):** R2-2 is closed. R2-1 still
+misses a computed import that receives its query indirectly: a loader helper
+(`load(\`./${n}.ts?raw\`)` with `const load = (p) => import(p)`), a
+same-file or imported constant (``import(`./${n}.ts${RAW}`)``) or an escaped
+`?` (`\x3f`, `\u{3f}`, `String.fromCharCode(63)`). Each narrows on e056729
+where main selects the test. The cause is structural: no reading of the
+call's text can prove its argument holds no query. The only total fix,
+refusing whenever any computed import exists, would switch the rule off in
+future-pay, which has 35 computed imports (route registry, script loaders,
+child-process probes, 21 of them in `scripts/__tests__`). None of them carries
+a query, and every one of future-pay's `?raw` reads is a literal import or a
+literal glob, both refused. So the shape has zero instances. The owner
+accepted the limit as documented (README, "Not covered, by decision"), next
+to the cross-file decorator gap; a type-only edit to a file read that way
+skips its test on the PR and is caught by the daily full suite.
+
+**Status:** Built and tested locally; hosted proof pending (Self Tests on the
+PR, then a consumer plan reporting `typeOnly`).

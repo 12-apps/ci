@@ -83,6 +83,17 @@ the graph whose argument holds a `?` or `#` (``import(`./${n}.ts?raw`)``)
 could read any file as text, so no file is type-only; the plan names the
 call under `typeOnlyOff`.
 
+Not covered, by decision (FUT-3586): a computed `import()` or `require()`
+that receives its query INDIRECTLY, through a loader helper
+(`const load = (p) => import(p)`), a constant (``import(`./${n}.ts${RAW}`)``)
+or an escape (`\x3f`), is not seen by the check above. Reading the call's
+text cannot prove a value holds no query, and refusing every computed import
+would switch the rule off in any repo that has one. When the rule was
+accepted, no consumer had such an import (future-pay: 35 computed imports,
+none with a query; every `?raw` read is a literal import or a literal glob).
+A file loaded that way as text is the one way a type-only edit can skip a
+test it changes, and the daily full suite still runs it.
+
 Not covered: under `emitDecoratorMetadata`, a decorated class in ANOTHER file
 that annotates with the edited type also emits it as metadata. A lane whose
 build emits decorator metadata (tsc, or swc with `decoratorMetadata`; esbuild
