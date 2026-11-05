@@ -50,7 +50,7 @@
  */
 import { builtinModules, stripTypeScriptTypes } from "node:module";
 
-import { canonical } from "./exports-dataflow.mjs";
+import { canonical, canonicalLines } from "./exports-dataflow.mjs";
 import { parseImports, scan } from "./modules.mjs";
 
 const IDENT = /[A-Za-z_$][\w$]*/g;
@@ -484,6 +484,76 @@ export function pureModule(file, { resolve, read, exportsOf }, seen = new Map())
   }
   seen.set(file, pure);
   return pure;
+}
+
+/** `source` with its TypeScript erased, or null when Node cannot erase it. */
+function erasedToJavaScript(source) {
+  if (typeof stripTypeScriptTypes !== "function") return null;
+  const warn = process.emitWarning;
+  process.emitWarning = () => {};
+  try {
+    return stripTypeScriptTypes(source);
+  } catch {
+    return null;
+  } finally {
+    process.emitWarning = warn;
+  }
+}
+
+/**
+ * Is the edit from `base` to `head` erased before any runtime loads the file
+ * (FUT-3586)? `names` is `affectedExports`' answer for the pair.
+ *
+ * 12-apps/ci#179 answered this from one bracketer and was reverted: five
+ * runtime edits sat inside what it took for a type span
+ * (type-only-counterexamples.test.mjs). This answer needs three independent
+ * proofs, and any doubt answers false, which keeps the wide reading:
+ *
+ *   1. NAMES. Every changed name is, on both sides, declared by an ERASED unit
+ *      (`type`/`interface`, never `declare const`, `enum`, `class` or
+ *      `namespace`) and by no runtime unit or import binding. `"*"` (a
+ *      module-context edit) is never type-only.
+ *   2. UNITS. Both sides cut into top-level units on the literal-masked text
+ *      (`topLevelUnits`, which already refuses an erased unit that runs past
+ *      its first depth-0 terminator or breaks a line where ASI would end it),
+ *      and every unit that is not erased, imports included, is identical, in
+ *      order. A runtime statement a type span swallowed is either its own
+ *      column-0 unit, and compares here, or on the type's own line, where the
+ *      end checks reject it.
+ *   3. EMIT. Node's own type stripper (`stripTypeScriptTypes`, a real parser)
+ *      erases both sides to the same JavaScript, literals byte for byte and
+ *      line breaks kept. A file it cannot strip (JSX, a non-erasable form)
+ *      is not type-only.
+ *
+ * @param {string | null} base
+ * @param {string | null} head
+ * @param {Set<string>} names
+ */
+export function typeOnlyEdit(base, head, names) {
+  if (base == null || head == null || names.size === 0 || names.has("*")) return false;
+  const sides = [base, head].map(topLevelUnits);
+  if (sides.includes(null)) return false;
+
+  for (const units of sides) {
+    const erased = new Set(units.filter((u) => u.kind === "erased").flatMap((u) => u.names));
+    const runtime = new Set(units.flatMap(runtimeNames));
+    // An opaque unit binds whatever its first declared name is (`class`,
+    // `enum`, `namespace`, `declare const`): a same-named type is not erased alone.
+    for (const u of units) {
+      const m = /^(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:const\s+enum|const|let|var|class|enum|namespace|module|function\s*\*?)\s*([A-Za-z_$][\w$]*)/.exec(u.masked.trimStart());
+      if (u.kind !== "erased" && m) runtime.add(m[1]);
+      if (u.kind === "exports") for (const [orig, alias, type] of u.list) if (!type) runtime.add(orig).add(alias);
+    }
+    for (const name of names) if (!erased.has(name) || runtime.has(name)) return false;
+  }
+
+  const kept = (units) => units.filter((u) => u.kind !== "erased").map((u) => canonical(u.code));
+  if (JSON.stringify(kept(sides[0])) !== JSON.stringify(kept(sides[1]))) return false;
+
+  const emitted = [base, head].map(erasedToJavaScript);
+  if (emitted.includes(null)) return false;
+  const [was, now] = emitted.map((js) => canonicalLines(scan(js).code));
+  return was === now;
 }
 
 /**

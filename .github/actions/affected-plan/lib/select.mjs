@@ -12,7 +12,7 @@ import { join } from "node:path";
 
 import { changedKeys, keyedUse, passesKeysThrough } from "./catalogs.mjs";
 import { boundOf, changedDeclarations, declarationsOf, reachableExports, spread, withinFile } from "./exports-dataflow.mjs";
-import { inertClass, inertDeclaration, isBuiltin, loadsCleanly, moduleExports, narrowModuleContext } from "./module-context.mjs";
+import { inertClass, inertDeclaration, isBuiltin, loadsCleanly, moduleExports, narrowModuleContext, typeOnlyEdit } from "./module-context.mjs";
 import { buildGraph, EXTENSIONS, listSourceFiles, loadPackages } from "./modules.mjs";
 import { affectedExports, exportedSymbols, importsChanged } from "./symbols.mjs";
 
@@ -315,6 +315,8 @@ export function selectAffected(options) {
   const catalogKeys = new Map();
   const symbolReport = {};
   const routeReport = {};
+  // Changed files whose every edit is erased TypeScript: reported, never seeded.
+  const typeOnly = [];
   for (const file of direct) {
     if (deleted.includes(file)) {
       affected.set(file, "*");
@@ -343,7 +345,19 @@ export function selectAffected(options) {
     // `*` from a module-context edit — a new import, a private helper — is
     // re-proven over the whole file: when nothing new runs at load, only the
     // exports that can reach the edit are affected (module-context.mjs).
-    const names = narrowedContext(file, base, head) ?? affectedExports(base, head);
+    // An edit confined to `interface`/`type` declarations is erased before any
+    // runtime lane loads the file. Following its names to the exports that
+    // annotate with them, then widening on their initializers, selected 92
+    // integration files for one union member (FUT-3586). `typeOnlyEdit` proves
+    // the erasure three ways (module-context.mjs); any doubt keeps the walk.
+    // A changed test still runs as itself.
+    const changedNames = affectedExports(base, head);
+    if (!isTest(file) && typeOnlyEdit(base, head, changedNames)) {
+      typeOnly.push(file);
+      symbolReport[file] = [];
+      continue;
+    }
+    const names = narrowedContext(file, base, head) ?? changedNames;
     // An export's hash covers its own body, so the exports that merely CALL a
     // changed one are found by following the file's own references. A lane
     // that brackets calls (Gherkin steps) also reads a module-level edit
@@ -388,12 +402,13 @@ export function selectAffected(options) {
   if (affected.size === 0 && catalogKeys.size === 0) {
     return {
       ...(unobservable.length ? { unobservable } : {}),
+      ...(typeOnly.length ? { typeOnly } : {}),
       mode: "none",
       tests: [],
       reasons: {},
       symbols: symbolReport,
       stats: { changed: relevant.length, affectedFiles: 0 },
-      why: "no exported symbol changed — every edit was a comment or left the same-file exports and module context unchanged",
+      why: "no exported symbol changed — every edit was a comment, an erased type, or left the same-file exports and module context unchanged",
     };
   }
 
@@ -595,6 +610,7 @@ export function selectAffected(options) {
 
   return {
     ...(unobservable.length ? { unobservable } : {}),
+    ...(typeOnly.length ? { typeOnly } : {}),
     mode: tests.length > 0 ? "narrowed" : "none",
     tests,
     reasons,
