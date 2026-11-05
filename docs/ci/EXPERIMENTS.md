@@ -578,3 +578,41 @@ commit the measured daily run tested (`85d3af99`). With `--run-id`,
 `refresh` now records that run's `head_sha` (`measuredSha`, tested in
 `refresh-sha.test.mjs`), and null when the run cannot be read. Its CLI runs
 only when executed, so the helper can be imported.
+
+## E-009 — A template literal ends where its substitutions say it ends (FUT-4433)
+
+**Date:** 2026-11-05 · **Status:** Built and tested locally; hosted proof pending
+
+**Question:** why did a whitespace edit inside a string literal of
+`src/basket.ts` select none of its consumers' tests?
+
+**Evidence:** on main (667ab0c), with `src/consumer.ts` importing
+`src/basket.ts` and `src/consumer.test.ts` importing the consumer, base
+``export const MD = `${"`"}x` + " ";`` and head with `"  "` in place of
+`" "` gave `selectAffected` `names=[]`, `tests=[]`. `walkLiterals` (in
+`lib/exports-dataflow.mjs`, behind `canonical`, `changedDeclarations` and
+`affectedExports`) closed a template at the first backtick it met, so a
+backtick inside a substitution's string, regex, comment or nested template
+ended it early. Everything after it was read with the wrong parity: the later
+literal's text was collapsed as code, and the edit compared as no change.
+The regex form (`` `${/`/.source} a b ` ``) and an edit inside a nested
+template failed end to end the same way. The comment forms are wrong in
+`canonical` only: every caller passes it `stripComments` output, and `scan`
+already lexes substitutions.
+
+**Change:** the walker finds a template's end with `templateEnd`, which lexes
+each `${…}` as code up to its matching `}` by brace depth: strings, line and
+block comments, regex literals (`regexLiteralEnd`'s operand rule, as the
+walker already uses) and nested templates, recursively. A substitution still
+stays inside the literal, so its text compares verbatim, as before. The other
+two callers (`canonical`, `firstArgument`) only change in where a template
+ends; none relied on the early close.
+
+**Local results:** `template-substitution-literals.test.mjs`, 20 cases: each
+of the five shapes, on `canonical` and end to end; whitespace between tokens
+around them still reads as unchanged, now in every case. On 667ab0c 14 fail:
+all five `canonical` cases, end to end for the string, regex and nested
+shapes, four of the whitespace negatives (main had over-reported them as
+changed), and an unterminated template. With the fix all 20 pass, and
+`node --test .github/actions/affected-plan/__tests__/*.test.mjs` passes
+419/419 across 23 files (399/399 across 22 on main).
