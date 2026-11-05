@@ -164,6 +164,64 @@ the whole suite under another name, and is refused the same way.
 Fix the cause the message names (a config, a lane, a diff base); the whole
 suite belongs to the default branch's scheduled run.
 
+## Known risks
+
+Each risk below is a way the selector can leave out a test that a change
+needs. The backstop for all of them is the consumer's daily full suite, which
+runs everything whatever the selection said. A miss reaches the default
+branch and turns red the next morning, before a release.
+
+1. **Type-only edits and an indirect computed query.**
+   - Risk: a test reads a file's TEXT through a computed `import()` whose
+     query arrives from outside the call: a helper, a constant, an escape. A
+     type-only edit to that file skips the test.
+   - Exposure today: future-pay has 35 computed imports and none carries a
+     query. The owner accepted this risk (FUT-3586).
+   - Mitigation: a literal `?…` import or glob refuses type-only, and so does
+     a computed call whose text holds `?` or `#`.
+   - Watch for: a new computed `import(`/`require(` near a `?raw` read.
+2. **A test that reads a source with `fs`.**
+   - Risk: `readFileSync` is not an import edge, so the file's edits never
+     reach that test, type-only or not. The type-only rule also removes the
+     accidental widening a type edit used to cause.
+   - Exposure today: present before FUT-3586.
+   - Mitigation: read sources through `?raw` imports or globs, which the
+     graph sees.
+   - Watch for: a `readFileSync` of a `.ts` file inside a test.
+3. **Decorator metadata in another file.**
+   - Risk: under `emitDecoratorMetadata`, a decorated class elsewhere that
+     annotates with the edited type emits that type at runtime.
+   - Exposure today: no consumer sets it, and vitest, Vite and esbuild never
+     emit metadata.
+   - Mitigation: any `@` in the edited file refuses type-only.
+   - Watch for: a tsconfig gaining `emitDecoratorMetadata`, or a tsc- or
+     swc-built test lane.
+4. **Type-level tests.**
+   - Risk: a vitest `typecheck` lane, `expectTypeOf` or `assertType` depends
+     on types.
+   - Exposure today: none configured in the known consumers.
+   - Mitigation: Type Check runs on every PR.
+   - Watch for: never narrow a lane that runs type tests.
+5. **Lexer guesses.**
+   - Risk: `scan` and `walkLiterals` use heuristics to decide regex against
+     division and where literals end. A wrong guess can read a real change as
+     no change.
+   - Exposure today: FUT-4433 fixed `walkLiterals` inside `${…}` (postfix
+     `++`/`--`, keyword-shaped and Unicode property names). `scan` keeps a
+     known `++ /` weakness.
+   - Mitigation: for type-only, Node's real parser (proof 3) must also agree.
+   - Watch for: a selection that misses a literal edit. Add the shape to
+     `template-substitution-literals.test.mjs`.
+6. **A runner Node without `stripTypeScriptTypes`.**
+   - Exposure today: Node 22.13 and later have it.
+   - Mitigation: without it, the rule answers no and the plan stays wide.
+   - Watch for: nothing; the failure mode is safe.
+
+Two refusals cost speed but never a test:
+- any `@` in a file, including a JSDoc tag or an e-mail in a string;
+- `?.` or `??` on a computed import's line, which turns type-only off for
+  the whole plan.
+
 ## Usage
 
 ```yaml
