@@ -251,7 +251,8 @@ function erasedEndsCleanly(masked) {
  * The file's top-level units, or null when it cannot be cut safely.
  *
  * @returns {{kind: "import"|"erased"|"inert"|"exports"|"opaque", code: string, masked: string,
- *   names: string[], exported: boolean, refs: Set<string>, records?: object[], list?: string[][]}[] | null}
+ *   names: string[], exported: boolean, refs: Set<string>, from: number, to: number,
+ *   records?: object[], list?: string[][]}[] | null}  `from`/`to`: the unit's first and last line
  */
 export function topLevelUnits(source) {
   const { code, masked } = scan(source);
@@ -279,7 +280,7 @@ export function topLevelUnits(source) {
     const previous = units[units.length - 1];
     if (previous && CONTINUES.test(previous.masked)) return null;
     const refs = new Set(unitMasked.match(IDENT) ?? []);
-    const unit = { code: unitCode, masked: unitMasked, names: [], exported: /^export\b/.test(head), refs };
+    const unit = { code: unitCode, masked: unitMasked, names: [], exported: /^export\b/.test(head), refs, from, to };
 
     if (/^(?:import|export)\b/.test(head) && !/^import\s*[(.]/.test(head) && /\bfrom\s*["']|^import\s*["']/.test(head)) {
       // Import and re-export statements, and nothing else.
@@ -484,6 +485,98 @@ export function pureModule(file, { resolve, read, exportsOf }, seen = new Map())
   }
   seen.set(file, pure);
   return pure;
+}
+
+/** `source` with its TypeScript erased, or null when Node cannot erase it. */
+function erasedToJavaScript(source) {
+  if (typeof stripTypeScriptTypes !== "function") return null;
+  const warn = process.emitWarning;
+  process.emitWarning = () => {};
+  try {
+    return stripTypeScriptTypes(source);
+  } catch {
+    return null;
+  } finally {
+    process.emitWarning = warn;
+  }
+}
+
+/**
+ * Is the edit from `base` to `head` erased before any runtime loads the file
+ * (FUT-3586)? `names` is `affectedExports`' answer for the pair.
+ *
+ * 12-apps/ci#179 answered this from one bracketer and was reverted: five
+ * runtime edits sat inside what it took for a type span
+ * (type-only-counterexamples.test.mjs). This answer needs three independent
+ * proofs, and any doubt answers false, which keeps the wide reading:
+ *
+ *   1. NAMES. Every changed name is, on both sides, declared by an ERASED unit
+ *      (`type`/`interface`, never `declare const`, `enum`, `class` or
+ *      `namespace`) and by no runtime unit or import binding. `"*"` (a
+ *      module-context edit) is never type-only.
+ *   2. UNITS. Both sides cut into top-level units on the literal-masked text
+ *      (`topLevelUnits`, which already refuses an erased unit that runs past
+ *      its first depth-0 terminator or breaks a line where ASI would end it),
+ *      and every unit that is not erased, imports included, is identical, in
+ *      order. A runtime statement a type span swallowed is either its own
+ *      column-0 unit, and compares here, or on the type's own line, where the
+ *      end checks reject it.
+ *   3. EMIT. Node's own type stripper (`stripTypeScriptTypes`, a real parser)
+ *      blanks types in place, keeping every other byte at its position. On
+ *      each side, every line of an erased unit must strip to whitespace
+ *      only; with those lines removed, the two outputs must be equal byte
+ *      for byte, comments and whitespace included. No literal walker is
+ *      involved, so a misread backtick cannot hide an edit (round-2 review:
+ *      `${"`"}` once made whitespace inside a later string compare equal). A
+ *      file it cannot strip (a non-erasable form) is not type-only. The
+ *      caller keeps JSX files, decorators and `?query` importers out (see
+ *      select.mjs), since the strip cannot see what those read.
+ *   4. No decorator: under `emitDecoratorMetadata` a type annotation becomes
+ *      `design:type` metadata, so any `@` in either side's raw text, even in
+ *      a string or a comment, answers false.
+ *
+ * @param {string | null} base
+ * @param {string | null} head
+ * @param {Set<string>} names
+ */
+export function typeOnlyEdit(base, head, names) {
+  if (base == null || head == null || names.size === 0 || names.has("*")) return false;
+  const sides = [base, head].map(topLevelUnits);
+  if (sides.includes(null)) return false;
+
+  for (const units of sides) {
+    const erased = new Set(units.filter((u) => u.kind === "erased").flatMap((u) => u.names));
+    const runtime = new Set(units.flatMap(runtimeNames));
+    // An opaque unit binds whatever its first declared name is (`class`,
+    // `enum`, `namespace`, `declare const`): a same-named type is not erased alone.
+    for (const u of units) {
+      const m = /^(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:const\s+enum|const|let|var|class|enum|namespace|module|function\s*\*?)\s*([A-Za-z_$][\w$]*)/.exec(u.masked.trimStart());
+      if (u.kind !== "erased" && m) runtime.add(m[1]);
+      if (u.kind === "exports") for (const [orig, alias, type] of u.list) if (!type) runtime.add(orig).add(alias);
+    }
+    for (const name of names) if (!erased.has(name) || runtime.has(name)) return false;
+  }
+
+  const kept = (units) => units.filter((u) => u.kind !== "erased").map((u) => canonical(u.code));
+  if (JSON.stringify(kept(sides[0])) !== JSON.stringify(kept(sides[1]))) return false;
+
+  // The RAW text, not the masked one: a misread regex once masked a real
+  // decorator away (round-3 review, `z++ / 2; @Col() …`). An `@` in a string
+  // or a JSDoc refuses too; that only loses a narrowing.
+  if (base.includes("@") || head.includes("@")) return false;
+
+  const runtimeText = (source, units) => {
+    const js = erasedToJavaScript(source);
+    if (js == null || js.length !== source.length) return null;
+    const lines = js.split("\n");
+    const erased = new Set();
+    for (const u of units) if (u.kind === "erased") for (let i = u.from; i <= u.to; i += 1) erased.add(i);
+    for (const i of erased) if (/\S/.test(lines[i] ?? "")) return null;
+    return lines.filter((_, i) => !erased.has(i)).join("\n");
+  };
+  const was = runtimeText(base, sides[0]);
+  const now = runtimeText(head, sides[1]);
+  return was !== null && was === now;
 }
 
 /**

@@ -672,6 +672,10 @@ function emit(plan) {
     // at six, the artifact does not.
     ...(plan.unclassified ? { unclassified: plan.unclassified } : {}),
     ...(plan.routes && Object.keys(plan.routes).length ? { routes: plan.routes } : {}),
+    // Changed files whose every edit was an erased `interface`/`type`: they
+    // seeded nothing (lib/module-context.mjs `typeOnlyEdit`, FUT-3586).
+    ...(plan.typeOnly?.length ? { typeOnly: plan.typeOnly } : {}),
+    ...(plan.typeOnlyOff ? { typeOnlyOff: plan.typeOnlyOff } : {}),
     // What each key-routed seeder change meant, and the non-source files (a
     // `.feature`) naming its keys — the part of the answer a caller outside
     // the import graph needs.
