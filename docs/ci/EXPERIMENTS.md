@@ -761,3 +761,20 @@ round-2 fix. It found one edge left from round 1: the word test was ASCII
 as a keyword. That is a miss where main selects. The word test is now
 `\p{ID_Continue}` plus `$`, ZWNJ and ZWJ. Pinned with `r.éin` and `ðin`; those
 4 cases fail on the round-2 fix (b94914c). Local: 43 cases in the file.
+
+## E-011 — A matrix job named `Lane (n)` is leg n, not leg 1 (FUT-4409)
+
+**Date:** 2026-11-05 · **Status:** Fixed; hosted proof is the next daily refresh
+
+**Evidence:** the first scheduled refresh after FUT-4409 measured a daily run (future-pay run
+42016373694, attempt 2). It warned "spa-e2e leg 1 ran its tests for …" six times, once per SPA E2E
+job. `legOfJob` read only `· shard n/m`, but GitHub names the SPA E2E matrix jobs `SPA E2E (n)`.
+Every SPA E2E job was therefore leg 1, and the pairing added leg 1's measured seconds once per job.
+SPA E2E concurrency came out 0.79, against 1.06 on the 2026-11-04 run, and the plan asked for more
+legs than the lane needs ("wants 10 leg(s) … cap is 8").
+
+**Change:** `legOfJob` also reads `(n)` and `(n, …)` at the end of the job name. The
+`refresh-legs.test.mjs` cases fail on the old regex.
+
+**Not affected:** the ledger's per-file costs, which come from the reports, not the jobs. The next
+daily refresh rewrites the SPA E2E concurrency.
