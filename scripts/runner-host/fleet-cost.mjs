@@ -58,7 +58,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { describeError, fetchRetrying, hostAndSlot, parseUsage } from "./usage-report.mjs";
+import { describeError, fetchRetrying, hostAndSlot, parseUsage, runJobs } from "./usage-report.mjs";
 
 const MIN = 60_000;
 const HOUR = 3_600_000;
@@ -638,16 +638,10 @@ export async function collectFleetJobs({ repo, since, until, label, cache, token
     const dayJobs = await cached(cache, `jobs-${day}.json`, settled, async () => {
       const runs = await listRuns(gh, repo, d, d + DAY);
       const perRun = await pool(runs, 8, async (run) => {
-        const out = [];
-        for (let page = 1; ; page++) {
-          const r = await gh(`/repos/${repo}/actions/runs/${run.id}/jobs?filter=all&per_page=100&page=${page}`);
-          if (!r) break;
-          out.push(...r.jobs.map((j) => ({
-            id: j.id, workflow: run.name, name: j.name, labels: j.labels, runner_name: j.runner_name,
-            conclusion: j.conclusion, started_at: j.started_at, completed_at: j.completed_at,
-          })));
-          if (r.jobs.length < 100) break;
-        }
+        const out = (await runJobs(gh, repo, run.id)).map((j) => ({
+          id: j.id, workflow: run.name, name: j.name, labels: j.labels, runner_name: j.runner_name,
+          conclusion: j.conclusion, started_at: j.started_at, completed_at: j.completed_at,
+        }));
         return out;
       });
       return perRun.flat();

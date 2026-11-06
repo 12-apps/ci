@@ -61,7 +61,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { collect, describeError, fetchRetrying, hostAndSlot, percentile, summarizeJobs } from "./usage-report.mjs";
+import { collect, describeError, fetchRetrying, hostAndSlot, percentile, runJobs, summarizeJobs } from "./usage-report.mjs";
 
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
@@ -739,7 +739,7 @@ async function dispatches(repo, workflow, days, until) {
   );
   const out = [];
   for (const x of runs) {
-    const jobs = (await ghJson(`/repos/${repo}/actions/runs/${x.id}/jobs?filter=latest&per_page=100`)).jobs;
+    const jobs = await runJobs(ghJson, repo, x.id, "latest");
     const jobMinutes = jobs.reduce((a, j) => a + (j.completed_at && j.started_at ? (Date.parse(j.completed_at) - Date.parse(j.started_at)) / 60000 : 0), 0);
     out.push({
       id: x.id,
