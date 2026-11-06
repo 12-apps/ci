@@ -231,6 +231,11 @@ test("fetchRetrying names the URL and every cause once the tries run out", async
     },
   );
   assert.equal(describeError(new Error("plain")), "plain");
+  assert.equal(
+    describeError(new Error("https://api.github.com/repos/o/timeout/x: fetch failed", { cause: new Error("fetch failed", { cause: new Error("timeout") }) })),
+    "https://api.github.com/repos/o/timeout/x: fetch failed <- fetch failed <- timeout",
+    "a cause is never dropped for words an earlier part happens to contain",
+  );
   await assert.rejects(
     fetchRetrying("https://api.github.com/y", {}, { tries: 1, fetchFn: async () => ({ status: 200, ok: true, text: async () => { throw cut(); } }), sleep: async () => {} }),
     (e) => {

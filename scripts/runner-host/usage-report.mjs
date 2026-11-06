@@ -253,7 +253,7 @@ export async function fetchRetrying(url, init, { tries = 5, baseMs = 1000, fetch
       if (res.status < 500 || attempt >= tries) return await settled(res);
       discard(res);
     } catch (error) {
-      if (attempt >= tries) throw new Error(`${url}: ${describeError(error)}`, { cause: error });
+      if (attempt >= tries) throw Object.assign(new Error(`${url}: ${describeError(error)}`, { cause: error }), { chainInMessage: true });
     }
     await sleep(baseMs * 2 ** (attempt - 1));
   }
@@ -286,10 +286,10 @@ export function describeError(error) {
   for (let e = error, depth = 0; e && depth < 8; e = e.cause, depth++) {
     const name = e.name && e.name !== "Error" && e.name !== "TypeError" ? `${e.name}: ` : "";
     const part = `${name}${e.message ?? String(e)}${e.code ? ` [${e.code}]` : ""}`;
-    // Say each thing once: a stream error often wraps a cause with the same
-    // words, and fetchRetrying's own error already carries its cause chain in
-    // its message before it carries the cause itself.
-    if (!parts.join(" <- ").includes(part)) parts.push(part);
+    // A stream error often wraps a cause with the same words; say them once.
+    if (part !== parts[parts.length - 1]) parts.push(part);
+    // fetchRetrying's own error already says its whole chain in its message.
+    if (e.chainInMessage) break;
   }
   return parts.join(" <- ");
 }
@@ -319,9 +319,10 @@ export const JOBS_PER_PAGE = 30;
 export async function runJobs(get, repo, runId, filter = "all") {
   const out = [];
   for (let page = 1; ; page++) {
-    // GitHub caps a run at 256 jobs per attempt and filter=all spans attempts;
-    // 100 pages is far past any real run, so reaching it means a reader that
-    // ignores `page`, which would otherwise loop forever.
+    // 100 pages is 3,000 jobs. A run holds at most 256 jobs per attempt, and
+    // filter=all spans attempts, so only a run re-run a dozen times over could
+    // reach it; none of the runs these reports read does. Reaching it means a
+    // reader that ignores `page`, which would otherwise loop forever.
     if (page > 100) throw new Error(`run ${runId}: still paging jobs at page 100; is \`page\` ignored?`);
     const r = await get(`/repos/${repo}/actions/runs/${runId}/jobs?filter=${filter}&per_page=${JOBS_PER_PAGE}&page=${page}`);
     if (!r) break;
