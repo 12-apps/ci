@@ -286,8 +286,10 @@ export function describeError(error) {
   for (let e = error, depth = 0; e && depth < 8; e = e.cause, depth++) {
     const name = e.name && e.name !== "Error" && e.name !== "TypeError" ? `${e.name}: ` : "";
     const part = `${name}${e.message ?? String(e)}${e.code ? ` [${e.code}]` : ""}`;
-    // A stream error often wraps a cause with the same words; say them once.
-    if (part !== parts[parts.length - 1]) parts.push(part);
+    // Say each thing once: a stream error often wraps a cause with the same
+    // words, and fetchRetrying's own error already carries its cause chain in
+    // its message before it carries the cause itself.
+    if (!parts.join(" <- ").includes(part)) parts.push(part);
   }
   return parts.join(" <- ");
 }

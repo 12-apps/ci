@@ -231,6 +231,13 @@ test("fetchRetrying names the URL and every cause once the tries run out", async
     },
   );
   assert.equal(describeError(new Error("plain")), "plain");
+  await assert.rejects(
+    fetchRetrying("https://api.github.com/y", {}, { tries: 1, fetchFn: async () => ({ status: 200, ok: true, text: async () => { throw cut(); } }), sleep: async () => {} }),
+    (e) => {
+      assert.equal(describeError(e), "https://api.github.com/y: terminated <- SocketError: other side closed [UND_ERR_SOCKET]", "what main() prints says the chain once");
+      return true;
+    },
+  );
   assert.equal(describeError(new TypeError("terminated", { cause: new TypeError("terminated") })), "terminated", "a cause with the same words is said once");
   assert.equal(describeError(new TypeError("fetch failed", { cause: Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }) })), "fetch failed <- getaddrinfo ENOTFOUND [ENOTFOUND]");
 });
