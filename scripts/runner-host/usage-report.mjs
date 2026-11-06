@@ -230,23 +230,64 @@ export function renderWaits(records) {
 // ── GitHub ──────────────────────────────────────────────────────────────────
 
 /**
- * `fetch`, retried on a 5xx answer or a dropped connection. A day's report
- * reads a job list per run — hundreds of calls — and GitHub answers one of
- * them 502 now and then; without a retry that one answer threw away the whole
- * report (2026-09-29, five attempts in a row for one day). A 4xx is an answer,
- * not an outage, and returns at once. The last 5xx is returned, not thrown, so
- * the caller's own error names the status.
+ * `fetch`, retried on a 5xx answer, a dropped connection or a body that stops
+ * halfway, with the whole body read before it answers. A day's report reads a
+ * job list per run and one log per job — thousands of calls — and GitHub
+ * answers one of them 502 now and then; without a retry that one answer threw
+ * away the whole report (2026-09-29, five attempts in a row for one day). The
+ * same holds for a body cut off mid-stream: `res.text()` rejects with the bare
+ * word `terminated`, and when the body was read outside this loop that was the
+ * whole of the daily report's error (2026-11-06, at the first day's first
+ * window, 70 seconds in; the same collection ran clean straight after). So the
+ * body is read HERE, inside the retry, and the answer carries it pre-read:
+ * `ok`, `status`, `headers`, `url`, and `text()` / `json()` that cannot fail
+ * on the network. A 4xx is an answer, not an outage, and returns at once. The
+ * last 5xx is returned, not thrown, so the caller's own error names the status.
+ * The last network error is thrown naming the URL and every cause, so the log
+ * says which call died and why, not just `terminated`.
  */
 export async function fetchRetrying(url, init, { tries = 5, baseMs = 1000, fetchFn = fetch, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
   for (let attempt = 1; ; attempt++) {
     try {
       const res = await fetchFn(url, init);
-      if (res.status < 500 || attempt >= tries) return res;
+      if (res.status < 500 || attempt >= tries) return await settled(res);
+      discard(res);
     } catch (error) {
-      if (attempt >= tries) throw error;
+      if (attempt >= tries) throw new Error(`${url}: ${describeError(error)}`, { cause: error });
     }
     await sleep(baseMs * 2 ** (attempt - 1));
   }
+}
+
+/** The answer with its body already read; a body that stops halfway throws here, inside the retry. */
+async function settled(res) {
+  if (typeof res.text !== "function") return res;
+  const body = await res.text();
+  return {
+    ok: res.ok ?? (res.status >= 200 && res.status < 300),
+    status: res.status,
+    statusText: res.statusText,
+    headers: res.headers,
+    url: res.url,
+    text: async () => body,
+    json: async () => JSON.parse(body),
+  };
+}
+
+/** Let go of a 5xx body that is about to be retried, without waiting on it. */
+function discard(res) {
+  const cancelled = res.body?.cancel?.();
+  if (cancelled?.catch) cancelled.catch(() => {});
+}
+
+/** The error's message and every cause under it: `terminated <- SocketError: other side closed [UND_ERR_SOCKET]`. */
+export function describeError(error) {
+  const parts = [];
+  for (let e = error, depth = 0; e && depth < 8; e = e.cause, depth++) {
+    const name = e.name && e.name !== "Error" && e.name !== "TypeError" ? `${e.name}: ` : "";
+    parts.push(`${name}${e.message ?? String(e)}${e.code ? ` [${e.code}]` : ""}`);
+  }
+  return parts.join(" <- ");
 }
 
 async function gh(path, { raw = false } = {}) {
@@ -335,7 +376,7 @@ async function main() {
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   main().catch((e) => {
-    console.error(e.message);
+    console.error(describeError(e));
     process.exit(1);
   });
 }

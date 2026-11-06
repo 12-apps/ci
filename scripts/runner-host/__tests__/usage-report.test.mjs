@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
+  describeError,
   fetchRetrying,
   fitTier,
   hostAndSlot,
@@ -196,4 +197,52 @@ test("fetchRetrying returns a 4xx at once, and the last 5xx once the tries run o
     fetchRetrying("u", {}, { tries: 2, fetchFn: async () => { throw new TypeError("fetch failed"); }, sleep: async () => {} }),
     /fetch failed/,
   );
+});
+
+// 2026-11-06: the daily report died 70 seconds in on a body that stopped
+// halfway, and all its log said was `terminated`. The retry has to cover the
+// body, and the error has to name the call.
+test("fetchRetrying reads the body inside the retry, so a body that stops halfway is retried", async () => {
+  const headers = new Headers({ "content-type": "application/json" });
+  const answers = [
+    { status: 200, ok: true, headers, url: "u", text: async () => { throw new TypeError("terminated", { cause: Object.assign(new Error("other side closed"), { name: "SocketError", code: "UND_ERR_SOCKET" }) }); } },
+    { status: 200, ok: true, headers, url: "u", text: async () => '{"jobs":[1]}' },
+  ];
+  const waits = [];
+  const res = await fetchRetrying("u", {}, { fetchFn: async () => answers.shift(), sleep: async (ms) => { waits.push(ms); } });
+  assert.deepEqual(waits, [1000], "one retry after the cut body");
+  assert.equal(res.status, 200);
+  assert.equal(res.ok, true);
+  assert.equal(res.headers, headers);
+  assert.deepEqual(await res.json(), { jobs: [1] });
+  assert.equal(await res.text(), '{"jobs":[1]}', "the body is read once and handed out as often as asked");
+});
+
+test("fetchRetrying names the URL and every cause once the tries run out", async () => {
+  const cut = () => new TypeError("terminated", { cause: Object.assign(new Error("other side closed"), { name: "SocketError", code: "UND_ERR_SOCKET" }) });
+  await assert.rejects(
+    fetchRetrying("https://api.github.com/x", {}, { tries: 2, fetchFn: async () => ({ status: 200, ok: true, text: async () => { throw cut(); } }), sleep: async () => {} }),
+    (e) => {
+      assert.equal(e.message, "https://api.github.com/x: terminated <- SocketError: other side closed [UND_ERR_SOCKET]");
+      assert.equal(e.cause.message, "terminated");
+      return true;
+    },
+  );
+  assert.equal(describeError(new Error("plain")), "plain");
+  assert.equal(describeError(new TypeError("fetch failed", { cause: Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }) })), "fetch failed <- getaddrinfo ENOTFOUND [ENOTFOUND]");
+});
+
+test("fetchRetrying hands a 4xx and the last 5xx over with their bodies read", async () => {
+  const notFound = await fetchRetrying("u", {}, { fetchFn: async () => ({ status: 404, ok: false, text: async () => "nope" }), sleep: async () => {} });
+  assert.equal(notFound.ok, false);
+  assert.equal(await notFound.text(), "nope");
+  let cancelled = 0;
+  const down = await fetchRetrying("u", {}, {
+    tries: 2,
+    fetchFn: async () => ({ status: 502, ok: false, body: { cancel: async () => { cancelled++; } }, text: async () => "bad gateway" }),
+    sleep: async () => {},
+  });
+  assert.equal(down.status, 502);
+  assert.equal(await down.text(), "bad gateway");
+  assert.equal(cancelled, 1, "the retried 5xx body is let go, the returned one is read");
 });
