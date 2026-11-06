@@ -61,7 +61,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { collect, fetchRetrying, hostAndSlot, percentile, summarizeJobs } from "./usage-report.mjs";
+import { collect, describeError, fetchRetrying, hostAndSlot, percentile, summarizeJobs } from "./usage-report.mjs";
 
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
@@ -904,7 +904,7 @@ async function main() {
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   main().catch((e) => {
-    console.error(e.message);
+    console.error(describeError(e));
     process.exit(1);
   });
 }

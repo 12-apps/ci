@@ -58,7 +58,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { fetchRetrying, hostAndSlot, parseUsage } from "./usage-report.mjs";
+import { describeError, fetchRetrying, hostAndSlot, parseUsage } from "./usage-report.mjs";
 
 const MIN = 60_000;
 const HOUR = 3_600_000;
@@ -790,7 +790,7 @@ async function main() {
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   main().catch((e) => {
-    console.error(e.message);
+    console.error(describeError(e));
     process.exit(1);
   });
 }
