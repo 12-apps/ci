@@ -9,6 +9,8 @@ import {
   jobGroup,
   parseUsage,
   percentile,
+  runJobs,
+  JOBS_PER_PAGE,
   overlap,
   renderIdle,
   renderJobs,
@@ -246,4 +248,24 @@ test("fetchRetrying hands a 4xx and the last 5xx over with their bodies read", a
   assert.equal(down.status, 502);
   assert.equal(await down.text(), "bad gateway");
   assert.equal(cancelled, 1, "the retried 5xx body is let go, the returned one is read");
+});
+
+// 2026-11-06: one page of 100 jobs of the daily full suite's run answered 502
+// on every try (GitHub timing out building it), and killed every report whose
+// week held that run. Pages of 30 answer.
+test("runJobs reads a run's jobs 30 a page until a short page, and stops on a missing run", async () => {
+  assert.equal(JOBS_PER_PAGE, 30);
+  const asked = [];
+  const pages = [Array.from({ length: 30 }, (_, i) => ({ id: i })), Array.from({ length: 30 }, (_, i) => ({ id: 30 + i })), [{ id: 60 }]];
+  const jobs = await runJobs(async (p) => { asked.push(p); return { jobs: pages.shift() }; }, "o/r", 7, "latest");
+  assert.equal(jobs.length, 61);
+  assert.deepEqual(asked, [1, 2, 3].map((n) => `/repos/o/r/actions/runs/7/jobs?filter=latest&per_page=30&page=${n}`));
+  assert.ok(asked.every((p) => !p.includes("per_page=100")), "never the page size GitHub times out on");
+  assert.deepEqual(await runJobs(async () => null, "o/r", 8), [], "a run GitHub no longer has is an empty list");
+  const seen = [];
+  await runJobs(async (p) => { seen.push(p); return { jobs: [] }; }, "o/r", 10);
+  assert.deepEqual(seen, ["/repos/o/r/actions/runs/10/jobs?filter=all&per_page=30&page=1"], "every attempt's jobs unless asked otherwise");
+  await assert.rejects(runJobs(async () => ({ jobs: Array.from({ length: 30 }, (_, i) => ({ id: i })) }), "o/r", 11), /page 100/, "a reader that ignores page fails instead of looping forever");
+  const exact = [Array.from({ length: 30 }, (_, i) => ({ id: i })), []];
+  assert.equal((await runJobs(async () => ({ jobs: exact.shift() }), "o/r", 9)).length, 30, "a full last page is followed by one empty page");
 });
