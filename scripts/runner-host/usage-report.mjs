@@ -285,7 +285,9 @@ export function describeError(error) {
   const parts = [];
   for (let e = error, depth = 0; e && depth < 8; e = e.cause, depth++) {
     const name = e.name && e.name !== "Error" && e.name !== "TypeError" ? `${e.name}: ` : "";
-    parts.push(`${name}${e.message ?? String(e)}${e.code ? ` [${e.code}]` : ""}`);
+    const part = `${name}${e.message ?? String(e)}${e.code ? ` [${e.code}]` : ""}`;
+    // A stream error often wraps a cause with the same words; say them once.
+    if (part !== parts[parts.length - 1]) parts.push(part);
   }
   return parts.join(" <- ");
 }

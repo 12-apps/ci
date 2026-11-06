@@ -229,6 +229,7 @@ test("fetchRetrying names the URL and every cause once the tries run out", async
     },
   );
   assert.equal(describeError(new Error("plain")), "plain");
+  assert.equal(describeError(new TypeError("terminated", { cause: new TypeError("terminated") })), "terminated", "a cause with the same words is said once");
   assert.equal(describeError(new TypeError("fetch failed", { cause: Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }) })), "fetch failed <- getaddrinfo ENOTFOUND [ENOTFOUND]");
 });
 
