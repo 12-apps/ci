@@ -309,13 +309,18 @@ async function gh(path, { raw = false } = {}) {
  * every time, so five retries never help (run 42016373694 of 2026-11-05: 502
  * on every try at 100, 200 in four seconds at 30). That one run then killed
  * every daily report whose week held it. `get` is the caller's GitHub reader;
- * a null page (404/410) ends the list.
+ * a null page ends the list, so a reader that answers null on 404/410 gets an
+ * empty list for a run GitHub no longer has, and one that throws still throws.
  */
 export const JOBS_PER_PAGE = 30;
 
 export async function runJobs(get, repo, runId, filter = "all") {
   const out = [];
   for (let page = 1; ; page++) {
+    // GitHub caps a run at 256 jobs per attempt and filter=all spans attempts;
+    // 100 pages is far past any real run, so reaching it means a reader that
+    // ignores `page`, which would otherwise loop forever.
+    if (page > 100) throw new Error(`run ${runId}: still paging jobs at page 100; is \`page\` ignored?`);
     const r = await get(`/repos/${repo}/actions/runs/${runId}/jobs?filter=${filter}&per_page=${JOBS_PER_PAGE}&page=${page}`);
     if (!r) break;
     out.push(...r.jobs);

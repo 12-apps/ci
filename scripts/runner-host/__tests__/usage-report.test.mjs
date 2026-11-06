@@ -262,6 +262,10 @@ test("runJobs reads a run's jobs 30 a page until a short page, and stops on a mi
   assert.deepEqual(asked, [1, 2, 3].map((n) => `/repos/o/r/actions/runs/7/jobs?filter=latest&per_page=30&page=${n}`));
   assert.ok(asked.every((p) => !p.includes("per_page=100")), "never the page size GitHub times out on");
   assert.deepEqual(await runJobs(async () => null, "o/r", 8), [], "a run GitHub no longer has is an empty list");
+  const seen = [];
+  await runJobs(async (p) => { seen.push(p); return { jobs: [] }; }, "o/r", 10);
+  assert.deepEqual(seen, ["/repos/o/r/actions/runs/10/jobs?filter=all&per_page=30&page=1"], "every attempt's jobs unless asked otherwise");
+  await assert.rejects(runJobs(async () => ({ jobs: Array.from({ length: 30 }, (_, i) => ({ id: i })) }), "o/r", 11), /page 100/, "a reader that ignores page fails instead of looping forever");
   const exact = [Array.from({ length: 30 }, (_, i) => ({ id: i })), []];
   assert.equal((await runJobs(async () => ({ jobs: exact.shift() }), "o/r", 9)).length, 30, "a full last page is followed by one empty page");
 });
