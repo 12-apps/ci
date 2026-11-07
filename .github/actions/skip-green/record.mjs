@@ -115,6 +115,8 @@ function fromShards({ lane, plan, previous, laneResult, headSha, runId, shardRec
   const refused = shardRecords.length - usable.length;
   const green = usable.filter((r) => r.passed === true && r.tests && typeof r.tests === "object");
   const red = usable.filter((r) => r.passed === false);
+  // A red shard with no unattributed error also names its CLEAN files (FUT-4548).
+  const named = [...green, ...red.filter((r) => r.tests && typeof r.tests === "object")];
 
   const evict = new Set();
   let evictAll = false;
@@ -149,7 +151,7 @@ function fromShards({ lane, plan, previous, laneResult, headSha, runId, shardRec
     }
   }
   let added = 0;
-  for (const record of green) {
+  for (const record of named) {
     for (const [test, hash] of Object.entries(record.tests)) {
       // The plan's own hash, never the record's alone: a record is evidence
       // that THIS test ran with THIS hash in THIS run, nothing wider.
@@ -163,7 +165,7 @@ function fromShards({ lane, plan, previous, laneResult, headSha, runId, shardRec
     `${green.length} green and ${red.length} red shard record(s) of a ${laneResult} lane` +
     (silent ? `, ${silent} shard(s) with no record` : "") +
     (refused ? `, ${refused} refused (another run, head, lane or inputs construction)` : "");
-  if (green.length === 0 && evicted === 0) return { manifest: null, added: 0, evicted: 0, why: `${tail} — nothing recorded, nothing to evict` };
+  if (added === 0 && evicted === 0 && named.length === 0) return { manifest: null, added: 0, evicted: 0, why: `${tail} — nothing recorded, nothing to evict` };
   return {
     manifest: { version: MANIFEST_VERSION, lane, inputs: plan.inputsVersion ?? null, entries },
     added,

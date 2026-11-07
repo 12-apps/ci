@@ -78,7 +78,8 @@ the hash (or a non-hermetic test for the always-run list) to fix first.
 | test whose closure reaches a file git does not track (a workspace package's built `dist/` present at plan time wins over its `src/` — plan on a CLEAN checkout, before any install or build) | runs; the plan log says `N with a closure file git does not track` |
 | test on the always-run list, or the list cannot be read | runs (all run, if the list is unreadable) |
 | lane result is `failure` or `cancelled` | only green SHARDS' lists are recorded; every file a red shard ran (and, on `failure`, every shard that left no record) is evicted |
-| a shard's test step failed | none of its tests is recorded; its whole list is evicted |
+| a shard's test step failed, its lane log clean of unattributed errors | its clean files (every case passed, collected) are recorded; the failed and the unreached are evicted |
+| a shard's test step failed with an unhandled error, a crashed or timed-out worker, or an unreadable log | nothing of it is recorded; its whole list is evicted |
 | a planned file the shard's JUnit does not show running (not collected, all skipped) | not recorded, whatever the exit code |
 | a shard with no readable JUnit, or a `node:test` report (no file attribution) | that shard records nothing green |
 | a shard split by the runner (no leg list, more than one shard) | that shard records nothing |

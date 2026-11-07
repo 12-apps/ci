@@ -47,6 +47,9 @@ for (const lane of ["unit", "integration"]) {
     assert.match(s, new RegExp(`skip-green-key != ''`), "only when skip-green is on for this run");
     assert.match(s, /leg: \$\{\{ steps\.leg\.outputs\.file \}\}/, "the leg list is what the shard ran");
     assert.match(s, /head-sha: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
+    // A red shard reads the lane log the test step tees, before trusting clean rows.
+    assert.match(s, new RegExp(`log: ${lane}\\.log\\n`));
+    assert.match(shards, new RegExp(`2>&1 \\| tee ${lane}\\.log`));
     // The guard the gate reads must be the single-shard zero-test guard.
     assert.match(shards, new RegExp(`- name: Verify the ${lane} lane executed at least one test\\n\\s+id: ${lane}-signal-guard\\n`));
   });

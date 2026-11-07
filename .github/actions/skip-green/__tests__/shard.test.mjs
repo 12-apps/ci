@@ -17,7 +17,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { SHARD_RECORD_VERSION } from "../lib/manifest.mjs";
-import { junitFiles, junitRow, shardRecord } from "../shard.mjs";
+import { junitFiles, junitRow, shardRecord, unattributedFailure } from "../shard.mjs";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "shard.mjs");
 const TMP = mkdtempSync(join(tmpdir(), "skip-green-shard-"));
@@ -181,4 +181,47 @@ test("a report AT the junit root, named after its workspace, keys its package-re
     leg: null, shard: "1", shardTotal: "1", outcome: "success", headSha: HEAD, runId: "77", junit,
   }).record;
   assert.deepEqual(Object.keys(rec.tests), ["packages/combos/src/core/__tests__/flow.test.ts"]);
+});
+
+// ── a RED shard with no unattributed error records its clean files ───────────
+
+test("red shard, no unattributed error: its clean files are recorded, the failed and the unreached evicted", () => {
+  // a ran clean; c failed; b has no hash; d is another leg's. --bail left nothing else unreached here.
+  const junit = new Map([["a.test.ts", { ran: 2, bad: 0 }], ["c.test.ts", { ran: 2, bad: 1 }]]);
+  const { record, why } = shard({ outcome: "failure", junit, unattributed: null });
+  assert.equal(record.passed, false);
+  assert.deepEqual(record.tests, { "a.test.ts": H(1) }, "the clean file, at the plan's hash");
+  assert.deepEqual(record.evict, ["b.test.ts", "c.test.ts"], "the failed one, and every file that did not run clean");
+  assert.match(why, /no unattributed error — recording its 1 clean file/);
+});
+
+test("counterexample: red shard, a file --bail never reached has no JUnit row and is evicted, not recorded", () => {
+  const junit = new Map([["c.test.ts", { ran: 1, bad: 1 }]]); // bail stopped after c
+  const { record } = shard({ outcome: "failure", junit, unattributed: null });
+  assert.deepEqual(record.tests, {});
+  assert.deepEqual(record.evict, ["a.test.ts", "b.test.ts", "c.test.ts"]);
+});
+
+test("counterexample: red shard WITH an unattributed error records nothing and evicts its whole leg", () => {
+  for (const unattributed of ["the lane log matches /Unhandled Errors/", "the lane log could not be read", "not checked"]) {
+    const { record } = shard({ outcome: "failure", junit: RAN, unattributed });
+    assert.equal(record.tests, undefined, unattributed);
+    assert.deepEqual(record.evict, ["a.test.ts", "b.test.ts", "c.test.ts"], unattributed);
+  }
+  assert.equal(shard({ outcome: "failure", junit: null, unattributed: null }).record.tests, undefined, "no JUnit: nothing recorded either");
+});
+
+test("unattributedFailure: vitest's unhandled-error section and worker crashes, timeouts and OOMs count; a clean log does not", () => {
+  for (const line of [
+    "⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯",
+    "Vitest caught 1 unhandled error during the test run.",
+    "⎯⎯⎯ Unhandled Rejection ⎯⎯⎯",
+    "Error: Worker exited unexpectedly",
+    "[vitest-pool]: Timeout starting forks runner.",
+    "Error [ERR_IPC_CHANNEL_CLOSED]: Channel closed",
+    "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory",
+    "Command failed with signal SIGKILL",
+  ]) assert.ok(unattributedFailure(`ok\n${line}\nmore`), line);
+  assert.equal(unattributedFailure(" Test Files  1 failed | 3 passed (4)\n FAIL src/a.test.ts > adds\nAssertionError: expected 2 to be 3"), null);
+  assert.match(unattributedFailure(null), /could not be read/);
 });
