@@ -17,7 +17,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { SHARD_RECORD_VERSION } from "../lib/manifest.mjs";
-import { countTestCases, shardRecord } from "../shard.mjs";
+import { junitFiles, shardRecord } from "../shard.mjs";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "shard.mjs");
 const TMP = mkdtempSync(join(tmpdir(), "skip-green-shard-"));
@@ -32,8 +32,10 @@ const PLAN = {
   tests: ["a.test.ts", "b.test.ts", "c.test.ts", "d.test.ts"],
   inputs: { "a.test.ts": H(1), "b.test.ts": null, "c.test.ts": H(3), "d.test.ts": H(4) },
 };
+// What the shard's JUnit shows RAN: every planned file, by default.
+const RAN = new Map(PLAN.tests.map((t) => [t, { ran: 2, bad: 0 }]));
 const shard = (over = {}) =>
-  shardRecord({ lane: "unit", plan: PLAN, leg: ["a.test.ts", "b.test.ts", "c.test.ts"], shard: "2", shardTotal: "3", outcome: "success", headSha: HEAD, runId: "77", reportsAsked: false, testCases: null, ...over });
+  shardRecord({ lane: "unit", plan: PLAN, leg: ["a.test.ts", "b.test.ts", "c.test.ts"], shard: "2", shardTotal: "3", outcome: "success", headSha: HEAD, runId: "77", junit: RAN, ...over });
 
 test("a green shard records its OWN leg, with the plan's hashes, this head and this run", () => {
   const { record } = shard();
@@ -56,7 +58,7 @@ test("counterexample: a shard whose test step FAILED names no test green — it 
   assert.equal(record.tests, undefined, "no green claim of any kind");
   assert.deepEqual(record.evict, ["a.test.ts", "b.test.ts", "c.test.ts"], "every file of the leg, the null-hash one included");
   assert.equal(shard({ outcome: "failure", leg: null }).record.evict, "*", "a list it cannot name evicts every planned test");
-  assert.ok(shard({ outcome: "failure", reportsAsked: true, testCases: 0 }).record, "an eviction needs no JUnit evidence");
+  assert.ok(shard({ outcome: "failure", junit: null }).record, "an eviction needs no JUnit evidence");
 });
 
 test("a shard that was cancelled, skipped, or green with no signal writes nothing either way", () => {
@@ -77,10 +79,23 @@ test("above one shard, a shard split by the runner (no leg list) records nothing
   assert.deepEqual(Object.keys(one.tests), ["a.test.ts", "c.test.ts", "d.test.ts"]);
 });
 
-test("with JUnit asked for, a shard that reported zero test cases proved nothing", () => {
-  assert.equal(shard({ reportsAsked: true, testCases: 0 }).record, null);
-  assert.equal(shard({ reportsAsked: true, testCases: null }).record, null, "no readable report is not evidence");
-  assert.ok(shard({ reportsAsked: true, testCases: 5 }).record);
+test("counterexample (FUT-4563): a planned file the runner never COLLECTED is not recorded, though the shard exited 0", () => {
+  // vitest's include did not match it: "No test files found, exiting with code 0", and no JUnit row.
+  const notCollected = new Map(RAN);
+  notCollected.delete("c.test.ts");
+  const { record, why } = shard({ junit: notCollected });
+  assert.deepEqual(Object.keys(record.tests), ["a.test.ts"]);
+  assert.match(why, /1 planned file\(s\) its JUnit does not show running/);
+});
+
+test("a file whose JUnit row ran nothing (all skipped) or holds a failure is not recorded", () => {
+  assert.deepEqual(Object.keys(shard({ junit: new Map([...RAN, ["c.test.ts", { ran: 0, bad: 0 }]]) }).record.tests), ["a.test.ts"]);
+  assert.deepEqual(Object.keys(shard({ junit: new Map([...RAN, ["c.test.ts", { ran: 3, bad: 1 }]]) }).record.tests), ["a.test.ts"]);
+});
+
+test("no readable JUnit, no green record", () => {
+  assert.equal(shard({ junit: null }).record, null);
+  assert.equal(shard({ junit: undefined }).record, null);
 });
 
 test("a plan that is not narrowed, carries no inputs, or a head that is not a sha records nothing", () => {
@@ -91,16 +106,27 @@ test("a plan that is not narrowed, carries no inputs, or a head that is not a sh
   assert.equal(shard({ runId: "" }).record, null);
 });
 
-test("countTestCases sums test cases across files and directories, and is null with no report", () => {
-  const dir = join(TMP, "junit");
-  mkdirSync(join(dir, "nested"), { recursive: true });
-  writeFileSync(join(dir, "a.xml"), '<testsuites><testsuite><testcase name="x"/><testcase name="y"></testcase></testsuite></testsuites>');
-  writeFileSync(join(dir, "nested/b.xml"), '<testsuite><testcase name="z"/></testsuite>');
-  writeFileSync(join(dir, "notes.txt"), "<testcase/>");
-  assert.equal(countTestCases([dir]), 3);
-  assert.equal(countTestCases([join(TMP, "missing")]), null);
-  writeFileSync(join(TMP, "empty.xml"), "<testsuites/>");
-  assert.equal(countTestCases([join(TMP, "empty.xml")]), 0);
+test("junitFiles keys each vitest suite by repo path, from where its report sits, and counts what RAN", () => {
+  const cwd = join(TMP, "repo");
+  mkdirSync(join(cwd, "apps/web/reports/junit/unit"), { recursive: true });
+  mkdirSync(join(cwd, "reports/junit"), { recursive: true });
+  writeFileSync(
+    join(cwd, "apps/web/reports/junit/unit/apps-web.xml"),
+    '<testsuites><testsuite name="src/a.test.ts" tests="2" failures="0" errors="0" skipped="0"><testcase name="x"/></testsuite>' +
+      '<testsuite name="src/skipped.test.ts" tests="1" failures="0" errors="0" skipped="1"></testsuite>' +
+      '<testsuite name="src/red.test.ts" tests="2" failures="1" errors="0" skipped="0"></testsuite></testsuites>',
+  );
+  writeFileSync(join(cwd, "reports/junit/integration.xml"), '<testsuites><testsuite name="tests/integration/b.integration.test.ts" tests="1" failures="0" errors="0" skipped="0"/></testsuites>');
+  // node:test's JUnit names describes, not files: it attributes nothing.
+  writeFileSync(join(cwd, "reports/junit/root.xml"), '<testsuites><testcase name="a" classname="test"/></testsuites>');
+  const files = junitFiles(["apps/web/reports/junit/unit", "reports/junit/integration.xml", "reports/junit/root.xml", "missing/dir"], cwd);
+  assert.deepEqual(Object.fromEntries(files), {
+    "apps/web/src/a.test.ts": { ran: 2, bad: 0 },
+    "apps/web/src/skipped.test.ts": { ran: 0, bad: 0 },
+    "apps/web/src/red.test.ts": { ran: 2, bad: 1 },
+    "tests/integration/b.integration.test.ts": { ran: 1, bad: 0 },
+  });
+  assert.equal(junitFiles([join(TMP, "nothing-here")], cwd), null);
 });
 
 test("CLI: a green leg writes its passes; a red one writes an eviction", () => {
@@ -108,12 +134,15 @@ test("CLI: a green leg writes its passes; a red one writes an eviction", () => {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "plan.json"), JSON.stringify(PLAN));
   writeFileSync(join(dir, "leg.txt"), "a.test.ts\nc.test.ts\n");
+  // Only a.test.ts ran; c.test.ts was planned but not collected.
+  mkdirSync(join(dir, "reports/junit"), { recursive: true });
+  writeFileSync(join(dir, "reports/junit/unit.xml"), '<testsuites><testsuite name="a.test.ts" tests="1" failures="0" errors="0" skipped="0"/></testsuites>');
   const run = (outcome, out) => {
     const outputs = join(dir, `outputs-${outcome}.txt`);
     writeFileSync(outputs, "");
     const r = spawnSync(
       "node",
-      [CLI, "--lane", "unit", "--plan", "plan.json", "--leg", "leg.txt", "--shard", "1", "--shard-total", "2", "--outcome", outcome, "--head-sha", HEAD, "--run-id", "77", "--reports", "", "--out", out],
+      [CLI, "--lane", "unit", "--plan", "plan.json", "--leg", "leg.txt", "--shard", "1", "--shard-total", "2", "--outcome", outcome, "--head-sha", HEAD, "--run-id", "77", "--reports", "reports/junit", "--out", out],
       { cwd: dir, encoding: "utf8", env: { ...process.env, GITHUB_OUTPUT: outputs } },
     );
     return { code: r.status, emitted: Object.fromEntries(readFileSync(outputs, "utf8").split("\n").filter(Boolean).map((l) => l.split(/=(.*)/s).slice(0, 2))) };
@@ -128,6 +157,6 @@ test("CLI: a green leg writes its passes; a red one writes an eviction", () => {
   assert.equal(existsSync(join(dir, "cut/unit-s1.json")), false);
   const green = run("success", "green/unit-s1.json");
   assert.equal(green.emitted.written, "true");
-  assert.equal(green.emitted.tests, "2");
-  assert.deepEqual(JSON.parse(readFileSync(join(dir, "green/unit-s1.json"), "utf8")).tests, { "a.test.ts": H(1), "c.test.ts": H(3) });
+  assert.equal(green.emitted.tests, "1");
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, "green/unit-s1.json"), "utf8")).tests, { "a.test.ts": H(1) }, "the uncollected c.test.ts is not recorded");
 });

@@ -47,9 +47,13 @@ inputs** is reported as skipped and does not run.
    commands, so changing how the lane runs invalidates every entry.
 4. **`shard`** (inside each shard, after its tests — FUT-4548) keeps a lane
    that did NOT pass from throwing its green shards away. A shard whose test
-   step exited 0 writes the hashes of its OWN list (the lane-timings leg, or
-   the plan at one shard; a shard split by the runner's `--shard` cannot name
-   its files and writes nothing); a shard whose test step FAILED writes an
+   step exited 0 writes the hashes of the files of its OWN list (the
+   lane-timings leg, or the plan at one shard; a shard split by the runner's
+   `--shard` cannot name its files and writes nothing) that its JUnit shows
+   RUNNING — at least one executed test case, no failure or error (FUT-4563: a
+   planned file the runner never collected exits 0 too, and used to be
+   recorded green). Green lanes record from these shard records as well, never
+   from the plan's whole list; a shard whose test step FAILED writes an
    eviction of its whole list. When the matrix failed or was cancelled,
    `<lane>-green-shards` merges them (`record` with `shard-records`): green
    lists are recorded, and evicted entries are DELETED — on a failed lane also
@@ -75,6 +79,8 @@ the hash (or a non-hermetic test for the always-run list) to fix first.
 | test on the always-run list, or the list cannot be read | runs (all run, if the list is unreadable) |
 | lane result is `failure` or `cancelled` | only green SHARDS' lists are recorded; every file a red shard ran (and, on `failure`, every shard that left no record) is evicted |
 | a shard's test step failed | none of its tests is recorded; its whole list is evicted |
+| a planned file the shard's JUnit does not show running (not collected, all skipped) | not recorded, whatever the exit code |
+| a shard with no readable JUnit, or a `node:test` report (no file attribution) | that shard records nothing green |
 | a shard split by the runner (no leg list, more than one shard) | that shard records nothing |
 | lane result is anything else (`skipped`, empty) | nothing recorded |
 | push / dispatch runs | the workflow never calls this: the full suite skips nothing |

@@ -11,8 +11,12 @@
  * manifest accumulates over the pull request, which is what lets push 3 skip
  * what push 1 proved even when push 2 did not select it.
  *
- * The one rule that matters: ONLY WHAT PASSED IS RECORDED. A lane whose
- * result is `success` records every test it ran. A lane that FAILED or was
+ * The one rule that matters: ONLY WHAT PASSED IS RECORDED. With shard records
+ * (`--shard-records`, what monorepo-tests.yml always passes since FUT-4563) a
+ * lane of ANY result records only the files a shard's JUnit showed running;
+ * the plan's whole list is never trusted, because a planned file the runner
+ * did not collect exits 0 too. Without them (an older caller), a lane whose
+ * result is `success` records every test it planned. A lane that FAILED or was
  * CANCELLED records only what its green shards proved, and EVICTS what its red
  * shards ran (FUT-4548, see `fromShards`): each shard
  * whose own test step exited 0 wrote a shard record (`shard.mjs`) naming the
@@ -50,12 +54,16 @@ const arg = (name, fallback = null) => {
  */
 export function nextManifest({ lane, plan, previous, laneResult, headSha, runId, shardRecords = null, shardTotal = null }) {
   const partial = laneResult === "failure" || laneResult === "cancelled";
-  if (laneResult !== "success" && !(partial && Array.isArray(shardRecords))) {
+  // FUT-4563: with shard records, EVERY result — success included — records
+  // only what a shard's JUnit showed running, never the plan's whole list. The
+  // plan-wide branch below is kept for a caller that passes no records.
+  const fromRecords = Array.isArray(shardRecords) && (partial || laneResult === "success");
+  if (laneResult !== "success" && !fromRecords) {
     return { manifest: null, added: 0, why: `lane result is ${JSON.stringify(laneResult)} — a manifest records only what a green lane, or a green shard of it, proved` };
   }
   if (!plan || !plan.inputs || typeof plan.inputs !== "object") return { manifest: null, added: 0, why: "plan carries no test inputs — nothing to record" };
   if (!/^[0-9a-f]{7,40}$/.test(String(headSha))) return { manifest: null, added: 0, why: `head sha ${JSON.stringify(headSha)} is not a sha — nothing to record` };
-  if (partial) return fromShards({ lane, plan, previous, laneResult, headSha, runId, shardRecords, shardTotal });
+  if (fromRecords) return fromShards({ lane, plan, previous, laneResult, headSha, runId, shardRecords, shardTotal });
 
   const entries = { ...(previous?.entries ?? {}) };
   let added = 0;

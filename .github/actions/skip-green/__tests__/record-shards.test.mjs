@@ -163,3 +163,15 @@ test("CLI: a failed lane with --shard-records merges the green shards", () => {
   const without = cli(join(TMP, "cli-shards"), ["--lane", "unit", "--plan", "plan.json", "--manifest", "m2/unit.json", "--lane-result", "failure", "--head-sha", NEW, "--shard-records", ""]);
   assert.equal(without.emitted.recorded, "false", "a failed lane with no shard records records nothing");
 });
+
+test("FUT-4563: a GREEN lane with shard records records only what they name, never the plan's whole list", () => {
+  // shard 1 named its two files; shard 2's files were planned but its JUnit
+  // showed none running (say, outside the runner's include): no record names them.
+  const { manifest } = partial({ laneResult: "success", shardRecords: [shard1] });
+  assert.deepEqual(Object.keys(manifest.entries).sort(), ["s1/a.test.ts", "s1/b.test.ts"]);
+  // No eviction on a green lane: a silent shard there proved nothing either way.
+  const kept = partial({ laneResult: "success", previous: GREEN_BEFORE, shardRecords: [shard1] }).manifest;
+  assert.deepEqual(kept.entries["s2/failed.test.ts"], GREEN_BEFORE.entries["s2/failed.test.ts"]);
+  // No records at all: nothing recorded (the plan-wide path is never taken).
+  assert.equal(partial({ laneResult: "success", shardRecords: [] }).manifest, null);
+});

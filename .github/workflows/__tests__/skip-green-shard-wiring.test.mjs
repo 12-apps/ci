@@ -87,9 +87,14 @@ for (const lane of ["unit", "integration"]) {
     assert.doesNotMatch(merge, new RegExp(`${lane}-lane-|lane-verdict`), "the tree verdict is never written from a lane that did not pass");
   });
 
-  test(`${lane}-verdict is unchanged: still success-only`, () => {
+  test(`${lane}-verdict: still success-only, and records only what the shards' JUnit showed (FUT-4563)`, () => {
     const verdict = jobs[`${lane}-verdict`];
     assert.match(verdict, new RegExp(`needs\\.${lane}-tests\\.result == 'success'`));
-    assert.doesNotMatch(verdict, /shard-records/);
+    assert.match(verdict, new RegExp(`pattern: skip-green-${lane}-a\\$\\{\\{ github\\.run_attempt \\}\\}-\\*`));
+    assert.match(step(verdict, "Record the green tests"), /shard-records: \.skip-green-shards/, "never the plan's whole list");
+  });
+
+  test(`${lane}-tests: the shard record reads the lane's JUnit reports`, () => {
+    assert.match(step(shards, "Record what this shard proved"), new RegExp(`reports: \\$\\{\\{ inputs\\.${lane}-junit-reports \\}\\}`));
   });
 }

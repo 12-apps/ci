@@ -1415,6 +1415,16 @@ jobs:
           key: green-unit-${{ needs.unit-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-${{ github.run_id }}
           restore-keys: |
             green-unit-${{ needs.unit-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-
+      # FUT-4563: a green lane records only what each shard's own JUnit
+      # showed RUNNING (the shard records), never the plan's whole list — a
+      # planned file the runner did not collect exits 0 as well.
+      - name: Download the shards' records
+        if: ${{ needs.unit-plan.outputs.skip-green-key != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: skip-green-unit-a${{ github.run_attempt }}-*
+          path: .skip-green-shards
       - name: Record the green tests
         id: record
         if: ${{ needs.unit-plan.outputs.skip-green-key != '' }}
@@ -1425,6 +1435,8 @@ jobs:
           plan: .affected-plan/affected-plan.unit.json
           manifest: .skip-green/unit.json
           lane-result: ${{ needs.unit-tests.result }}
+          shard-records: .skip-green-shards
+          shard-total: ${{ needs.unit-plan.outputs.count }}
           head-sha: ${{ github.event.pull_request.head.sha }}
       - name: Save the green manifest
         if: ${{ steps.record.outputs.recorded == 'true' }}
@@ -2376,6 +2388,16 @@ jobs:
           key: green-integration-${{ needs.integration-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-${{ github.run_id }}
           restore-keys: |
             green-integration-${{ needs.integration-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-
+      # FUT-4563: a green lane records only what each shard's own JUnit
+      # showed RUNNING (the shard records), never the plan's whole list — a
+      # planned file the runner did not collect exits 0 as well.
+      - name: Download the shards' records
+        if: ${{ needs.integration-plan.outputs.skip-green-key != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: skip-green-integration-a${{ github.run_attempt }}-*
+          path: .skip-green-shards
       - name: Record the green tests
         id: record
         if: ${{ needs.integration-plan.outputs.skip-green-key != '' }}
@@ -2386,6 +2408,8 @@ jobs:
           plan: .affected-plan/affected-plan.integration.json
           manifest: .skip-green/integration.json
           lane-result: ${{ needs.integration-tests.result }}
+          shard-records: .skip-green-shards
+          shard-total: ${{ needs.integration-plan.outputs.count }}
           head-sha: ${{ github.event.pull_request.head.sha }}
       - name: Save the green manifest
         if: ${{ steps.record.outputs.recorded == 'true' }}
