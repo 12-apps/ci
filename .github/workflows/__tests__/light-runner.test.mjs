@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { jobsOf } from "./job-timeouts.test.mjs";
@@ -103,12 +103,12 @@ for (const [file, light] of LIGHT_JOBS) {
 }
 
 test("no workflow outside the list reads light-runner", () => {
-  const all = ["monorepo-static", "monorepo-tests", "cost-report", "conflict-overlap", "conflict-probe", "post-merge-regen",
-    "commitlint", "conflict-report", "quality", "mcp-contract", "package-gates", "nextjs-prod-smoke", "lane-timings-refresh"];
-  for (const name of all) {
-    const file = `${name}.yml`;
+  const files = readdirSync(new URL("../", import.meta.url)).filter((f) => /\.ya?ml$/.test(f));
+  assert.ok(files.length >= 30, `the sweep reads the workflows directory, saw ${files.length}`);
+  for (const file of files) {
     const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
-    if (!LIGHT_JOBS.has(file)) assert.doesNotMatch(source, /light-runner/, file);
+    // The input itself, read or declared; self-test.yml names the suite file, which is not.
+    if (!LIGHT_JOBS.has(file)) assert.doesNotMatch(source, /inputs\.light-runner|^ {6}light-runner:/m, file);
   }
 });
 

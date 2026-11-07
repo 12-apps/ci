@@ -293,8 +293,10 @@ optional and its absence is today's behaviour:
 - `WEBHOOK_SECRET_PARAMETER=<SSM name>`: the scaler reads its webhook secret
   from an SSM SecureString at run time instead of carrying it in its
   configuration. The webhook is created by hand (below), so the secret is made
-  once by its owner and never passes through a deploy's checkout or a refresh's
-  log.
+  once by its owner and is never stored in a deploy's checkout or the
+  function's environment. A deploy still reads it once to sign its test ping,
+  and that passes it to `openssl dgst -hmac` on a command line, as the main
+  fleet's deploy already does with its secret file.
 - Pruning keeps the image every OTHER fleet template launches, so the main
   fleet's deploy never deletes the image the light pool still runs.
 - `refresh-image.sh` with `LIGHT_FUNCTION_NAME` (the workflow's

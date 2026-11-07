@@ -45,7 +45,7 @@ const RECORDED = ["AMI_ID", "FUNCTION_NAME", "RUNNER_LABEL", "REPOSITORY", "REGI
   "SLOTS_PER_HOST", "SETTLE_SECONDS", "TOKEN_PARAMETER", "IDLE_MINUTES", "PNPM_STORE", "ROOT_THROUGHPUT", "HOST_LABELS",
   "WEBHOOK_SECRET_PARAMETER", "CREATE_WEBHOOK", "POOL_SIZE"];
 
-function refresh({ env = {}, lightLambda = light, failOn = [] } = {}) {
+function refresh({ env = {}, lightLambda = light, failOn = [], lightLabels = "future-pay-ci-light" } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), "refresh-light-"));
   const kit = path.join(dir, "wake");
   spawnSync("mkdir", ["-p", kit]);
@@ -59,7 +59,7 @@ require("fs").appendFileSync(${JSON.stringify(deploys)}, JSON.stringify(o)+"\\n"
   writeFileSync(path.join(dir, "main.json"), JSON.stringify(main));
   writeFileSync(path.join(dir, "light.json"), JSON.stringify(lightLambda));
   writeFileSync(path.join(dir, "main-lt.json"), JSON.stringify(template("", 250)));
-  writeFileSync(path.join(dir, "light-lt.json"), JSON.stringify(template("future-pay-ci-light", 125)));
+  writeFileSync(path.join(dir, "light-lt.json"), JSON.stringify(template(lightLabels, 125)));
   const calls = path.join(dir, "calls.log");
   writeFileSync(path.join(dir, "aws"), `#!/usr/bin/env bash
 echo "$*" >> "${calls}"
@@ -137,13 +137,14 @@ test("the light scaler is read before any host starts, and a failure there launc
   assert.deepEqual(failed.deploys, []);
 });
 
-for (const [why, env, lightLambda, message] of [
+for (const [why, env, lightLambda, message, lightTemplate] of [
   ["names the main scaler", { LIGHT_FUNCTION_NAME: "ci-runner-scale" }, light, /LIGHT_FUNCTION_NAME is ci-runner-scale itself/],
   ["scales the main label", { LIGHT_FUNCTION_NAME: "ci-runner-scale-light" }, { ...light, RUNNER_LABEL: "future-pay-ci" }, /scales 'future-pay-ci', not a fleet of its own/],
+  ["registers its hosts under the image's labels (no HOST_LABELS)", { LIGHT_FUNCTION_NAME: "ci-runner-scale-light" }, light, /hosts register as 'the image labels, no HOST_LABELS', not future-pay-ci-light; redeploy it with HOST_LABELS=future-pay-ci-light/, "no-labels"],
   ["has a settle out of range", { LIGHT_FUNCTION_NAME: "ci-runner-scale-light" }, { ...light, SETTLE_SECONDS: "120" }, /live SETTLE_SECONDS '120' is outside 0 to 90/],
 ]) {
   test(`a light scaler that ${why} stops the run before any host starts`, () => {
-    const r = refresh({ env, lightLambda });
+    const r = refresh({ env, lightLambda, lightLabels: lightTemplate === "no-labels" ? "" : undefined });
     assert.equal(r.status, 64);
     assert.match(r.stderr, message);
     assert.ok(!r.log.some((l) => l.includes("run-instances")));

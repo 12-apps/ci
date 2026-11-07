@@ -39,9 +39,12 @@ on:
       light-runner:
         description: >-
           Runner label for this workflow's short jobs only: the Unit and Integration Plan, Signal and Verdict jobs.
-          They run for seconds and install nothing, so a consumer with a
-          fleet can send them to a pool of small hosts (scripts/runner-host,
-          a light pool). Empty (the default) runs them where every other job
+          They run for seconds and run no install, build or test suite of
+          their own, so a consumer with a fleet can send them to a pool of
+          small hosts (scripts/runner-host, a light pool).
+          The plans still run the caller's plan and fingerprint commands,
+          so a consumer that opts in must measure those on a light slot
+          (one vCPU) first. Empty (the default) runs them where every other job
           of this workflow runs, so a caller that passes nothing sees no
           change.
         type: string

@@ -230,6 +230,13 @@ if [[ -n "$light_fn" ]]; then
     "Name=instance-state-name,Values=pending,running,stopping,stopped" --no-paginate --query 'length(Reservations[].Instances[])')
   light_settings=$(node "$here/live-settings.mjs" "$work/light-env.json" "$work/light-template.json" "$light_pool" "$work/light-secret")
   light_settle=$(unset SETTLE_SECONDS; eval "$light_settings"; printf '%s' "${SETTLE_SECONDS:-}")
+  # A light pool deployed without HOST_LABELS registers its hosts under the
+  # image's own (main) label: redeploying it would keep feeding the main queue.
+  light_hosts=$(unset HOST_LABELS; eval "$light_settings"; printf '%s' "${HOST_LABELS:-}")
+  if [[ ",${light_hosts}," != *",${light_label},"* ]]; then
+    log "${light_fn}'s hosts register as '${light_hosts:-the image labels, no HOST_LABELS}', not ${light_label}; redeploy it with HOST_LABELS=${light_label}: nothing launched"
+    exit 64
+  fi
   if [[ -n "$light_settle" ]] && ! { [[ "$light_settle" =~ ^[0-9]{1,3}$ ]] && (( 10#$light_settle <= 90 )); }; then
     log "${light_fn}'s live SETTLE_SECONDS '${light_settle}' is outside 0 to 90: nothing launched"
     exit 64
