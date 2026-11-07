@@ -59,6 +59,15 @@ inputs:
       more wall-clock than it saves.
     required: false
     default: '40'
+  inputs-ref:
+    description: >-
+      The commit whose blobs the per-test input hashes read (FUT-4549): the
+      pull request HEAD, never the merge commit, so a merge to the default
+      branch the PR did not make retires no skip-green proof. Which files are
+      inputs is still decided on the checkout; a file only the checkout has is
+      left out. Empty reads the checkout's HEAD.
+    required: false
+    default: ''
   working-directory:
     description: 'Consumer checkout root.'
     required: false
@@ -108,9 +117,12 @@ runs:
       id: plan
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        INPUTS_REF: ${{ inputs.inputs-ref }}
       run: |
         set -euo pipefail
         node "$GITHUB_ACTION_PATH/plan.mjs" \
+          --inputs-ref "$INPUTS_REF" \
           --lane "${{ inputs.lane }}" \
           --base "${{ inputs.base }}" \
           --config "${{ inputs.config }}" \

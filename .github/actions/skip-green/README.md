@@ -15,7 +15,11 @@ inputs** is reported as skipped and does not run.
    inputs (`lanes.<lane>.skipGreen.globals` in the consumer's config — the
    lockfile, the workspace manifest, vitest configs, setup files, a database
    lane's migrations). Each file enters as `<mode> <blob sha> <path>` from
-   `git ls-tree`, so two trees with identical counted entries hash alike.
+   `git ls-tree` of the PULL REQUEST HEAD (`inputs-ref`, FUT-4549), never the
+   merge commit, so a merge to main the PR did not make retires no proof; a
+   file only the merge commit has (main's alone) is left out, and a main-only
+   break is the daily full run's to catch. Two trees with identical counted
+   entries hash alike.
    A test whose closure reaches an unresolvable import gets `null`: no hash,
    never skippable.
    A committed file the plan ROUTES to a suite (one it reads off disk with
