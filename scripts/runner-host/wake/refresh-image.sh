@@ -200,6 +200,12 @@ if [[ -n "${SETTLE_OVERRIDE:-}" ]]; then
   fi
   export SETTLE_SECONDS="$settle"
 fi
+# The value carried over must pass deploy.sh's own bound too, checked here so a
+# bad live value stops the run before ~50 minutes of golden and smoke hosts.
+if [[ -n "${SETTLE_SECONDS:-}" ]] && ! { [[ "$SETTLE_SECONDS" =~ ^[0-9]{1,3}$ ]] && (( 10#$SETTLE_SECONDS <= 90 )); }; then
+  log "the live SETTLE_SECONDS '${SETTLE_SECONDS}' is outside 0 to 90; pass settle_seconds to replace it: nothing launched"
+  exit 64
+fi
 
 # ── 1. golden ────────────────────────────────────────────────────────────────
 if [[ "$golden_base" == ubuntu ]]; then

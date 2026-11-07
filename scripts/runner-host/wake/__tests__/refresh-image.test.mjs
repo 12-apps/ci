@@ -386,3 +386,18 @@ test("SETTLE_OVERRIDE equal to the live settle says unchanged", () => {
   const { stderr } = runWithLambda(live, { SETTLE_OVERRIDE: "60" });
   assert.match(stderr, /settle: 60 \(SETTLE_OVERRIDE, unchanged\)/);
 });
+
+test("a live settle outside 0 to 90 stops a refresh with no override before any host starts", () => {
+  const live = { ...lambdaEnv, SETTLE_SECONDS: "120" };
+  const { status, stderr, log } = runWithLambda(live, { SETTLE_OVERRIDE: undefined });
+  assert.equal(status, 64);
+  assert.match(stderr, /the live SETTLE_SECONDS '120' is outside 0 to 90/);
+  assert.ok(!log.some((l) => l.includes("run-instances")), "no host launched");
+});
+
+test("an override replaces an out-of-range live settle", () => {
+  const live = { ...lambdaEnv, SETTLE_SECONDS: "120" };
+  const { stderr } = runWithLambda(live, { SETTLE_OVERRIDE: "60" });
+  assert.match(stderr, /settle: 120 -> 60 \(SETTLE_OVERRIDE\)/);
+  assert.doesNotMatch(stderr, /is outside 0 to 90/);
+});
