@@ -135,3 +135,21 @@ test("the real engine: monorepo-tests.yml's scope holds what its lanes run, and 
   }
   assert.ok(!scope.some((f) => f.startsWith(".github/actions/conflict-monitor/")), "an action the lanes never call");
 });
+
+test("FUT-4549 + FUT-4550: the scoped identity also reads the caller's workflows at the consumer ref", () => {
+  const caller = join(root, "caller-ref");
+  mkdirSync(join(caller, ".github/workflows"), { recursive: true });
+  const git = (...args) => execFileSync("git", args, { cwd: caller, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git("init", "-q");
+  writeFileSync(join(caller, ".github/workflows/ci.yml"), "v1\n");
+  git("add", ".");
+  git("-c", "user.name=f", "-c", "user.email=f@example.invalid", "commit", "-qm", "head");
+  const head = git("rev-parse", "HEAD");
+  writeFileSync(join(caller, ".github/workflows/ci.yml"), "v2 (main moved it)\n");
+  git("add", ".");
+  git("-c", "user.name=f", "-c", "user.email=f@example.invalid", "commit", "-qm", "merge-ish");
+  const options = { sourceRoot: central, consumerRoot: caller, env: {}, nodeVersion: "v24.1.0", platform: "linux", arch: "x64", workflow: "tests.yml" };
+  const atHead = executionIdentity({ ...options, consumerRef: head });
+  assert.notEqual(executionIdentity(options), atHead, "the checkout's workflows differ");
+  assert.equal(executionIdentity({ ...options, consumerRef: head }), atHead);
+});

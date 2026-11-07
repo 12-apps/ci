@@ -343,6 +343,12 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/skip-green-pr-head.test.mjs
 
+      # The green-manifest key reads the identity scoped to monorepo-tests.yml;
+      # the tree fingerprint keeps the whole-engine one (FUT-4550).
+      - name: skip-green scoped identity
+        shell: bash
+        run: node --test .github/workflows/__tests__/skip-green-scoped-identity.test.mjs
+
       # lane-verdict decides whether a whole job's install and work RUN. Its
       # key must refuse a push, a failing command and prose, and must move when
       # the lane's command or Node version moves; both directions are asserted.

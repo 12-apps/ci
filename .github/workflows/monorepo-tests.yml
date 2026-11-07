@@ -673,6 +673,12 @@ jobs:
           # retire a PR's per-test proofs. The tree fingerprint keeps the
           # merge-commit identity.
           consumer-ref: ${{ github.event.pull_request.head.sha }}
+          # The green manifest's key reads the identity of only what THIS
+          # workflow executes (FUT-4550): an engine change elsewhere — another
+          # workflow, an action the lanes never call, a test or a README —
+          # no longer retires every manifest on every open pull request. The
+          # lane verdict's fingerprint keeps the whole-engine identity.
+          scope-workflow: monorepo-tests.yml
       - name: Compute the affected test plan
         id: affected
         if: ${{ inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
@@ -709,7 +715,9 @@ jobs:
         shell: bash
         env:
           LANE_NODE: ${{ steps.verdict-node.outputs.node-version }}
-          EXECUTION_ID: ${{ steps.execution.outputs.head-identity }}
+          # The scoped identity (FUT-4550) with the caller's workflows read at
+          # the PR head (FUT-4549).
+          EXECUTION_ID: ${{ steps.execution.outputs.scoped-identity }}
           LANE_VARS: ${{ toJSON(vars) }}
           LANE_PRE: ${{ inputs.pre-test-command }}
           LANE_CMD: ${{ inputs.unit-test-command }}
@@ -717,7 +725,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$EXECUTION_ID" ] || [ -z "$LANE_NODE" ]; then
-            echo "::warning::execution identity unavailable — no green manifest will be reused."
+            echo "::warning::scoped execution identity unavailable — no green manifest will be reused."
             echo "value=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -1862,6 +1870,12 @@ jobs:
           # retire a PR's per-test proofs. The tree fingerprint keeps the
           # merge-commit identity.
           consumer-ref: ${{ github.event.pull_request.head.sha }}
+          # The green manifest's key reads the identity of only what THIS
+          # workflow executes (FUT-4550): an engine change elsewhere — another
+          # workflow, an action the lanes never call, a test or a README —
+          # no longer retires every manifest on every open pull request. The
+          # lane verdict's fingerprint keeps the whole-engine identity.
+          scope-workflow: monorepo-tests.yml
       - name: Compute the affected test plan
         id: affected
         if: ${{ inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
@@ -1888,7 +1902,9 @@ jobs:
         shell: bash
         env:
           LANE_NODE: ${{ steps.verdict-node.outputs.node-version }}
-          EXECUTION_ID: ${{ steps.execution.outputs.head-identity }}
+          # The scoped identity (FUT-4550) with the caller's workflows read at
+          # the PR head (FUT-4549).
+          EXECUTION_ID: ${{ steps.execution.outputs.scoped-identity }}
           LANE_VARS: ${{ toJSON(vars) }}
           LANE_PRE: ${{ inputs.pre-integration-command }}
           LANE_CMD: ${{ inputs.integration-command }}
@@ -1896,7 +1912,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$EXECUTION_ID" ] || [ -z "$LANE_NODE" ]; then
-            echo "::warning::execution identity unavailable — no green manifest will be reused."
+            echo "::warning::scoped execution identity unavailable — no green manifest will be reused."
             echo "value=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
