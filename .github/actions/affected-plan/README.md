@@ -597,6 +597,37 @@ An import passed straight to a call (`lazyRoute(import("./x"))`) loads eagerly
 and is never deferred, and neither is a wrapper the lane does not name. The
 plan's reasons mark each deferred hop: `(deferred — the test names …)`.
 
+### Declared computed imports (`declaredImports`)
+
+`lanes.<lane>.declaredImports` optionally declares what ONE computed
+`import()` or `require()` loads (FUT-4564). Undeclared, a computed import is a
+blind dependency: its file always runs, and every test whose closure reaches it
+gets no input hash, so `skip-green` can never skip it. In future-pay, one retry
+call (`packages/spa-shared/src/realtime/engine-import.ts:59`, `import(url)`,
+the same `./engine` module under a cache-busted URL) left 889 of 955 planned
+unit tests unhashable.
+
+```json
+"declaredImports": [
+  { "file": "packages/spa-shared/src/realtime/engine-import.ts", "line": 59,
+    "expression": "url", "targets": ["packages/spa-shared/src/realtime/engine.ts"] }
+]
+```
+
+A declaration is explicit and narrow:
+
+- **One call site.** It matches `file`, `line` AND `expression`: the call's
+  argument text, with comments and whitespace dropped (`/* @vite-ignore */
+  url` is `url`). Any other computed import, even in the same file, stays
+  blind until it has its own entry.
+- **Exact targets.** Repo paths the call may load, each an edge (`terminal` by
+  default; `"terminal": false` also follows the target's imports).
+- **Never stale.** The plan FAILS (`::error::… declaredImports problem(s)`)
+  when a declaration matches no computed import at its `file:line`, names a
+  missing target, or is malformed. A moved call site has to move its
+  declaration in the same pull request; nothing answers for code the
+  declaration was not written for.
+
 ### Keyed catalogs (`keyedCatalogs`)
 
 `lanes.<lane>.keyedCatalogs` optionally lists patterns (regex sources, OR-ed)

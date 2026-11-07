@@ -27,7 +27,7 @@ import { explainByChange, explainByTest } from "./lib/explain.mjs";
 import { gherkinFeatures } from "./lib/gherkin.mjs";
 import { globalInputs, INPUTS_VERSION, testInputs, treeIndex } from "./lib/inputs.mjs";
 import { fileKeys, keyedChange, keyPatterns, wiringOf } from "./lib/keys.mjs";
-import { buildGraph, listSourceFiles, loadPackages, stripComments } from "./lib/modules.mjs";
+import { buildGraph, checkDeclaredImports, listSourceFiles, loadPackages, stripComments } from "./lib/modules.mjs";
 import { entriesForMatches } from "./lib/occurrences.mjs";
 import { selectAffected } from "./lib/select.mjs";
 
@@ -486,6 +486,17 @@ const skipGreen = laneConfig.skipGreen;
 const inputRoutes = routes.filter((r) => r.match && r.entry).map((r) => ({ match: r.match, entries: r.entry }));
 let globals = [];
 let inputTree = null;
+// `lanes.<lane>.declaredImports` (FUT-4564): a declaration that no longer
+// matches its call site, or names a missing target, FAILS the plan — it must
+// never answer for a computed import it was not written for.
+const declaredImports = laneConfig.declaredImports ?? [];
+{
+  const problems = checkDeclaredImports(repoRoot, laneConfig.declaredImports);
+  if (problems.length > 0) {
+    console.error(`::error::affected-plan (${lane}): ${problems.length} declaredImports problem(s):\n${problems.map((p) => `  - ${p}`).join("\n")}`);
+    process.exit(1);
+  }
+}
 let globalGraph = { edges: new Map(), unresolved: [] };
 let globalState = { files: new Set(), blind: false };
 let selectionGlobals = [];
@@ -510,10 +521,10 @@ if (skipGreen || Object.hasOwn(laneConfig, "selectionGlobals")) {
     const roots = [...inputTree.keys()].filter((file) => globals.some((re) => re.test(file)));
     // buildGraph follows source dependencies beyond these roots; data files
     // are terminal inputs. Never bound this graph with isSource/sourceRoots.
-    globalGraph = buildGraph(repoRoot, roots, { packages: loadPackages(repoRoot, dirs), aliasesFor });
+    globalGraph = buildGraph(repoRoot, roots, { packages: loadPackages(repoRoot, dirs), aliasesFor, declaredImports });
     const selectionRoots = [...inputTree.keys()].filter((file) => selectionGlobals.some((re) => re.test(file)));
     selectionGraph = Object.hasOwn(laneConfig, "selectionGlobals")
-      ? buildGraph(repoRoot, selectionRoots, { packages: loadPackages(repoRoot, dirs), aliasesFor })
+      ? buildGraph(repoRoot, selectionRoots, { packages: loadPackages(repoRoot, dirs), aliasesFor, declaredImports })
       : globalGraph;
     globalState = globalInputs({
       edges: selectionGraph.edges,
@@ -558,6 +569,8 @@ const result = selectAffected({
   // `lanes.<lane>.keyedCatalogs`: patterns of the files whose objects are read
   // one key at a time (copy packs). See lib/catalogs.mjs.
   isCatalog: catalogPattern ? (f) => catalogPattern.test(f) : () => false,
+  // `lanes.<lane>.declaredImports` (FUT-4564), checked above.
+  declaredImports,
 });
 
 if (globalChanges.size > 0 && result.mode === "narrowed") {

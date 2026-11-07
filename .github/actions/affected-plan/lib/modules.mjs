@@ -348,7 +348,12 @@ export function parseImports(rawSource) {
     const literal = LITERAL_ARGUMENT.exec(source.slice(m.index + m[0].length));
     push(literal ? literal[2] : `<computed ${m[1]}>`, "", m.index, true);
     out[out.length - 1].dynamic = true;
-    if (!literal) out[out.length - 1].unbounded = true;
+    if (!literal) {
+      out[out.length - 1].unbounded = true;
+      // The argument's own text, comments and whitespace dropped — what a
+      // `declaredImports` entry must name exactly (FUT-4564).
+      out[out.length - 1].expression = callArgument(source, m.index + m[0].length);
+    }
     else if (m[1] === "import") Object.assign(out[out.length - 1], deferringCall(masked, m.index));
   }
   for (const m of inCode(GLOB_ACCESS)) {
@@ -567,6 +572,79 @@ export function listSourceFiles(repoRoot, roots) {
 }
 
 /**
+ * The text of a call's argument list, from just after its `(` to the matching
+ * `)`, with comments removed and whitespace collapsed. `null` past 400
+ * characters or with no closing paren: such a call is never declarable.
+ */
+export function callArgument(source, from) {
+  let depth = 1;
+  let i = from;
+  for (; i < source.length && i - from < 400; i++) {
+    const c = source[i];
+    if (c === "(") depth++;
+    else if (c === ")" && --depth === 0) break;
+  }
+  if (depth !== 0) return null;
+  return source.slice(from, i).replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * `lanes.<lane>.declaredImports` (FUT-4564): a computed `import()`/`require()`
+ * the parser cannot follow, declared by the consumer to load exactly the
+ * listed files. Without one, a computed import is a blind dependency and every
+ * test reaching its file is unhashable — never skippable.
+ *
+ * A declaration is EXPLICIT and NARROW: one file, one call site (its line AND
+ * its argument text, comments and whitespace dropped), and the exact repo
+ * paths it may load. It never covers another computed import, even in the same
+ * file: each needs its own entry. `checkDeclaredImports` refuses a declaration
+ * that no longer matches its call site (the line moved, the argument changed)
+ * or names a target that does not exist, so a stale declaration fails the plan
+ * instead of silently answering for code it never saw.
+ *
+ * @typedef {{ file: string, line: number, expression: string, targets: string[], terminal?: boolean }} DeclaredImport
+ */
+const declarationKey = (file, line, expression) => JSON.stringify([file, line, expression]);
+
+export function checkDeclaredImports(repoRoot, declarations) {
+  if (declarations === undefined) return [];
+  const problems = [];
+  if (!Array.isArray(declarations)) return ["declaredImports must be an array"];
+  const keys = new Set();
+  declarations.forEach((d, i) => {
+    const at = `declaredImports[${i}]`;
+    if (!d || typeof d.file !== "string" || !Number.isInteger(d.line) || typeof d.expression !== "string"
+      || !Array.isArray(d.targets) || d.targets.length === 0 || d.targets.some((t) => typeof t !== "string")) {
+      problems.push(`${at}: needs { file, line, expression, targets: [...] }`);
+      return;
+    }
+    const key = declarationKey(d.file, d.line, d.expression);
+    if (keys.has(key)) problems.push(`${at}: declares ${d.file}:${d.line} twice`);
+    keys.add(key);
+    let source;
+    try {
+      source = readFileSync(join(repoRoot, d.file), "utf8");
+    } catch {
+      problems.push(`${at}: ${d.file} cannot be read`);
+      return;
+    }
+    const calls = parseImports(source).filter((imp) => imp.unbounded && !imp.glob);
+    if (!calls.some((imp) => imp.line === d.line && imp.expression === d.expression)) {
+      const here = calls.map((imp) => `${imp.line}: ${imp.expression}`).join("; ") || "none";
+      problems.push(`${at}: no computed import \`${d.expression}\` at ${d.file}:${d.line} (computed imports there: ${here}) — move the declaration with the call, or remove it`);
+    }
+    for (const target of d.targets) {
+      try {
+        readFileSync(join(repoRoot, target));
+      } catch {
+        problems.push(`${at}: target ${target} does not exist`);
+      }
+    }
+  });
+  return problems;
+}
+
+/**
  * Build the import graph.
  *
  * @returns {{edges:Map<string,object[]>, unresolved:{file:string,spec:string,line:number}[]}}
@@ -576,6 +654,9 @@ export function listSourceFiles(repoRoot, roots) {
  *   data and asset targets stay terminal dependencies.
  */
 export function buildGraph(repoRoot, files, options = {}) {
+  const declared = new Map(
+    (Array.isArray(options.declaredImports) ? options.declaredImports : []).map((d) => [declarationKey(d.file, d.line, d.expression), d]),
+  );
   const edges = new Map();
   const unresolved = [];
   const globs = [];
@@ -601,6 +682,16 @@ export function buildGraph(repoRoot, files, options = {}) {
     }
     for (const imp of parseImports(source)) {
       if (imp.typeOnly) continue;
+      const declaration = imp.unbounded && !imp.glob ? declared.get(declarationKey(file, imp.line, imp.expression)) : null;
+      if (declaration) {
+        // A declared call site loads exactly its targets (FUT-4564).
+        const terminal = declaration.terminal !== false;
+        for (const target of declaration.targets) {
+          out.push({ ...imp, spec: target, target, declared: true, terminal });
+          if (!terminal && EXTENSIONS.includes(target.slice(target.lastIndexOf("."))) && !seen.has(target)) pending.push(target);
+        }
+        continue;
+      }
       if (imp.unbounded) {
         unresolved.push({ file, spec: imp.spec, line: imp.line, ...(imp.glob ? { glob: true } : {}) });
         continue;
