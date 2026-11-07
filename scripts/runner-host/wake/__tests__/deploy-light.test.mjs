@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,7 +17,7 @@ import { liveSettings } from "../live-settings.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const deployPath = path.join(here, "..", "deploy.sh");
-const deploy = spawnSync("cat", [deployPath], { encoding: "utf8" }).stdout;
+const deploy = readFileSync(deployPath, "utf8");
 
 function block(from, to) {
   const start = deploy.indexOf(from);
