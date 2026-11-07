@@ -85,7 +85,7 @@ test("counterexample (FUT-4563): a planned file the runner never COLLECTED is no
   notCollected.delete("c.test.ts");
   const { record, why } = shard({ junit: notCollected });
   assert.deepEqual(Object.keys(record.tests), ["a.test.ts"]);
-  assert.match(why, /1 planned file\(s\) its JUnit does not show running/);
+  assert.match(why, /passed: 1 recorded; 1 passed but unhashable \(not recordable\); 1 planned file\(s\) its JUnit does not show running/);
 });
 
 test("a file whose JUnit row ran nothing (all skipped) or holds a failure is not recorded", () => {
@@ -192,7 +192,11 @@ test("red shard, no unattributed error: its clean files are recorded, the failed
   assert.equal(record.passed, false);
   assert.deepEqual(record.tests, { "a.test.ts": H(1) }, "the clean file, at the plan's hash");
   assert.deepEqual(record.evict, ["b.test.ts", "c.test.ts"], "the failed one, and every file that did not run clean");
-  assert.match(why, /no unattributed error — recording its 1 clean file/);
+  assert.match(why, /1 passed and recorded; 0 passed but unhashable \(not recordable\); 2 evicted \(failed, or not run\)/);
+  // b ran clean but has no hash: neither recorded nor evicted, and counted apart.
+  const withB = shard({ outcome: "failure", junit: new Map([...junit, ["b.test.ts", { ran: 1, bad: 0 }]]), unattributed: null });
+  assert.deepEqual(withB.record.evict, ["c.test.ts"]);
+  assert.match(withB.why, /1 passed and recorded; 1 passed but unhashable \(not recordable\); 1 evicted/);
 });
 
 test("counterexample: red shard, a file --bail never reached has no JUnit row and is evicted, not recorded", () => {

@@ -175,19 +175,26 @@ export function unattributedFailure(logText) {
 function cleanFiles(list, plan, junit) {
   const planned = new Set(plan.tests);
   const tests = {};
+  const ranClean = new Set();
   let uncollected = 0;
+  let unhashable = 0;
   for (const test of list) {
+    const row = junitRow(junit, test);
+    const clean = Boolean(row && row.ran >= 1 && row.bad === 0);
+    if (clean) ranClean.add(test);
     if (!planned.has(test)) continue;
     const hash = plan.inputs[test];
-    if (!HASH_RE.test(String(hash))) continue;
-    const row = junitRow(junit, test);
-    if (!row || row.ran < 1 || row.bad > 0) {
+    if (!HASH_RE.test(String(hash))) {
+      if (clean) unhashable++;
+      continue;
+    }
+    if (!clean) {
       uncollected++;
       continue;
     }
     tests[test] = hash;
   }
-  return { tests, uncollected };
+  return { tests, ranClean, uncollected, unhashable };
 }
 
 /**
@@ -237,21 +244,27 @@ export function shardRecord({ lane, plan, leg, shard, shardTotal, outcome, headS
       };
     }
     const clean = cleanFiles(list, plan, junit);
-    const evict = [...new Set(list)].filter((t) => !(t in clean.tests));
+    // Evict what did not run clean (failed, or never reached). A file that ran
+    // clean but has no bounded hash is neither recorded nor evicted: it can
+    // hold no entry to begin with (affected-plan gave it `null`).
+    const evict = [...new Set(list)].filter((t) => !clean.ranClean.has(t));
     return {
       record: { ...base, passed: false, evict, tests: clean.tests },
-      why: `shard ${shard}/${shardTotal} FAILED with no unattributed error — recording its ${Object.keys(clean.tests).length} clean file(s), evicting the other ${evict.length}`,
+      why:
+        `shard ${shard}/${shardTotal} FAILED with no unattributed error — ${Object.keys(clean.tests).length} passed and recorded; ` +
+        `${clean.unhashable} passed but unhashable (not recordable); ${evict.length} evicted (failed, or not run)`,
     };
   }
 
   if (!(junit instanceof Map)) return none("no JUnit report could be read — which files ran is unknown, so nothing is recorded");
   if (!list) return none(`shard ${shard}/${shardTotal} was split by the runner, not by a leg list — which files it ran is unknown, so nothing is recorded`);
 
-  const { tests, uncollected } = cleanFiles(list, plan, junit);
+  const { tests, uncollected, unhashable } = cleanFiles(list, plan, junit);
   return {
     record: { ...base, passed: true, tests },
     why:
-      `shard ${shard}/${shardTotal} passed ${Object.keys(tests).length} recordable test file(s)` +
+      `shard ${shard}/${shardTotal} passed: ${Object.keys(tests).length} recorded` +
+      (unhashable ? `; ${unhashable} passed but unhashable (not recordable)` : "") +
       (uncollected ? `; ${uncollected} planned file(s) its JUnit does not show running — not recorded` : ""),
   };
 }
