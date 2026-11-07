@@ -11,22 +11,34 @@
  * manifest accumulates over the pull request, which is what lets push 3 skip
  * what push 1 proved even when push 2 did not select it.
  *
- * The one rule that matters: ONLY A GREEN LANE RECORDS. The caller passes the
- * lane's result and anything but `success` records nothing — a failed test
- * must never enter the manifest, and a cancelled run proved nothing. A test
- * with no hash (`null`: an unresolved import in its closure) is never recorded
- * either; there is no bounded claim to make about it.
+ * The one rule that matters: ONLY WHAT PASSED IS RECORDED. With shard records
+ * (`--shard-records`, what monorepo-tests.yml always passes since FUT-4563) a
+ * lane of ANY result records only the files a shard's JUnit showed running;
+ * the plan's whole list is never trusted, because a planned file the runner
+ * did not collect exits 0 too. Without them (an older caller), a lane whose
+ * result is `success` records every test it planned. A lane that FAILED or was
+ * CANCELLED records only what its green shards proved, and EVICTS what its red
+ * shards ran (FUT-4548, see `fromShards`): each shard
+ * whose own test step exited 0 wrote a shard record (`shard.mjs`) naming the
+ * files of its leg and their hashes, and `--shard-records` hands them here. A
+ * red shard writes no record, so no test of it — the failed one or the ones
+ * beside it — enters the manifest. A shard record is used only when it names
+ * THIS run, THIS head and THIS lane's inputs construction, and only for a test
+ * the plan handed the lane with the very hash the record carries. Any other
+ * result (`skipped`, empty) records nothing. A test with no hash (`null`: an
+ * unresolved import in its closure) is never recorded either; there is no
+ * bounded claim to make about it.
  *
  * Usage:
  *   node record.mjs --lane unit --plan affected-plan.unit.json \
  *     --manifest .skip-green/unit.json --lane-result success \
- *     --head-sha <sha> --run-id <id>
+ *     --head-sha <sha> --run-id <id> [--shard-records .skip-green-shards]
  *
  * Outputs (GITHUB_OUTPUT): recorded (true|false), entries, added
  */
 import { readFileSync } from "node:fs";
 
-import { MANIFEST_VERSION, appendOutputs, readManifest, writeManifest } from "./lib/manifest.mjs";
+import { MANIFEST_VERSION, SHARD_RECORD_VERSION, appendOutputs, readManifest, readShardRecords, writeManifest } from "./lib/manifest.mjs";
 
 const argv = process.argv.slice(2);
 const arg = (name, fallback = null) => {
@@ -40,10 +52,18 @@ const arg = (name, fallback = null) => {
  *
  * @returns {{ manifest: object|null, added: number, why: string }}
  */
-export function nextManifest({ lane, plan, previous, laneResult, headSha, runId }) {
-  if (laneResult !== "success") return { manifest: null, added: 0, why: `lane result is ${JSON.stringify(laneResult)} — a manifest records only what a green lane proved` };
+export function nextManifest({ lane, plan, previous, laneResult, headSha, runId, shardRecords = null, shardTotal = null }) {
+  const partial = laneResult === "failure" || laneResult === "cancelled";
+  // FUT-4563: with shard records, EVERY result — success included — records
+  // only what a shard's JUnit showed running, never the plan's whole list. The
+  // plan-wide branch below is kept for a caller that passes no records.
+  const fromRecords = Array.isArray(shardRecords) && (partial || laneResult === "success");
+  if (laneResult !== "success" && !fromRecords) {
+    return { manifest: null, added: 0, why: `lane result is ${JSON.stringify(laneResult)} — a manifest records only what a green lane, or a green shard of it, proved` };
+  }
   if (!plan || !plan.inputs || typeof plan.inputs !== "object") return { manifest: null, added: 0, why: "plan carries no test inputs — nothing to record" };
   if (!/^[0-9a-f]{7,40}$/.test(String(headSha))) return { manifest: null, added: 0, why: `head sha ${JSON.stringify(headSha)} is not a sha — nothing to record` };
+  if (fromRecords) return fromShards({ lane, plan, previous, laneResult, headSha, runId, shardRecords, shardTotal });
 
   const entries = { ...(previous?.entries ?? {}) };
   let added = 0;
@@ -60,6 +80,97 @@ export function nextManifest({ lane, plan, previous, laneResult, headSha, runId 
     manifest: { version: MANIFEST_VERSION, lane, inputs: plan.inputsVersion ?? null, entries },
     added,
     why: `${added} entr${added === 1 ? "y" : "ies"} added or refreshed, ${Object.keys(entries).length} in the manifest`,
+  };
+}
+
+/**
+ * A failed or cancelled lane: merge what its green shards proved, and EVICT
+ * what its red shards ran.
+ *
+ * Eviction first, and it wins: a test whose shard failed in this run loses its
+ * entry, whatever earlier head earned it, so its next run is a real one. That
+ * is what keeps a proof from going stale while the test's own inputs stand
+ * still — green at one head, red now because of something the hash does not
+ * see. Evicted are:
+ *   - every file a red shard's record names (`evict`, or `"*"`: all planned);
+ *   - on a FAILED lane, the leg of every shard that left NO green record (it
+ *     timed out, died before its tests, or its record was lost) — from the
+ *     plan's own `legs`, or every planned test when the plan was not sized.
+ * A cancelled lane evicts only what a red shard named: a shard the newer push
+ * cut off proved nothing either way.
+ *
+ * A record is used only when it names THIS run, THIS head, THIS lane and its
+ * inputs construction; a green one only for a test the plan handed the lane,
+ * with the very hash the plan carries.
+ */
+function fromShards({ lane, plan, previous, laneResult, headSha, runId, shardRecords, shardTotal }) {
+  const planned = new Set(plan.tests ?? []);
+  const fits = (record) =>
+    record?.version === SHARD_RECORD_VERSION &&
+    record.lane === lane &&
+    (record.inputs ?? null) === (plan.inputsVersion ?? null) &&
+    String(record.run) === String(runId) &&
+    record.sha === headSha;
+  const usable = shardRecords.filter(fits);
+  const refused = shardRecords.length - usable.length;
+  const green = usable.filter((r) => r.passed === true && r.tests && typeof r.tests === "object");
+  const red = usable.filter((r) => r.passed === false);
+  // A red shard with no unattributed error also names its CLEAN files (FUT-4548).
+  const named = [...green, ...red.filter((r) => r.tests && typeof r.tests === "object")];
+
+  const evict = new Set();
+  let evictAll = false;
+  for (const r of red) {
+    if (r.evict === "*") evictAll = true;
+    else if (Array.isArray(r.evict)) for (const t of r.evict) evict.add(t);
+  }
+  let silent = 0;
+  if (laneResult === "failure") {
+    const legs = Array.isArray(plan.legs) && plan.legs.every(Array.isArray) ? plan.legs : null;
+    const total = legs ? legs.length : Number(shardTotal);
+    const greenShards = new Set(green.map((r) => String(r.shard)));
+    const redShards = new Set(red.map((r) => String(r.shard)));
+    if (!Number.isInteger(total) || total < 1) evictAll = true;
+    else {
+      for (let n = 1; n <= total; n++) {
+        if (greenShards.has(String(n)) || redShards.has(String(n))) continue;
+        silent++;
+        if (legs) for (const t of legs[n - 1]) evict.add(t);
+        else evictAll = true;
+      }
+    }
+  }
+  if (evictAll) for (const t of planned) evict.add(t);
+
+  const entries = { ...(previous?.entries ?? {}) };
+  let evicted = 0;
+  for (const t of evict) {
+    if (entries[t]) {
+      delete entries[t];
+      evicted++;
+    }
+  }
+  let added = 0;
+  for (const record of named) {
+    for (const [test, hash] of Object.entries(record.tests)) {
+      // The plan's own hash, never the record's alone: a record is evidence
+      // that THIS test ran with THIS hash in THIS run, nothing wider.
+      if (evict.has(test) || !planned.has(test) || !plan.inputs[test] || plan.inputs[test] !== hash) continue;
+      const before = entries[test];
+      entries[test] = { hash, sha: headSha, run: String(runId) };
+      if (!before || before.hash !== hash) added++;
+    }
+  }
+  const tail =
+    `${green.length} green and ${red.length} red shard record(s) of a ${laneResult} lane` +
+    (silent ? `, ${silent} shard(s) with no record` : "") +
+    (refused ? `, ${refused} refused (another run, head, lane or inputs construction)` : "");
+  if (added === 0 && evicted === 0 && named.length === 0) return { manifest: null, added: 0, evicted: 0, why: `${tail} — nothing recorded, nothing to evict` };
+  return {
+    manifest: { version: MANIFEST_VERSION, lane, inputs: plan.inputsVersion ?? null, entries },
+    added,
+    evicted,
+    why: `${tail}: ${added} entr${added === 1 ? "y" : "ies"} added or refreshed, ${evicted} evicted, ${Object.keys(entries).length} in the manifest`,
   };
 }
 
@@ -84,7 +195,14 @@ function main() {
   }
   const { manifest: previous, why: previousWhy } = readManifest(manifestPath, lane, plan?.inputsVersion);
   console.log(`[skip-green] ${lane}: previous manifest — ${previousWhy}`);
-  const { manifest, added, why } = nextManifest({ lane, plan, previous, laneResult, headSha, runId });
+  const shardDir = arg("shard-records", "");
+  let shardRecords = null;
+  if (shardDir) {
+    const read = readShardRecords(shardDir, lane);
+    shardRecords = read.records;
+    console.log(`[skip-green] ${lane}: ${read.why}`);
+  }
+  const { manifest, added, why } = nextManifest({ lane, plan, previous, laneResult, headSha, runId, shardRecords, shardTotal: arg("shard-total", "") });
   console.log(`[skip-green] ${lane}: ${why}`);
   if (!manifest) {
     appendOutputs({ recorded: "false", entries: Object.keys(previous?.entries ?? {}).length, added: 0 });

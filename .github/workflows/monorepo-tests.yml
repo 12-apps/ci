@@ -1202,6 +1202,7 @@ jobs:
       # slice is arithmetic, not a selector bug. Above one shard the guard
       # moves to `unit-signal` below, which asserts the MERGED total.
       - name: Verify the unit lane executed at least one test
+        id: unit-signal-guard
         if: >-
           ${{ inputs.unit-junit-reports != ''
               && needs.unit-plan.outputs.count == 1
@@ -1217,6 +1218,56 @@ jobs:
       # contract is space-separated, hence the translation; `error` on no files
       # keeps the guard's fail-closed posture — a misconfigured report path
       # fails the shard loudly rather than starving the aggregate quietly.
+      # ── What THIS shard proved, per test (skip-green, FUT-4548) ──────────
+      # The lane-level record below runs only when EVERY shard passed, so one
+      # red shard — or a run cancelled by the next push — used to throw the
+      # green shards' proof away and the next push re-ran all of it. A shard
+      # whose own test step exited 0 (and whose single-shard zero-test guard
+      # did not fail) writes the hashes of ITS OWN list; one whose test step
+      # FAILED writes an eviction of its whole list instead; `unit-green-shards`
+      # merges them only when the lane did not pass. `always()` so a shard that
+      # finished keeps its record when the run is cancelled after it. No test
+      # of a red shard is ever recorded green.
+      - name: Record what this shard proved
+        id: green-shard
+        continue-on-error: true
+        if: >-
+          ${{ always()
+              && needs.unit-plan.outputs.skip-green-key != ''
+              && (steps.unit.outcome == 'success' || steps.unit.outcome == 'failure') }}
+        uses: 12-apps/ci/.github/actions/skip-green@v2
+        with:
+          mode: shard
+          lane: unit
+          plan: .affected-plan/affected-plan.unit.json
+          leg: ${{ steps.leg.outputs.file }}
+          shard: ${{ matrix.shard }}
+          shard-total: ${{ needs.unit-plan.outputs.count }}
+          # A green test step whose zero-test guard failed proved nothing:
+          # `no-signal` writes no record either way.
+          outcome: ${{ steps.unit-signal-guard.outcome == 'failure' && 'no-signal' || steps.unit.outcome }}
+          reports: ${{ inputs.unit-junit-reports }}
+          # The test step tees here; a red shard reads it for errors JUnit
+          # cannot pin on a file before it trusts its clean rows.
+          log: unit.log
+          out: .skip-green-shard/unit-s${{ matrix.shard }}.json
+          head-sha: ${{ github.event.pull_request.head.sha }}
+      # Never a reason for the shard to fail: a record that does not arrive
+      # is a shard with no record, which the merge treats as unproven.
+      # `include-hidden-files`: upload-artifact skips dot-directories by
+      # default, which uploaded nothing and reddened every green shard of
+      # probe run 42367830028.
+      - name: Upload this shard's green record
+        if: ${{ always() && steps.green-shard.outputs.written == 'true' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: skip-green-unit-a${{ github.run_attempt }}-s${{ matrix.shard }}
+          path: .skip-green-shard
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Stage JUnit reports for the signal job
         id: unit-junit-paths
         if: >-
@@ -1367,6 +1418,16 @@ jobs:
           key: green-unit-${{ needs.unit-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-${{ github.run_id }}
           restore-keys: |
             green-unit-${{ needs.unit-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-
+      # FUT-4563: a green lane records only what each shard's own JUnit
+      # showed RUNNING (the shard records), never the plan's whole list — a
+      # planned file the runner did not collect exits 0 as well.
+      - name: Download the shards' records
+        if: ${{ needs.unit-plan.outputs.skip-green-key != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: skip-green-unit-a${{ github.run_attempt }}-*
+          path: .skip-green-shards
       - name: Record the green tests
         id: record
         if: ${{ needs.unit-plan.outputs.skip-green-key != '' }}
@@ -1377,6 +1438,72 @@ jobs:
           plan: .affected-plan/affected-plan.unit.json
           manifest: .skip-green/unit.json
           lane-result: ${{ needs.unit-tests.result }}
+          shard-records: .skip-green-shards
+          shard-total: ${{ needs.unit-plan.outputs.count }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+      - name: Save the green manifest
+        if: ${{ steps.record.outputs.recorded == 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .skip-green
+          key: green-unit-${{ needs.unit-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-${{ github.run_id }}
+
+  # ── A lane that did NOT pass still keeps what its green shards proved ────────
+  # (skip-green, FUT-4548.) `unit-verdict` records only a lane whose every
+  # shard passed. This job is its complement and runs only when it cannot: the
+  # matrix FAILED or was CANCELLED. It merges the records the green shards
+  # uploaded (`Record what this shard proved`) into the PR's manifest, under
+  # the same run-scoped key, and EVICTS the entries of every test a red shard
+  # ran — and, on a failed lane, of every shard that left no record — so a
+  # test green at an earlier head and red now is never skipped on that proof. Gated on `always`, not `!cancelled`: the run a newer
+  # push cancels is exactly the one whose green shards are worth keeping, and
+  # what is merged was written by shards that had already finished green. The
+  # lane verdict (the tree fingerprint) is never written here.
+  unit-green-shards:
+    name: Unit Green Shards
+    runs-on: ${{ inputs.light-runner || inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 10
+    needs: [unit-plan, unit-tests]
+    if: >-
+      ${{ always()
+          && github.event_name == 'pull_request'
+          && needs.unit-plan.result == 'success'
+          && needs.unit-plan.outputs.skip-green-key != ''
+          && (needs.unit-tests.result == 'failure' || needs.unit-tests.result == 'cancelled') }}
+    steps:
+      - name: Download the plan this lane ran
+        uses: actions/download-artifact@v4
+        with:
+          name: affected-plan-unit
+          path: .affected-plan
+      # No green shard means no artifact; that is "nothing to merge", not an
+      # error, and the record step says so.
+      - name: Download the green shards' records
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: skip-green-unit-a${{ github.run_attempt }}-*
+          path: .skip-green-shards
+      - name: Restore the green manifest
+        uses: actions/cache/restore@v4
+        with:
+          path: .skip-green
+          key: green-unit-${{ needs.unit-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-${{ github.run_id }}
+          restore-keys: |
+            green-unit-${{ needs.unit-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-
+      - name: Merge the green shards into the manifest
+        id: record
+        uses: 12-apps/ci/.github/actions/skip-green@v2
+        with:
+          mode: record
+          lane: unit
+          plan: .affected-plan/affected-plan.unit.json
+          manifest: .skip-green/unit.json
+          lane-result: ${{ needs.unit-tests.result }}
+          shard-records: .skip-green-shards
+          shard-total: ${{ needs.unit-plan.outputs.count }}
           head-sha: ${{ github.event.pull_request.head.sha }}
       - name: Save the green manifest
         if: ${{ steps.record.outputs.recorded == 'true' }}
@@ -2083,6 +2210,7 @@ jobs:
       # shard the guard is `integration-signal` below, which asserts the
       # MERGED total across every shard's shipped reports instead.
       - name: Verify the integration lane executed at least one test
+        id: integration-signal-guard
         if: >-
           ${{ inputs.integration-junit-reports != ''
               && needs.integration-plan.outputs.count == 1
@@ -2095,6 +2223,56 @@ jobs:
 
       # Sharded runs ship each leg's reports to the post-matrix signal job —
       # same mechanics and rationale as the unit lane's copy of these steps.
+      # ── What THIS shard proved, per test (skip-green, FUT-4548) ──────────
+      # The lane-level record below runs only when EVERY shard passed, so one
+      # red shard — or a run cancelled by the next push — used to throw the
+      # green shards' proof away and the next push re-ran all of it. A shard
+      # whose own test step exited 0 (and whose single-shard zero-test guard
+      # did not fail) writes the hashes of ITS OWN list; one whose test step
+      # FAILED writes an eviction of its whole list instead; `integration-green-shards`
+      # merges them only when the lane did not pass. `always()` so a shard that
+      # finished keeps its record when the run is cancelled after it. No test
+      # of a red shard is ever recorded green.
+      - name: Record what this shard proved
+        id: green-shard
+        continue-on-error: true
+        if: >-
+          ${{ always()
+              && needs.integration-plan.outputs.skip-green-key != ''
+              && (steps.integration.outcome == 'success' || steps.integration.outcome == 'failure') }}
+        uses: 12-apps/ci/.github/actions/skip-green@v2
+        with:
+          mode: shard
+          lane: integration
+          plan: .affected-plan/affected-plan.integration.json
+          leg: ${{ steps.leg.outputs.file }}
+          shard: ${{ matrix.shard }}
+          shard-total: ${{ needs.integration-plan.outputs.count }}
+          # A green test step whose zero-test guard failed proved nothing:
+          # `no-signal` writes no record either way.
+          outcome: ${{ steps.integration-signal-guard.outcome == 'failure' && 'no-signal' || steps.integration.outcome }}
+          reports: ${{ inputs.integration-junit-reports }}
+          # The test step tees here; a red shard reads it for errors JUnit
+          # cannot pin on a file before it trusts its clean rows.
+          log: integration.log
+          out: .skip-green-shard/integration-s${{ matrix.shard }}.json
+          head-sha: ${{ github.event.pull_request.head.sha }}
+      # Never a reason for the shard to fail: a record that does not arrive
+      # is a shard with no record, which the merge treats as unproven.
+      # `include-hidden-files`: upload-artifact skips dot-directories by
+      # default, which uploaded nothing and reddened every green shard of
+      # probe run 42367830028.
+      - name: Upload this shard's green record
+        if: ${{ always() && steps.green-shard.outputs.written == 'true' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: skip-green-integration-a${{ github.run_attempt }}-s${{ matrix.shard }}
+          path: .skip-green-shard
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Stage JUnit reports for the signal job
         id: int-junit-paths
         if: >-
@@ -2216,6 +2394,16 @@ jobs:
           key: green-integration-${{ needs.integration-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-${{ github.run_id }}
           restore-keys: |
             green-integration-${{ needs.integration-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-
+      # FUT-4563: a green lane records only what each shard's own JUnit
+      # showed RUNNING (the shard records), never the plan's whole list — a
+      # planned file the runner did not collect exits 0 as well.
+      - name: Download the shards' records
+        if: ${{ needs.integration-plan.outputs.skip-green-key != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: skip-green-integration-a${{ github.run_attempt }}-*
+          path: .skip-green-shards
       - name: Record the green tests
         id: record
         if: ${{ needs.integration-plan.outputs.skip-green-key != '' }}
@@ -2226,6 +2414,72 @@ jobs:
           plan: .affected-plan/affected-plan.integration.json
           manifest: .skip-green/integration.json
           lane-result: ${{ needs.integration-tests.result }}
+          shard-records: .skip-green-shards
+          shard-total: ${{ needs.integration-plan.outputs.count }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+      - name: Save the green manifest
+        if: ${{ steps.record.outputs.recorded == 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .skip-green
+          key: green-integration-${{ needs.integration-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-${{ github.run_id }}
+
+  # ── A lane that did NOT pass still keeps what its green shards proved ────────
+  # (skip-green, FUT-4548.) `integration-verdict` records only a lane whose every
+  # shard passed. This job is its complement and runs only when it cannot: the
+  # matrix FAILED or was CANCELLED. It merges the records the green shards
+  # uploaded (`Record what this shard proved`) into the PR's manifest, under
+  # the same run-scoped key, and EVICTS the entries of every test a red shard
+  # ran — and, on a failed lane, of every shard that left no record — so a
+  # test green at an earlier head and red now is never skipped on that proof. Gated on `always`, not `!cancelled`: the run a newer
+  # push cancels is exactly the one whose green shards are worth keeping, and
+  # what is merged was written by shards that had already finished green. The
+  # lane verdict (the tree fingerprint) is never written here.
+  integration-green-shards:
+    name: Integration Green Shards
+    runs-on: ${{ inputs.light-runner || inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 10
+    needs: [integration-plan, integration-tests]
+    if: >-
+      ${{ always()
+          && github.event_name == 'pull_request'
+          && needs.integration-plan.result == 'success'
+          && needs.integration-plan.outputs.skip-green-key != ''
+          && (needs.integration-tests.result == 'failure' || needs.integration-tests.result == 'cancelled') }}
+    steps:
+      - name: Download the plan this lane ran
+        uses: actions/download-artifact@v4
+        with:
+          name: affected-plan-integration
+          path: .affected-plan
+      # No green shard means no artifact; that is "nothing to merge", not an
+      # error, and the record step says so.
+      - name: Download the green shards' records
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: skip-green-integration-a${{ github.run_attempt }}-*
+          path: .skip-green-shards
+      - name: Restore the green manifest
+        uses: actions/cache/restore@v4
+        with:
+          path: .skip-green
+          key: green-integration-${{ needs.integration-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-${{ github.run_id }}
+          restore-keys: |
+            green-integration-${{ needs.integration-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-
+      - name: Merge the green shards into the manifest
+        id: record
+        uses: 12-apps/ci/.github/actions/skip-green@v2
+        with:
+          mode: record
+          lane: integration
+          plan: .affected-plan/affected-plan.integration.json
+          manifest: .skip-green/integration.json
+          lane-result: ${{ needs.integration-tests.result }}
+          shard-records: .skip-green-shards
+          shard-total: ${{ needs.integration-plan.outputs.count }}
           head-sha: ${{ github.event.pull_request.head.sha }}
       - name: Save the green manifest
         if: ${{ steps.record.outputs.recorded == 'true' }}

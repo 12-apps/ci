@@ -18,8 +18,8 @@
  * ran. A corrupt manifest therefore skips nothing and is then rewritten from
  * scratch by the next green run.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 /**
  * v2 (2026-09-30): the manifest names the INPUTS version its hashes were made
@@ -69,6 +69,52 @@ export function readManifest(path, lane, inputsVersion) {
     entries[test] = { hash: entry.hash, sha: entry.sha, run: String(entry.run ?? "") };
   }
   return { manifest: { version: MANIFEST_VERSION, lane, inputs: parsed.inputs ?? null, entries }, why: `${Object.keys(entries).length} recorded test(s)` };
+}
+
+/**
+ * One SHARD's claim (FUT-4548), written by `shard.mjs` and merged by
+ * `record.mjs` when the LANE did not pass: `passed: true` with `tests` ("every
+ * file of my list passed with these hashes"), or `passed: false` with `evict`
+ * ("my test step failed: forget these files' entries"). Its own version, so a
+ * shard record can never be read as a manifest or the other way round.
+ */
+export const SHARD_RECORD_VERSION = "green-shard-v1";
+
+/**
+ * Every well-formed shard record under `dir` (recursive), for this lane. A
+ * malformed file is dropped on its own; it costs its shard's tests a skip,
+ * never another shard's.
+ *
+ * @returns {{ records: object[], why: string }}
+ */
+export function readShardRecords(dir, lane) {
+  if (!dir || !existsSync(dir)) return { records: [], why: "no shard records — no shard passed, or none uploaded" };
+  const records = [];
+  let dropped = 0;
+  const visit = (path) => {
+    if (statSync(path).isDirectory()) {
+      for (const name of readdirSync(path).sort()) visit(join(path, name));
+      return;
+    }
+    if (!path.endsWith(".json")) return;
+    try {
+      const parsed = JSON.parse(readFileSync(path, "utf8"));
+      const shaped =
+        parsed?.passed === true ? !!parsed.tests && typeof parsed.tests === "object"
+        : parsed?.passed === false
+          ? (parsed.evict === "*" || Array.isArray(parsed.evict)) && (parsed.tests === undefined || (!!parsed.tests && typeof parsed.tests === "object"))
+        : false;
+      if (parsed?.version !== SHARD_RECORD_VERSION || parsed.lane !== lane || !shaped) {
+        dropped++;
+        return;
+      }
+      records.push(parsed);
+    } catch {
+      dropped++;
+    }
+  };
+  visit(dir);
+  return { records, why: `${records.length} shard record(s)${dropped ? `, ${dropped} unusable file(s) dropped` : ""}` };
 }
 
 export function writeManifest(path, manifest) {
