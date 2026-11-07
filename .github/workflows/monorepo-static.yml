@@ -218,6 +218,22 @@ on:
         type: string
         required: false
         default: ''
+      lint-command:
+        description: >-
+          OPT-IN. Shell run IN PLACE OF `pnpm turbo run lint --affected` on a
+          pull request whose selection base resolved — for a consumer that
+          lints the files the pull request changed rather than whole packages.
+          It runs after the install, with `SELECTION_BASE` (the stack base or
+          the base sha) and `PR_HEAD_SHA` (the pull request's own head, the
+          merge checkout's second parent) in its environment, and its exit
+          status is the lane's. It owns its own fallback to the whole tree
+          (a lint config or toolchain change). Off a pull request, or with no
+          resolved base, the lane still runs `pnpm turbo run lint`: the
+          default branch and the daily run always lint everything. Empty
+          (default) keeps `pnpm turbo run lint --affected`.
+        type: string
+        required: false
+        default: ''
       type-check-fingerprint-command:
         description: >-
           OPT-IN. Shell that prints a hex hash of every tracked path that can
@@ -838,6 +854,7 @@ jobs:
             selection=turbo-affected-v1
             base=${{ steps.selection.outputs.base-sha }}
             merge-base=${{ steps.selection.outputs.merge-base }}
+            lint-command=${{ inputs.lint-command }}
             pnpm turbo run lint --affected
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
@@ -890,12 +907,18 @@ jobs:
         shell: bash
         env:
           SELECTION_BASE: ${{ steps.selection.outputs.base-sha }}
-        # PR: --affected lints only the packages the diff touched (plus
-        # dependents). Push (safety net): everything — --affected against the
-        # branch's own tip would diff empty and lint nothing.
+          LINT_COMMAND: ${{ inputs.lint-command }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        # PR: the caller's `lint-command` when it gave one (it lints what the
+        # pull request changed), else --affected, which lints only the
+        # packages the diff touched (plus dependents). Push (safety net):
+        # everything — --affected against the branch's own tip would diff
+        # empty and lint nothing, and `lint-command` is never read.
         run: |
           set -o pipefail
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "$SELECTION_BASE" ]; then
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "$SELECTION_BASE" ] && [ -n "$LINT_COMMAND" ]; then
+            bash -e -o pipefail -c "$LINT_COMMAND" 2>&1 | tee lint.log
+          elif [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "$SELECTION_BASE" ]; then
             pnpm turbo run lint --affected 2>&1 | tee lint.log
           else
             pnpm turbo run lint 2>&1 | tee lint.log
