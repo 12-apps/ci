@@ -20,9 +20,11 @@
  * A shard split by vitest's own `--shard=i/n` cannot name which files it ran,
  * so it records NOTHING — never a guess.
  *
- * And it holds only when the shard ran something: with JUnit reports given, a
- * shard whose reports hold zero test cases proved nothing and records nothing
- * (the per-shard echo of the zero-test guard).
+ * And it names only what the shard's own JUnit shows RAN (FUT-4563): a file
+ * with at least one executed test case and no failure or error. A planned file
+ * the runner never collected — outside its `include`, "No test files found",
+ * exit 0 — is not recorded, whatever the exit code says. No readable JUnit,
+ * no green record.
  *
  * A shard whose test step FAILED writes the opposite claim: evict every file
  * of its list from the manifest (see `shardRecord`). None of its tests — the
@@ -32,13 +34,14 @@
  *   node shard.mjs --lane unit --plan .affected-plan/affected-plan.unit.json \
  *     --leg .affected-plan/leg.txt --shard 3 --shard-total 6 --outcome success \
  *     --head-sha <sha> --run-id <id> --out .skip-green-shard/unit.json \
- *     [--reports "<junit file or dir> …"]
+ *     --reports "<junit file or dir> …"
  *
  * Outputs (GITHUB_OUTPUT): written (true|false), tests
  */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 
+import { junitPrefix } from "../lane-timings/lib/reports.mjs";
 import { SHARD_RECORD_VERSION, appendOutputs, writeManifest } from "./lib/manifest.mjs";
 
 const argv = process.argv.slice(2);
@@ -50,23 +53,54 @@ const arg = (name, fallback = null) => {
 const SHA_RE = /^[0-9a-f]{7,40}$/;
 const HASH_RE = /^[0-9a-f]{64}$/;
 
-/** Test cases across JUnit files and directories (recursive); `null` when none is readable. */
-export function countTestCases(paths) {
-  let files = 0;
-  let cases = 0;
+const ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+const decode = (v) => v.replace(/&(amp|lt|gt|quot|apos);/g, (_, e) => ENTITIES[e]);
+const attr = (tag, name) => {
+  const m = new RegExp(`\\s${name}="([^"]*)"`).exec(tag);
+  return m ? decode(m[1]) : null;
+};
+
+/**
+ * What this shard's JUnit says RAN, per test file (FUT-4563): `Map<repo path,
+ * { ran, bad }>`, or `null` when no report could be read at all.
+ *
+ * One vitest `<testsuite>` per file, `name` relative to the vitest root that
+ * ran it, prefixed with where the report sits (lane-timings' `junitPrefix`:
+ * `apps/web/reports/junit/unit/x.xml` → `apps/web/`). `ran` counts test cases
+ * that executed (tests − skipped); `bad` counts failures and errors. A file the
+ * plan named but the runner never collected (outside its `include`, "No test
+ * files found", exit 0) has NO row — which is the whole point: it is never
+ * recorded green. A report with no file attribution (node:test's) contributes
+ * nothing.
+ */
+export function junitFiles(paths, cwd = process.cwd()) {
+  const files = new Map();
+  let reports = 0;
+  const read = (path) => {
+    const text = readFileSync(path, "utf8");
+    reports++;
+    const prefix = junitPrefix(relative(cwd, path));
+    for (const m of text.matchAll(/<testsuite\s[^>]*>/g)) {
+      const name = attr(m[0], "name");
+      const tests = Number(attr(m[0], "tests"));
+      if (!name || !Number.isFinite(tests)) continue;
+      const skipped = Number(attr(m[0], "skipped")) || 0;
+      const bad = (Number(attr(m[0], "failures")) || 0) + (Number(attr(m[0], "errors")) || 0);
+      const key = `${prefix}${name}`;
+      const prev = files.get(key) ?? { ran: 0, bad: 0 };
+      files.set(key, { ran: prev.ran + Math.max(0, tests - skipped), bad: prev.bad + bad });
+    }
+  };
   const visit = (path) => {
     if (!existsSync(path)) return;
-    const stat = statSync(path);
-    if (stat.isDirectory()) {
+    if (statSync(path).isDirectory()) {
       for (const name of readdirSync(path).sort()) visit(join(path, name));
       return;
     }
-    if (!/\.xml$/i.test(path)) return;
-    files++;
-    cases += (readFileSync(path, "utf8").match(/<testcase\b/g) ?? []).length;
+    if (/\.xml$/i.test(path)) read(path);
   };
-  for (const path of paths) visit(path);
-  return files === 0 ? null : cases;
+  for (const path of paths) visit(isAbsolute(path) ? path : join(cwd, path));
+  return reports === 0 ? null : files;
 }
 
 /**
@@ -88,10 +122,10 @@ export function countTestCases(paths) {
  *
  * @param {object} o
  * @param {string[]|null} o.leg  this leg's file list, or null when the lane was not sized
- * @param {number|null} o.testCases  JUnit test cases this shard reported; null when no reports were asked for
+ * @param {Map<string,{ran:number,bad:number}>|null} o.junit  what this shard's JUnit says ran (`junitFiles`); null when none was read
  * @returns {{ record: object|null, why: string }}
  */
-export function shardRecord({ lane, plan, leg, shard, shardTotal, outcome, headSha, runId, reportsAsked, testCases }) {
+export function shardRecord({ lane, plan, leg, shard, shardTotal, outcome, headSha, runId, junit }) {
   const none = (why) => ({ record: null, why });
   if (outcome !== "success" && outcome !== "failure") return none(`the shard's test step is ${JSON.stringify(outcome)} — no claim either way`);
   if (!plan || !plan.inputs || typeof plan.inputs !== "object") return none("plan carries no test inputs — nothing to record");
@@ -112,22 +146,33 @@ export function shardRecord({ lane, plan, leg, shard, shardTotal, outcome, headS
     };
   }
 
-  if (reportsAsked && !(testCases > 0)) return none(`the shard's JUnit reports hold ${testCases ?? "no readable"} test case(s) — it proved nothing`);
+  if (!(junit instanceof Map)) return none("no JUnit report could be read — which files ran is unknown, so nothing is recorded");
   if (!list) return none(`shard ${shard}/${shardTotal} was split by the runner, not by a leg list — which files it ran is unknown, so nothing is recorded`);
 
   const planned = new Set(plan.tests);
   const tests = {};
+  let uncollected = 0;
   for (const test of list) {
     // Only a file the plan handed the lane, with a bounded hash: a leg line
     // the plan does not hold is not a claim this run can make.
     if (!planned.has(test)) continue;
     const hash = plan.inputs[test];
     if (!HASH_RE.test(String(hash))) continue;
+    // FUT-4563: only a file this shard's JUnit shows RUNNING, at least one test
+    // case and none failed or errored. A planned file the runner never
+    // collected exits 0 with "No test files found" — and has no row here.
+    const row = junit.get(test);
+    if (!row || row.ran < 1 || row.bad > 0) {
+      uncollected++;
+      continue;
+    }
     tests[test] = hash;
   }
   return {
     record: { ...base, passed: true, tests },
-    why: `shard ${shard}/${shardTotal} passed ${Object.keys(tests).length} recordable test file(s)`,
+    why:
+      `shard ${shard}/${shardTotal} passed ${Object.keys(tests).length} recordable test file(s)` +
+      (uncollected ? `; ${uncollected} planned file(s) its JUnit does not show running — not recorded` : ""),
   };
 }
 
@@ -168,8 +213,7 @@ function main() {
     outcome: arg("outcome", ""),
     headSha: arg("head-sha", ""),
     runId: arg("run-id", process.env.GITHUB_RUN_ID ?? ""),
-    reportsAsked: reports.length > 0,
-    testCases: reports.length > 0 ? countTestCases(reports) : null,
+    junit: reports.length > 0 ? junitFiles(reports) : null,
   });
   console.log(`[skip-green] ${lane}: ${why}`);
   if (!record || (record.passed && Object.keys(record.tests).length === 0)) {
