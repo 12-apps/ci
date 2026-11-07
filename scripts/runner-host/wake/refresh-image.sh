@@ -23,7 +23,8 @@
 #      Node in the tool cache and the slot units must all be there. A failure
 #      here deploys nothing;
 #   3. deploy.sh with AMI_ID and the fleet's live settings (live-settings.mjs:
-#      budget, regions, idle minutes, pnpm store, and the webhook secret, so a
+#      budget, regions, idle minutes, settle seconds, pnpm store, and the
+#      webhook secret, so a
 #      refresh never rotates it), which copies the image to every region,
 #      points the templates at it and prunes the old images.
 #
@@ -184,11 +185,20 @@ log "live settings: regions ${REGIONS}, budget ${DAILY_BUDGET}, idle ${IDLE_MINU
 # SETTLE_OVERRIDE replaces the scaler's live SETTLE_SECONDS (the wait before a
 # launch, scale.mjs). A refresh otherwise carries the live value over, so this
 # is the one reviewed way to change it: the next deploys keep what this one set.
-# Refused before anything is launched unless it is a whole number of seconds.
+# Refused before anything is launched unless it is a whole number of seconds
+# from 0 to 90: the scaler sleeps the settle INSIDE its invocation (scale.mjs)
+# and deploy.sh gives it a 120 s timeout, so a settle near that never launches
+# anything and, holding the settle claim, stops every other evaluation too.
 if [[ -n "${SETTLE_OVERRIDE:-}" ]]; then
-  [[ "$SETTLE_OVERRIDE" =~ ^[0-9]+$ ]] || { log "SETTLE_OVERRIDE must be a whole number of seconds, got '${SETTLE_OVERRIDE}': nothing launched"; exit 64; }
-  log "settle: ${SETTLE_SECONDS:-default} -> ${SETTLE_OVERRIDE} (SETTLE_OVERRIDE)"
-  export SETTLE_SECONDS="$SETTLE_OVERRIDE"
+  [[ "$SETTLE_OVERRIDE" =~ ^[0-9]{1,3}$ ]] && (( 10#$SETTLE_OVERRIDE <= 90 )) \
+    || { log "SETTLE_OVERRIDE must be a whole number of seconds from 0 to 90 (the scaler's timeout is 120 s), got '${SETTLE_OVERRIDE}': nothing launched"; exit 64; }
+  settle=$(( 10#$SETTLE_OVERRIDE ))
+  if [[ "$settle" == "${SETTLE_SECONDS:-}" ]]; then
+    log "settle: ${settle} (SETTLE_OVERRIDE, unchanged)"
+  else
+    log "settle: ${SETTLE_SECONDS:-default} -> ${settle} (SETTLE_OVERRIDE)"
+  fi
+  export SETTLE_SECONDS="$settle"
 fi
 
 # ── 1. golden ────────────────────────────────────────────────────────────────

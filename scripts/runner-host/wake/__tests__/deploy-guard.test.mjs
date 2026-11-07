@@ -67,3 +67,16 @@ test("ALLOW_STALE=1 skips the check", () => {
   assert.doesNotMatch(r.stderr, /behind origin\/main/);
   assert.match(r.stderr, /AWS_REGION/);
 });
+
+// FUT-4539: the scaler sleeps the settle inside an invocation with a 120 s
+// timeout, so a settle near that never launches; deploy.sh refuses it before
+// touching AWS, whoever calls it (a refresh, or a hand deploy).
+const fleet = { ALLOW_STALE: "1", AWS_REGION: "us-east-1", REPOSITORY: "o/r", RUNNER_LABEL: "l", FUNCTION_NAME: "f" };
+for (const bad of ["91", "120", "abc", "-5"]) {
+  test(`SETTLE_SECONDS=${bad} stops the deploy before any AWS call`, () => {
+    const r = run(deploy, { ...fleet, SETTLE_SECONDS: bad });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /SETTLE_SECONDS must be a whole number from 0 to 90/);
+  });
+}
+

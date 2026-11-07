@@ -80,6 +80,9 @@ alert_param="${ALERT_PARAMETER:-/ci-runner/budget-alert}"
 spot_strategy="${SPOT_STRATEGY:-capacity-optimized}"
 idle_minutes="${IDLE_MINUTES:-2}"
 settle_seconds="${SETTLE_SECONDS:-30}"
+# The scaler sleeps the settle inside an invocation with a 120 s timeout (below):
+# a settle near that never launches, so a value over 90 stops the deploy.
+[[ "$settle_seconds" =~ ^[0-9]{1,3}$ ]] && (( 10#$settle_seconds <= 90 )) || { echo "deploy: SETTLE_SECONDS must be a whole number from 0 to 90, got '${settle_seconds}'" >&2; exit 1; }
 pnpm_store="${PNPM_STORE:-off}"
 [[ "$pnpm_store" == on || "$pnpm_store" == off ]] || { echo "deploy: PNPM_STORE must be on or off" >&2; exit 1; }
 # Boot-time settings, applied to the image's /etc/ci-runner/env by cloud-init's
