@@ -75,7 +75,7 @@ test("counterexample: a declaration that no longer matches its call site, or nam
   assert.match(moved[0], /no computed import `url` at src\/loader\.mjs:3 \(computed imports there: 2: url\)/);
   assert.match(checkDeclaredImports(repo, [{ ...DECL, expression: "other" }])[0], /no computed import `other`/);
   assert.match(checkDeclaredImports(repo, [{ ...DECL, targets: ["src/gone.mjs"] }])[0], /target src\/gone\.mjs does not exist/);
-  assert.match(checkDeclaredImports(repo, [{ file: "src/loader.mjs", line: 2 }])[0], /needs \{ file, line, expression, targets/);
+  assert.match(checkDeclaredImports(repo, [{ file: "src/loader.mjs", line: 2 }])[0], /needs \{ file, line, expression \} and exactly one of targets/);
   assert.match(checkDeclaredImports(repo, [{ ...DECL, targets: [] }])[0], /needs/);
   assert.match(checkDeclaredImports(repo, [DECL, DECL])[0], /twice/);
   assert.match(checkDeclaredImports(repo, "nope")[0], /must be an array/);

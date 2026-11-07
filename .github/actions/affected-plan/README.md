@@ -628,6 +628,21 @@ A declaration is explicit and narrow:
   declaration in the same pull request; nothing answers for code the
   declaration was not written for.
 
+**External call sites.** An entry may name `"external": "<package>"` instead
+of `targets` when the call loads only files of an INSTALLED package, such as a
+published package's own lazy chunks, which a clean checkout does not have:
+
+```json
+{ "file": "apps/admin/src/pages/kitchen/fluxos/__tests__/card-editor-harness.tsx",
+  "line": 873, "expression": "path.join(dir, file)", "external": "@12-apps/ui" }
+```
+
+It adds no edge and leaves nothing blind. The package's bytes enter every hash
+through the lockfile. So the plan refuses it unless the lane's
+`skipGreen.globals` cover the repository's lockfile (otherwise a package bump
+would move no hash), and unless the package is a dependency (any kind) of the
+declaring file's own workspace `package.json`.
+
 ### Keyed catalogs (`keyedCatalogs`)
 
 `lanes.<lane>.keyedCatalogs` optionally lists patterns (regex sources, OR-ed)
