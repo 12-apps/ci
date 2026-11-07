@@ -719,6 +719,73 @@ jobs:
             echo "Download it from this run's artifacts, then open it on an Android phone."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # ── The certificate the APK was signed with, for developer verification ─
+      #
+      # Android's developer verification registers a package name together with
+      # the SHA-256 of the certificate that signs it, and the person registering
+      # it needs that value in front of them. It is read from the APK this job
+      # PRODUCED, with `apksigner verify --print-certs`, not from the keystore:
+      # what is printed is what shipped, and `verify` fails the step if the
+      # signature does not check out. The format is the one the Console and
+      # `keytool -printcert` use: uppercase hex pairs joined by colons.
+      #
+      # A debug-signed APK says so instead. The universal debug certificate is
+      # shared by every unconfigured build, so it cannot be registered to one app.
+      #
+      # `apksigner` and `aapt2` are build-tools, which Gradle has already fetched
+      # by now; the newest installed one is used. Neither being found fails the
+      # step: a summary that silently omits the fingerprint is the failure this
+      # exists to prevent.
+      - name: Print the signing certificate fingerprint
+        env:
+          APK: ${{ steps.assemble.outputs.apk }}
+          SIGNED: ${{ steps.signing.outputs.signed }}
+        working-directory: ${{ inputs.app-path }}/android
+        run: |
+          set -euo pipefail
+          test -s "$APK" || { echo "No APK at $APK to read a signature from." >&2; exit 1; }
+
+          tool() {
+            local found
+            found=$(command -v "$1" || true)
+            if [ -z "$found" ]; then
+              found=$(ls -d "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/nonexistent}}"/build-tools/*/"$1" 2>/dev/null | sort -V | tail -n 1 || true)
+            fi
+            printf '%s' "$found"
+          }
+          APKSIGNER=$(tool apksigner)
+          if [ -z "$APKSIGNER" ]; then
+            echo "apksigner not found on PATH or under \$ANDROID_HOME/build-tools." >&2
+            exit 1
+          fi
+          AAPT2=$(tool aapt2)
+          PACKAGE=unknown
+          if [ -n "$AAPT2" ]; then PACKAGE=$("$AAPT2" dump packagename "$APK" 2>/dev/null || echo unknown); fi
+
+          CERTS=$("$APKSIGNER" verify --print-certs "$APK")
+          # One `Signer #n certificate SHA-256 digest: <64 hex>` line per signer;
+          # reformatted to uppercase, colon-separated pairs.
+          DIGESTS=$(printf '%s\n' "$CERTS" | sed -n 's/^Signer #[0-9]* certificate SHA-256 digest: *\([0-9a-fA-F]\{64\}\) *$/\1/p')
+          if [ -z "$DIGESTS" ]; then
+            echo "apksigner printed no certificate SHA-256 digest for $APK:" >&2
+            printf '%s\n' "$CERTS" >&2
+            exit 1
+          fi
+
+          {
+            echo "### Signing certificate"
+            echo ""
+            if [ "${SIGNED:-}" = "true" ]; then
+              echo "Package \`${PACKAGE}\`, signed with the repo keystore. Register this SHA-256 in the Android Developer Console:"
+              echo ""
+              while read -r d; do
+                printf '%s\n' "$d" | tr 'a-f' 'A-F' | sed 's/../&:/g; s/:$//' | sed 's/^/- `/; s/$/`/'
+              done <<< "$DIGESTS"
+            else
+              echo "Package \`${PACKAGE}\` is **debug-signed** with the universal Android debug certificate: it cannot be registered with the Android Developer Console."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # What ccache did for THIS build, read from its own counters: on a warm
       # cache most compilations are hits, and a run of misses means the key or
       # the compiler changed. Reported, never enforced: a cold cache is a slow
