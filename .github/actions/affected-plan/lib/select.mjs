@@ -184,6 +184,7 @@ export function selectAffected(options) {
     calls = [],
     deferredCalls = [],
     isCatalog = () => false,
+    declaredImports = [],
   } = options;
 
   // A glob observes membership as well as exported symbols. Discover it
@@ -191,7 +192,7 @@ export function selectAffected(options) {
   const diff = [...changed, ...deleted];
   const packages = loadPackages(repoRoot, workspaceDirs);
   const files = listSourceFiles(repoRoot, roots);
-  const { edges, unresolved, globs } = buildGraph(repoRoot, files, { packages, aliasesFor });
+  const { edges, unresolved, globs } = buildGraph(repoRoot, files, { packages, aliasesFor, declaredImports });
   const globSources = new Map();
   const globChanged = new Set();
   for (const glob of globs) {
