@@ -106,8 +106,9 @@ test("every write is gated off pull requests", () => {
 // ---------------------------------------------------------------------------
 // FUT-4538: a caller may skip the Build job's pull-request RESTORE.
 //
-// future-pay measured 169 of 175 PR Build restores reusing nothing, at a
-// median ~100 s download against a ~50 s build. `build-turbo-restore: false`
+// future-pay measured 169 of 175 nonempty PR Build restores reusing nothing
+// (42 h sample, its experiment 32), at a median ~100 s download against a
+// ~50 s build. `build-turbo-restore: false`
 // drops that download on pull requests only. Three regressions would all be
 // green: a default that flips (every consumer silently loses its warm PR
 // builds), the input leaking off pull requests (the default branch builds

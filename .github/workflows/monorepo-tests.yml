@@ -212,8 +212,9 @@ on:
           Restore the Build job's `.turbo` archive (prefix `turbo-build-`) on
           a PULL REQUEST. Default true: today's behaviour. false skips only the
           pull-request restore, for a consumer whose PR builds measurably reuse
-          nothing from the default branch's archive (future-pay: 169 of 175 PR
-          restores with zero reuse, a ~100 s download against a ~50 s build).
+          nothing from the default branch's archive (future-pay: 169 of 175
+          nonempty PR restores with zero reuse, in a 42 h sample, its
+          experiment 32; a ~100 s download against a ~50 s build).
           Off a pull request the restore always runs, and the save is never
           affected: the default branch keeps writing its warm entry. Turbo's
           own content hashes decide the build's outputs, so the build's result
