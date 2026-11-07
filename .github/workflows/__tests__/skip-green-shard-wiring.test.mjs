@@ -55,6 +55,11 @@ for (const lane of ["unit", "integration"]) {
     const s = step(shards, "Upload this shard's green record");
     assert.match(s, /if: \$\{\{ always\(\) && steps\.green-shard\.outputs\.written == 'true' \}\}/);
     assert.match(s, new RegExp(`name: skip-green-${lane}-a\\$\\{\\{ github\\.run_attempt \\}\\}-s\\$\\{\\{ matrix\\.shard \\}\\}`));
+    // The record lives in a dot-directory, which upload-artifact skips by default.
+    assert.match(s, /include-hidden-files: true/);
+    // Skip-green bookkeeping never fails a shard.
+    assert.match(s, /continue-on-error: true/);
+    assert.match(step(shards, "Record what this shard proved"), /continue-on-error: true/);
   });
 
   test(`${lane}-green-shards: runs only for a FAILED or CANCELLED lane, after the matrix, on a pull request`, () => {

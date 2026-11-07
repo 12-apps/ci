@@ -1230,6 +1230,7 @@ jobs:
       # of a red shard is ever recorded green.
       - name: Record what this shard proved
         id: green-shard
+        continue-on-error: true
         if: >-
           ${{ always()
               && needs.unit-plan.outputs.skip-green-key != ''
@@ -1248,12 +1249,19 @@ jobs:
           reports: ${{ inputs.unit-junit-reports }}
           out: .skip-green-shard/unit-s${{ matrix.shard }}.json
           head-sha: ${{ github.event.pull_request.head.sha }}
+      # Never a reason for the shard to fail: a record that does not arrive
+      # is a shard with no record, which the merge treats as unproven.
+      # `include-hidden-files`: upload-artifact skips dot-directories by
+      # default, which uploaded nothing and reddened every green shard of
+      # probe run 42367830028.
       - name: Upload this shard's green record
         if: ${{ always() && steps.green-shard.outputs.written == 'true' }}
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: skip-green-unit-a${{ github.run_attempt }}-s${{ matrix.shard }}
           path: .skip-green-shard
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
 
@@ -2212,6 +2220,7 @@ jobs:
       # of a red shard is ever recorded green.
       - name: Record what this shard proved
         id: green-shard
+        continue-on-error: true
         if: >-
           ${{ always()
               && needs.integration-plan.outputs.skip-green-key != ''
@@ -2230,12 +2239,19 @@ jobs:
           reports: ${{ inputs.integration-junit-reports }}
           out: .skip-green-shard/integration-s${{ matrix.shard }}.json
           head-sha: ${{ github.event.pull_request.head.sha }}
+      # Never a reason for the shard to fail: a record that does not arrive
+      # is a shard with no record, which the merge treats as unproven.
+      # `include-hidden-files`: upload-artifact skips dot-directories by
+      # default, which uploaded nothing and reddened every green shard of
+      # probe run 42367830028.
       - name: Upload this shard's green record
         if: ${{ always() && steps.green-shard.outputs.written == 'true' }}
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: skip-green-integration-a${{ github.run_attempt }}-s${{ matrix.shard }}
           path: .skip-green-shard
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
 
