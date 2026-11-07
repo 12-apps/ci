@@ -495,7 +495,9 @@ let inputTree = null;
 // never answer for a computed import it was not written for.
 const declaredImports = laneConfig.declaredImports ?? [];
 {
-  const problems = checkDeclaredImports(repoRoot, laneConfig.declaredImports);
+  const problems = checkDeclaredImports(repoRoot, laneConfig.declaredImports, {
+    globals: (laneConfig.skipGreen?.globals ?? []).map((source) => new RegExp(source)),
+  });
   if (problems.length > 0) {
     console.error(`::error::affected-plan (${lane}): ${problems.length} declaredImports problem(s):\n${problems.map((p) => `  - ${p}`).join("\n")}`);
     process.exit(1);

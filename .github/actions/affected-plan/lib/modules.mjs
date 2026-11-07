@@ -602,20 +602,61 @@ export function callArgument(source, from) {
  * or names a target that does not exist, so a stale declaration fails the plan
  * instead of silently answering for code it never saw.
  *
- * @typedef {{ file: string, line: number, expression: string, targets: string[], terminal?: boolean }} DeclaredImport
+ * An entry may instead name `external: "<package>"` (no `targets`): the call
+ * loads only files of that INSTALLED package (a published package's own lazy
+ * chunks, which the clean checkout does not have). It adds no edge and leaves
+ * nothing blind; the package's bytes are an input through the lockfile. So it
+ * is refused unless the lane's skip-green globals cover the repository's
+ * lockfile, and unless the package is a dependency (any kind) of the declaring
+ * file's own workspace `package.json`.
+ *
+ * @typedef {{ file: string, line: number, expression: string, targets?: string[], external?: string, terminal?: boolean }} DeclaredImport
  */
+const PACKAGE_NAME = /^(@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*$/;
+const LOCKFILES = ["pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lockb", "bun.lock"];
+
+/** The nearest `package.json` above `file` (repo-relative), parsed; null at the root without one. */
+function workspaceManifest(repoRoot, file) {
+  let dir = dirname(file);
+  for (;;) {
+    try {
+      return { path: dir === "." ? "package.json" : `${dir}/package.json`, json: JSON.parse(readFileSync(join(repoRoot, dir, "package.json"), "utf8")) };
+    } catch {
+      if (dir === "." || dir === "" || dir === "/") return null;
+      dir = dirname(dir);
+    }
+  }
+}
+
+function externalProblems(repoRoot, d, at, globals) {
+  const problems = [];
+  if (!PACKAGE_NAME.test(d.external)) problems.push(`${at}: external ${JSON.stringify(d.external)} is not a package name`);
+  const lockfile = LOCKFILES.find((f) => existsSync(join(repoRoot, f)));
+  if (!lockfile) problems.push(`${at}: external needs a lockfile at the repository root, whose bytes stand for the package's`);
+  else if (!globals.some((re) => re.test(lockfile))) {
+    problems.push(`${at}: external ${d.external} is unsound here — the lane's skipGreen.globals do not cover ${lockfile}, so a bump of the package would not move any hash`);
+  }
+  const manifest = workspaceManifest(repoRoot, d.file);
+  const deps = manifest ? ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"].flatMap((k) => Object.keys(manifest.json[k] ?? {})) : [];
+  if (!deps.includes(d.external)) {
+    problems.push(`${at}: ${d.external} is not a dependency of ${manifest ? manifest.path : "any package.json"} — an external call site must load a package its own workspace declares`);
+  }
+  return problems;
+}
 const declarationKey = (file, line, expression) => JSON.stringify([file, line, expression]);
 
-export function checkDeclaredImports(repoRoot, declarations) {
+export function checkDeclaredImports(repoRoot, declarations, { globals = [] } = {}) {
   if (declarations === undefined) return [];
   const problems = [];
   if (!Array.isArray(declarations)) return ["declaredImports must be an array"];
   const keys = new Set();
   declarations.forEach((d, i) => {
     const at = `declaredImports[${i}]`;
+    const hasTargets = Array.isArray(d?.targets) && d.targets.length > 0 && d.targets.every((t) => typeof t === "string");
+    const hasExternal = typeof d?.external === "string";
     if (!d || typeof d.file !== "string" || !Number.isInteger(d.line) || typeof d.expression !== "string"
-      || !Array.isArray(d.targets) || d.targets.length === 0 || d.targets.some((t) => typeof t !== "string")) {
-      problems.push(`${at}: needs { file, line, expression, targets: [...] }`);
+      || hasTargets === hasExternal || (d.targets !== undefined && !hasTargets)) {
+      problems.push(`${at}: needs { file, line, expression } and exactly one of targets: [...] or external: "<package>"`);
       return;
     }
     const key = declarationKey(d.file, d.line, d.expression);
@@ -633,7 +674,8 @@ export function checkDeclaredImports(repoRoot, declarations) {
       const here = calls.map((imp) => `${imp.line}: ${imp.expression}`).join("; ") || "none";
       problems.push(`${at}: no computed import \`${d.expression}\` at ${d.file}:${d.line} (computed imports there: ${here}) — move the declaration with the call, or remove it`);
     }
-    for (const target of d.targets) {
+    if (hasExternal) problems.push(...externalProblems(repoRoot, d, at, globals));
+    for (const target of d.targets ?? []) {
       try {
         readFileSync(join(repoRoot, target));
       } catch {
@@ -684,9 +726,11 @@ export function buildGraph(repoRoot, files, options = {}) {
       if (imp.typeOnly) continue;
       const declaration = imp.unbounded && !imp.glob ? declared.get(declarationKey(file, imp.line, imp.expression)) : null;
       if (declaration) {
-        // A declared call site loads exactly its targets (FUT-4564).
+        // A declared call site loads exactly its targets (FUT-4564); an
+        // external one loads only an installed package's files, which the
+        // lockfile global stands for: no edge, nothing blind.
         const terminal = declaration.terminal !== false;
-        for (const target of declaration.targets) {
+        for (const target of declaration.targets ?? []) {
           out.push({ ...imp, spec: target, target, declared: true, terminal });
           if (!terminal && EXTENSIONS.includes(target.slice(target.lastIndexOf("."))) && !seen.has(target)) pending.push(target);
         }
