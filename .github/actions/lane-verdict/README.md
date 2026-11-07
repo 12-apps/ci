@@ -108,3 +108,15 @@ has not yet been measured on hosted or self-hosted Actions runners.
 The job still reports `success`, and its dependents run as they would after a
 real pass — which is the point, and also the claim: only a run that passed
 every step ever writes the key.
+
+## Head identity (FUT-4549)
+
+`mode: identity` with `consumer-ref: <sha>` also emits `head-identity`: the
+same identity, with the caller's `.github/workflows` read at that commit
+instead of the checkout. On a pull request the checkout is the merge commit,
+so a workflow change on the default branch moved `execution-identity` and
+retired every skip-green manifest on every open PR. `monorepo-tests.yml`
+passes the PR head and keys the green manifests on `head-identity`. The tree
+fingerprints keep `execution-identity`. A ref that is neither `HEAD` nor a sha
+is refused, and an unreadable one emits an empty identity, so nothing is
+reused. Pinned by `__tests__/head-identity.test.mjs`.

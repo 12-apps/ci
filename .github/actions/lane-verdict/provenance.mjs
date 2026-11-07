@@ -40,14 +40,21 @@ export function executionIdentity({
   nodeVersion = process.version,
   platform = process.platform,
   arch = process.arch,
+  // FUT-4549: which commit's `.github/workflows` the identity folds in. `HEAD`
+  // (the default) is the checkout — on a pull request, the MERGE commit, so a
+  // workflow change on main retires everything keyed on this identity. A
+  // per-test reuse that compares a PR against its own last tested commit passes
+  // the PR head instead; a main-only workflow change is the daily run's.
+  consumerRef = "HEAD",
 } = {}) {
+  if (!/^(HEAD|[0-9a-f]{7,40})$/.test(String(consumerRef))) throw new Error(`consumer ref ${JSON.stringify(consumerRef)} is not HEAD or a sha`);
   return createHash("sha256").update(JSON.stringify({
     schema: VERDICT_SCHEMA,
     implementation: implementationHash(sourceRoot),
     // Workflow commits can advance without changing execution semantics. Hash
     // their actual blobs instead of GITHUB_WORKFLOW_SHA (which keys every push
     // separately and defeats reuse on content-identical reruns).
-    callerWorkflows: execFileSync("git", ["ls-tree", "-r", "--full-tree", "HEAD", "--", ".github/workflows"], {
+    callerWorkflows: execFileSync("git", ["ls-tree", "-r", "--full-tree", consumerRef, "--", ".github/workflows"], {
       cwd: consumerRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
     }),
     nodeVersion,

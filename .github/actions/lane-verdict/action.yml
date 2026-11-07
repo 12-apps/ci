@@ -38,11 +38,23 @@ inputs:
     description: 'record: the `key` the lookup step produced.'
     required: false
     default: ''
+  consumer-ref:
+    description: >-
+      identity: a commit (the pull request head). When set, also emits
+      `head-identity`: the same identity with the caller's `.github/workflows`
+      read at that commit instead of the checkout (FUT-4549), so a workflow
+      change on the default branch does not retire per-test reuse. Empty emits
+      none.
+    required: false
+    default: ''
 
 outputs:
   execution-identity:
     description: 'identity mode: central source/runtime hash, or empty on failure (never reuse a verdict then).'
     value: ${{ steps.identity.outputs.execution-identity }}
+  head-identity:
+    description: 'identity mode with `consumer-ref`: the identity with the caller workflows read at that commit, or empty on failure (never reuse then).'
+    value: ${{ steps.identity.outputs.head-identity }}
   hit:
     description: '`true` when a recorded verdict answers for this tree; anything else means run the lane.'
     value: ${{ steps.report.outputs.hit }}
@@ -57,6 +69,8 @@ runs:
       id: identity
       if: ${{ inputs.mode == 'identity' }}
       shell: bash
+      env:
+        CONSUMER_REF: ${{ inputs.consumer-ref }}
       run: node "$GITHUB_ACTION_PATH/verdict.mjs" identity
 
     - name: Key this lane's verdict

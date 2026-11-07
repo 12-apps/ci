@@ -668,6 +668,11 @@ jobs:
         with:
           mode: identity
           lane: unit
+          # The green manifest's key reads the caller's workflows at the PR
+          # HEAD (`head-identity`, FUT-4549): a ci.yml change on main must not
+          # retire a PR's per-test proofs. The tree fingerprint keeps the
+          # merge-commit identity.
+          consumer-ref: ${{ github.event.pull_request.head.sha }}
       - name: Compute the affected test plan
         id: affected
         if: ${{ inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
@@ -704,7 +709,7 @@ jobs:
         shell: bash
         env:
           LANE_NODE: ${{ steps.verdict-node.outputs.node-version }}
-          EXECUTION_ID: ${{ steps.execution.outputs.execution-identity }}
+          EXECUTION_ID: ${{ steps.execution.outputs.head-identity }}
           LANE_VARS: ${{ toJSON(vars) }}
           LANE_PRE: ${{ inputs.pre-test-command }}
           LANE_CMD: ${{ inputs.unit-test-command }}
@@ -1852,6 +1857,11 @@ jobs:
         with:
           mode: identity
           lane: integration
+          # The green manifest's key reads the caller's workflows at the PR
+          # HEAD (`head-identity`, FUT-4549): a ci.yml change on main must not
+          # retire a PR's per-test proofs. The tree fingerprint keeps the
+          # merge-commit identity.
+          consumer-ref: ${{ github.event.pull_request.head.sha }}
       - name: Compute the affected test plan
         id: affected
         if: ${{ inputs.affected-plan-config != '' && github.event_name == 'pull_request' }}
@@ -1878,7 +1888,7 @@ jobs:
         shell: bash
         env:
           LANE_NODE: ${{ steps.verdict-node.outputs.node-version }}
-          EXECUTION_ID: ${{ steps.execution.outputs.execution-identity }}
+          EXECUTION_ID: ${{ steps.execution.outputs.head-identity }}
           LANE_VARS: ${{ toJSON(vars) }}
           LANE_PRE: ${{ inputs.pre-integration-command }}
           LANE_CMD: ${{ inputs.integration-command }}
