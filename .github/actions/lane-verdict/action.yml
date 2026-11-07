@@ -45,6 +45,12 @@ inputs:
       read at that commit instead of the checkout (FUT-4549), so a workflow
       change on the default branch does not retire per-test reuse. Empty emits
       none.
+  scope-workflow:
+    description: >-
+      identity: a workflow file name (`monorepo-tests.yml`). When set, also
+      emits `scoped-identity`: the same identity over ONLY that workflow, the
+      engine actions it names (transitively, without their tests and docs) and
+      the modules they import. Empty emits none.
     required: false
     default: ''
 
@@ -55,6 +61,9 @@ outputs:
   head-identity:
     description: 'identity mode with `consumer-ref`: the identity with the caller workflows read at that commit, or empty on failure (never reuse then).'
     value: ${{ steps.identity.outputs.head-identity }}
+  scoped-identity:
+    description: 'identity mode with `scope-workflow`: the identity narrowed to that workflow''s implementation, or empty on failure (never reuse then).'
+    value: ${{ steps.identity.outputs.scoped-identity }}
   hit:
     description: '`true` when a recorded verdict answers for this tree; anything else means run the lane.'
     value: ${{ steps.report.outputs.hit }}
@@ -71,6 +80,7 @@ runs:
       shell: bash
       env:
         CONSUMER_REF: ${{ inputs.consumer-ref }}
+        SCOPE_WORKFLOW: ${{ inputs.scope-workflow }}
       run: node "$GITHUB_ACTION_PATH/verdict.mjs" identity
 
     - name: Key this lane's verdict

@@ -120,3 +120,15 @@ passes the PR head and keys the green manifests on `head-identity`. The tree
 fingerprints keep `execution-identity`. A ref that is neither `HEAD` nor a sha
 is refused, and an unreadable one emits an empty identity, so nothing is
 reused. Pinned by `__tests__/head-identity.test.mjs`.
+## Scoped identity (FUT-4550)
+
+`mode: identity` with `scope-workflow: <file>.yml` also emits
+`scoped-identity`: the same identity, but its implementation half covers only
+that workflow, every engine action it names (and those name, transitively,
+without `__tests__/` or Markdown) and the modules they import from other
+actions. `monorepo-tests.yml` keys its skip-green manifests on it, so an engine
+change outside the lanes no longer retires them. Anything it cannot resolve
+emits an empty identity, and nothing keyed on it is reused. The tree
+fingerprints keep `execution-identity`, the whole engine. Pinned by
+`__tests__/scoped-identity.test.mjs` and
+`../../workflows/__tests__/skip-green-scoped-identity.test.mjs`.
