@@ -36,6 +36,17 @@ on:
           .npmrc reads ${NODE_AUTH_TOKEN}.
         required: false
     inputs:
+      light-runner:
+        description: >-
+          Runner label for this workflow's short jobs only: the Unit and Integration Plan, Signal and Verdict jobs.
+          They run for seconds and install nothing, so a consumer with a
+          fleet can send them to a pool of small hosts (scripts/runner-host,
+          a light pool). Empty (the default) runs them where every other job
+          of this workflow runs, so a caller that passes nothing sees no
+          change.
+        type: string
+        required: false
+        default: ''
       runner:
         description: >-
           Runner label for every job. A nonempty caller value overrides
@@ -558,7 +569,7 @@ jobs:
   # clamp is what keeps an accidental zero from ever reaching it.
   unit-plan:
     name: Unit Plan
-    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.light-runner || inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 15
@@ -1234,7 +1245,7 @@ jobs:
   # artifacts, zero parseable reports or a zero summed total all fail.
   unit-signal:
     name: Unit Signal
-    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.light-runner || inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 10
@@ -1281,7 +1292,7 @@ jobs:
   # that earned it and never refreshed by the runs that reuse it.
   unit-verdict:
     name: Unit Verdict
-    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.light-runner || inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 10
@@ -1548,7 +1559,7 @@ jobs:
 
   integration-plan:
     name: Integration Plan
-    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.light-runner || inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 15
@@ -2100,7 +2111,7 @@ jobs:
   # unit-signal: post-matrix, merged total, fail-closed.
   integration-signal:
     name: Integration Signal
-    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.light-runner || inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 10
@@ -2129,7 +2140,7 @@ jobs:
   # job, by a run that earned it rather than by one reusing it. See that job.
   integration-verdict:
     name: Integration Verdict
-    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.light-runner || inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 10

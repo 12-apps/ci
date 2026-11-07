@@ -20,6 +20,17 @@ name: Cost Report (reusable)
 on:
   workflow_call:
     inputs:
+      light-runner:
+        description: >-
+          Runner label for this workflow's short jobs only: the Cost Report job.
+          They run for seconds and install nothing, so a consumer with a
+          fleet can send them to a pool of small hosts (scripts/runner-host,
+          a light pool). Empty (the default) runs them where every other job
+          of this workflow runs, so a caller that passes nothing sees no
+          change.
+        type: string
+        required: false
+        default: ''
       # `self_hosted` is one runner slot of the scripts/runner-host fleet, all
       # in, per minute of job. Measured on 2026-09-24:
       #   host   $0.15/h  8-vCPU spot (Ohio averaged $0.143 over 24 pools)
@@ -104,7 +115,7 @@ permissions:
 jobs:
   report:
     name: Cost Report
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.light-runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 15

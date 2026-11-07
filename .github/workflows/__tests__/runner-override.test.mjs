@@ -8,8 +8,10 @@ const workflows = new Map([
 ]);
 const expected = "inputs.runner || vars.CI_RUNNER || 'ubuntu-latest'";
 
+// A job light-runner.test.mjs lists reads `inputs.light-runner` first; that
+// suite pins it. With no light label the job falls through to the same choice.
 function expressions(source) {
-  return [...source.matchAll(/^    runs-on: \$\{\{ (.*?) \}\}$/gm)].map((m) => m[1]);
+  return [...source.matchAll(/^    runs-on: \$\{\{ (.*?) \}\}$/gm)].map((m) => m[1].replace(/^inputs\.light-runner \|\| /, ''));
 }
 
 function choose(expression, runner, inherited) {

@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import { jobsOf, workflowFiles } from "./job-timeouts.test.mjs";
 import { declaredInputs } from "./declared-inputs.test.mjs";
+import { expectedRunner } from "./light-runner.test.mjs";
 
 // Every job a REUSABLE workflow defines takes its runner from the caller.
 //
@@ -62,7 +63,8 @@ const jobs = workflowFiles()
   .flatMap(([file, source]) =>
     jobsOf(source)
       .filter((job) => job.definesRunner)
-      .map((job) => ({ file, name: job.name, line: job.line, runsOn: runnerOf(source, job.name), expected: declaredInputs(source)?.includes("runner") ? OVERRIDDEN : SELECTED })),
+      // A job light-runner.test.mjs lists reads `inputs.light-runner` before either form.
+      .map((job) => ({ file, name: job.name, line: job.line, runsOn: runnerOf(source, job.name), expected: expectedRunner(source, job.name, file) })),
   );
 
 test("the sweep sees the reusable workflows' jobs", () => {
