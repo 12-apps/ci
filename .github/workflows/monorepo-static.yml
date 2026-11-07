@@ -234,6 +234,23 @@ on:
         type: string
         required: false
         default: ''
+      affected-since-green:
+        description: >-
+          OPT-IN (FUT-4557). On a pull request, the Lint, Type Check and Build
+          jobs select what changed since THIS LANE was last green on this pull
+          request — `TURBO_SCM_BASE` = that head, `TURBO_SCM_HEAD` = the pull
+          request's head — instead of everything since the merge base with the
+          base branch. Each job remembers its green head in a tiny per-PR cache
+          entry, written only on `success()`. No recorded head, the same head,
+          or one that is no longer an ancestor of the pull request's head (a
+          force-push or a rebase) keeps the merge-base range. A package proved
+          green there and untouched since is not run again; what changed since,
+          and everything that depends on it, is. What the base branch changed
+          meanwhile is the daily full run's to see. `AFFECTED_BASE` carries the
+          head to a `lint-command`. Off a pull request nothing changes.
+        type: boolean
+        required: false
+        default: false
       type-check-fingerprint-command:
         description: >-
           OPT-IN. Shell that prints a hex hash of every tracked path that can
@@ -832,6 +849,52 @@ jobs:
             echo "TURBO_SCM_HEAD=HEAD"
           } >> "$GITHUB_ENV"
 
+      # ── Select what changed since this lane was last green (opt-in, FUT-4557)
+      # The owner's rule: on a pull request, compare against the PR's own last
+      # tested head, never against the base branch. `affected-since-green`
+      # restores the head this lane last passed on, for this pull request, and
+      # when it is an ancestor of the pull request's head, turbo's range becomes
+      # that head → the pull request's head. The verdict below keys it.
+      - name: Restore the lane's last green head
+        id: green-restore
+        if: ${{ inputs.affected-since-green && github.event_name == 'pull_request' && steps.selection.outputs.base-sha != '' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: .last-green-lint
+          key: last-green-lint-pr${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+          restore-keys: |
+            last-green-lint-pr${{ github.event.pull_request.number }}-
+
+      - name: Narrow to the lane's last green head
+        id: green
+        if: ${{ steps.green-restore.outcome == 'success' }}
+        shell: bash
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GREEN_FILE: .last-green-lint/sha
+        run: |
+          set -euo pipefail
+          green="$(head -n 1 "$GREEN_FILE" 2>/dev/null || true)"
+          if ! printf '%s' "$green" | grep -Eq '^[0-9a-f]{40,64}$'; then
+            echo "No green head recorded for this pull request: the merge-base range stands."
+            exit 0
+          fi
+          if [ "$green" = "$PR_HEAD_SHA" ]; then
+            echo "::notice::This head was already green: the merge-base range stands."
+            exit 0
+          fi
+          if ! git cat-file -e "$green^{commit}" 2>/dev/null || ! git merge-base --is-ancestor "$green" "$PR_HEAD_SHA"; then
+            echo "::notice::Last green head $green is not an ancestor of $PR_HEAD_SHA: the merge-base range stands."
+            exit 0
+          fi
+          echo "base=$green" >> "$GITHUB_OUTPUT"
+          {
+            echo "TURBO_SCM_BASE=$green"
+            echo "TURBO_SCM_HEAD=$PR_HEAD_SHA"
+            echo "AFFECTED_BASE=$green"
+          } >> "$GITHUB_ENV"
+          echo "::notice::Affected range: $green..$PR_HEAD_SHA (this lane's last green head on this pull request)."
+
       # ── Skip a lane this exact tree already passed (opt-in) ────────────────
       # After resolving runtime/selection, before any install: the consumer's `lint-fingerprint-command` hashes every
       # tracked path that can change this lane's outcome, the action keys it to
@@ -854,6 +917,7 @@ jobs:
             selection=turbo-affected-v1
             base=${{ steps.selection.outputs.base-sha }}
             merge-base=${{ steps.selection.outputs.merge-base }}
+            green-base=${{ steps.green.outputs.base }}
             lint-command=${{ inputs.lint-command }}
             pnpm turbo run lint --affected
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
@@ -938,6 +1002,24 @@ jobs:
           path: .turbo
           key: turbo-lint-${{ github.sha }}
 
+      # The green head is claimed LAST, by a job that passed: the next push to
+      # this pull request selects only what changed since (FUT-4557).
+      - name: Remember this head as the lane's last green
+        if: ${{ success() && inputs.affected-since-green && github.event_name == 'pull_request' && steps.lane-verdict.outputs.hit != 'true' }}
+        shell: bash
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          mkdir -p .last-green-lint
+          printf '%s\n' "$PR_HEAD_SHA" > .last-green-lint/sha
+
+      - name: Save the lane's last green head
+        if: ${{ success() && inputs.affected-since-green && github.event_name == 'pull_request' && steps.lane-verdict.outputs.hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .last-green-lint
+          key: last-green-lint-pr${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+
       # The claim is made LAST, by the job that earned it: `success()` means
       # every step above passed, so the next pull-request run of this exact
       # tree, under this exact command, may skip them all. A job that failed
@@ -1015,6 +1097,52 @@ jobs:
             echo "TURBO_SCM_HEAD=HEAD"
           } >> "$GITHUB_ENV"
 
+      # ── Select what changed since this lane was last green (opt-in, FUT-4557)
+      # The owner's rule: on a pull request, compare against the PR's own last
+      # tested head, never against the base branch. `affected-since-green`
+      # restores the head this lane last passed on, for this pull request, and
+      # when it is an ancestor of the pull request's head, turbo's range becomes
+      # that head → the pull request's head. The verdict below keys it.
+      - name: Restore the lane's last green head
+        id: green-restore
+        if: ${{ inputs.affected-since-green && github.event_name == 'pull_request' && steps.selection.outputs.base-sha != '' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: .last-green-type-check
+          key: last-green-type-check-pr${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+          restore-keys: |
+            last-green-type-check-pr${{ github.event.pull_request.number }}-
+
+      - name: Narrow to the lane's last green head
+        id: green
+        if: ${{ steps.green-restore.outcome == 'success' }}
+        shell: bash
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GREEN_FILE: .last-green-type-check/sha
+        run: |
+          set -euo pipefail
+          green="$(head -n 1 "$GREEN_FILE" 2>/dev/null || true)"
+          if ! printf '%s' "$green" | grep -Eq '^[0-9a-f]{40,64}$'; then
+            echo "No green head recorded for this pull request: the merge-base range stands."
+            exit 0
+          fi
+          if [ "$green" = "$PR_HEAD_SHA" ]; then
+            echo "::notice::This head was already green: the merge-base range stands."
+            exit 0
+          fi
+          if ! git cat-file -e "$green^{commit}" 2>/dev/null || ! git merge-base --is-ancestor "$green" "$PR_HEAD_SHA"; then
+            echo "::notice::Last green head $green is not an ancestor of $PR_HEAD_SHA: the merge-base range stands."
+            exit 0
+          fi
+          echo "base=$green" >> "$GITHUB_OUTPUT"
+          {
+            echo "TURBO_SCM_BASE=$green"
+            echo "TURBO_SCM_HEAD=$PR_HEAD_SHA"
+            echo "AFFECTED_BASE=$green"
+          } >> "$GITHUB_ENV"
+          echo "::notice::Affected range: $green..$PR_HEAD_SHA (this lane's last green head on this pull request)."
+
       # ── Skip a lane this exact tree already passed (opt-in) ────────────────
       # After resolving runtime/selection, before any install: the consumer's `type-check-fingerprint-command` hashes every
       # tracked path that can change this lane's outcome, the action keys it to
@@ -1037,6 +1165,7 @@ jobs:
             selection=turbo-affected-v1
             base=${{ steps.selection.outputs.base-sha }}
             merge-base=${{ steps.selection.outputs.merge-base }}
+            green-base=${{ steps.green.outputs.base }}
             pre=${{ inputs.pre-typecheck-command }}
             pnpm turbo run check-types --affected
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
@@ -1125,6 +1254,24 @@ jobs:
         with:
           path: .turbo
           key: turbo-typecheck-${{ github.sha }}
+
+      # The green head is claimed LAST, by a job that passed: the next push to
+      # this pull request selects only what changed since (FUT-4557).
+      - name: Remember this head as the lane's last green
+        if: ${{ success() && inputs.affected-since-green && github.event_name == 'pull_request' && steps.lane-verdict.outputs.hit != 'true' }}
+        shell: bash
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          mkdir -p .last-green-type-check
+          printf '%s\n' "$PR_HEAD_SHA" > .last-green-type-check/sha
+
+      - name: Save the lane's last green head
+        if: ${{ success() && inputs.affected-since-green && github.event_name == 'pull_request' && steps.lane-verdict.outputs.hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .last-green-type-check
+          key: last-green-type-check-pr${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
 
       # The claim is made LAST, by the job that earned it: `success()` means
       # every step above passed, so the next pull-request run of this exact

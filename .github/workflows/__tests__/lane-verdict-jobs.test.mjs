@@ -60,7 +60,8 @@ for (const { file, job, lane, input } of JOBS) {
     const lookup = all.findIndex((s) => /id: lane-verdict/.test(s.block));
     assert.notEqual(lookup, -1, `${job} has no lane-verdict lookup`);
     assert.ok(checkout < lookup);
-    const allowed = /actions\/checkout@|id: verdict-node|id: base\n|id: selection\n|id: ratchet-base\n/;
+    // `green-restore` / `green` (FUT-4557) resolve the lane's last green head: context the key carries.
+    const allowed = /actions\/checkout@|id: verdict-node|id: base\n|id: selection\n|id: ratchet-base\n|id: green-restore\n|id: green\n/;
     assert.deepEqual(all.slice(0, lookup).filter((s) => !allowed.test(s.block)), [], "only checkout and verifiable context resolution precede lookup");
     const node = all.findIndex((s) => /id: verdict-node/.test(s.block));
     assert.ok(checkout < node && node < lookup, "the actual Node patch is resolved before lookup");
