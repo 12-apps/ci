@@ -55,7 +55,11 @@ const perShard = positiveInteger(arg("min-tests-per-shard", "40"), 40);
 // unless a lane looks wrong.
 const explain = arg("explain", "true") !== "false";
 
-const git = (args) => execFileSync("git", args, { cwd: repoRoot, encoding: "utf8" }).trim();
+// A tree listing outgrows execFileSync's 1 MiB default: future-pay's `git
+// ls-files` crossed it on 2026-11-07 and every plan that reached the database
+// routes died with ENOBUFS. Same ceiling as lib/inputs.mjs's tree index.
+const GIT_MAX_BUFFER = 256 * 1024 * 1024;
+const git = (args) => execFileSync("git", args, { cwd: repoRoot, encoding: "utf8", maxBuffer: GIT_MAX_BUFFER }).trim();
 
 let config;
 try {
@@ -468,6 +472,7 @@ const readBase = (file) => {
     return execFileSync("git", ["show", `${mergeBase}:${file}`], {
       cwd: repoRoot,
       encoding: "utf8",
+      maxBuffer: GIT_MAX_BUFFER,
       stdio: ["ignore", "pipe", "ignore"],
     });
   } catch {

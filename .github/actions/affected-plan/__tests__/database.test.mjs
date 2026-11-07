@@ -99,7 +99,7 @@ CREATE TABLE "orders" ("id" TEXT NOT NULL, "client_id" TEXT NOT NULL, "status" T
 `,
 };
 
-function repo(changes) {
+function repo(changes, padding = 0) {
   const root = mkdtempSync(join(tmpdir(), "affected-plan-db-"));
   const git = (...args) => spawnSync("git", args, { cwd: root, stdio: "ignore" });
   const put = (path, body) => {
@@ -111,6 +111,8 @@ function repo(changes) {
   git("config", "user.name", "T");
   put(".affected-plan.json", JSON.stringify(CONFIG));
   for (const [path, body] of Object.entries(SOURCE)) put(path, body);
+  // Ignored files (CONFIG.ignore) that only make the tracked list long.
+  for (let i = 0; i < padding; i += 1) put(`docs/padding/a-long-enough-file-name-to-fill-the-tree-listing-${i}.md`, "");
   git("add", "-A");
   git("commit", "-qm", "base");
   const base = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).stdout.trim();
@@ -246,4 +248,18 @@ test("F1: every migration joins the skip hash of a test that replays or lists th
   assert.ok(one["src/replay.test.ts"] && two["src/replay.test.ts"], "the replayer is hashed");
   assert.notEqual(one["src/replay.test.ts"], two["src/replay.test.ts"], "the migration's content is the replayer's input");
   assert.equal(one["src/label.test.ts"], two["src/label.test.ts"], "a test that never reads the folder is unmoved");
+});
+
+test("a tree whose file list outgrows 1 MiB still plans — git's output is not capped at execFileSync's default", () => {
+  // 15,000 tracked names of ~75 bytes put `git ls-files` past 1 MiB, the
+  // default maxBuffer that made a real consumer's plan die with ENOBUFS.
+  const { root, base } = repo(
+    { "db/migrations/20260102000000_backfill/migration.sql": `-- @domains: tenancy\nUPDATE "clients" SET "cancel_roles" = '[]' WHERE "cancel_roles" IS NULL;\n` },
+    15000,
+  );
+  const listed = spawnSync("git", ["ls-files"], { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).stdout.length;
+  assert.ok(listed > 1024 * 1024, `fixture lists only ${listed} bytes`);
+  const { code, doc, err } = plan(root, base);
+  assert.equal(code, 0, err);
+  assert.ok(doc.tests.includes("src/backfill.test.ts"));
 });
