@@ -7,9 +7,11 @@
 // fleet runs on 20, the pnpm store mounted again when it is off, a new webhook
 // secret. Those settings live in three places, all read here:
 //   - the scaler Lambda's environment (budget, regions, types, caps, strategy),
-//     including WEBHOOK_SECRET, which is written to a file and never printed;
-//   - the launch template (idle minutes and the pnpm store switch in its user
-//     data, the root volume's IOPS and throughput in its block devices);
+//     including WEBHOOK_SECRET, which is written to a file and never printed,
+//     or the name of the SSM parameter that holds it (WEBHOOK_SECRET_PARAMETER,
+//     a light pool's: then there is no secret to carry);
+//   - the launch template (idle minutes, the pnpm store switch and HOST_LABELS
+//     in its user data, the root volume's IOPS and throughput in its block devices);
 //   - the warm pool, which only exists as hosts: the caller counts them.
 //
 // REGIONS is the list the last deploy left LIVE, so a region that dropped out
@@ -35,6 +37,7 @@ const FROM_LAMBDA = {
   SLOTS_PER_HOST: "SLOTS_PER_HOST",
   SETTLE_SECONDS: "SETTLE_SECONDS",
   TOKEN_PARAMETER: "TOKEN_PARAMETER",
+  WEBHOOK_SECRET_PARAMETER: "WEBHOOK_SECRET_PARAMETER",
   REPOSITORY: "REPOSITORY",
   RUNNER_LABEL: "RUNNER_LABEL",
 };
@@ -58,6 +61,10 @@ export function liveSettings(lambdaEnv, template, poolSize = 0) {
   if (idle) env.IDLE_MINUTES = idle[1];
   // deploy.sh writes the blanking line only when PNPM_STORE=off.
   env.PNPM_STORE = /s\/\^CI_RUNNER_PNPM_STORE=\.\*\/CI_RUNNER_PNPM_STORE=\//.test(userData) ? "off" : "on";
+  // deploy.sh writes the labels line only with HOST_LABELS (a light pool): a
+  // refresh without it would put the pool's hosts on the image's own label.
+  const labels = /s\/\^CI_RUNNER_LABELS=\.\*\/CI_RUNNER_LABELS=([A-Za-z0-9._,-]+)\//.exec(userData);
+  if (labels) env.HOST_LABELS = labels[1];
   const ebs = template.BlockDeviceMappings?.[0]?.Ebs ?? {};
   if (ebs.Iops) env.ROOT_IOPS = String(ebs.Iops);
   if (ebs.Throughput) env.ROOT_THROUGHPUT = String(ebs.Throughput);
@@ -73,7 +80,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const [envFile, templateFile, pool, secretFile] = process.argv.slice(2);
   if (!/^\d+$/.test(pool ?? "")) throw new Error(`pool size must be a count, got ${pool}`);
   const { env, secret } = liveSettings(JSON.parse(readFileSync(envFile, "utf8")), JSON.parse(readFileSync(templateFile, "utf8")), Number(pool));
-  if (!secret) throw new Error("the scaler has no WEBHOOK_SECRET; a redeploy would rotate the webhook's secret");
-  writeFileSync(secretFile, `${secret}\n`, { mode: 0o600 });
+  // A secret kept in SSM (WEBHOOK_SECRET_PARAMETER) stays there: deploy.sh reads it.
+  if (!env.WEBHOOK_SECRET_PARAMETER) {
+    if (!secret) throw new Error("the scaler has no WEBHOOK_SECRET; a redeploy would rotate the webhook's secret");
+    writeFileSync(secretFile, `${secret}\n`, { mode: 0o600 });
+  }
   for (const [k, v] of Object.entries(env)) process.stdout.write(`export ${k}=${quote(v)}\n`);
 }

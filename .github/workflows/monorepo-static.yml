@@ -43,6 +43,17 @@ on:
           .npmrc reads ${NODE_AUTH_TOKEN}.
         required: false
     inputs:
+      light-runner:
+        description: >-
+          Runner label for this workflow's short jobs only: Detect Changes and Actionlint.
+          They run for seconds and run no install, build or test suite of
+          their own, so a consumer with a fleet can send them to a pool of
+          small hosts (scripts/runner-host, a light pool). Empty (the default) runs them where every other job
+          of this workflow runs, so a caller that passes nothing sees no
+          change.
+        type: string
+        required: false
+        default: ''
       runner:
         description: >-
           Runner label for every job. A nonempty caller value overrides
@@ -392,7 +403,7 @@ jobs:
       contents: read
       pull-requests: read
     name: Detect Changes
-    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.light-runner || inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 10
@@ -1107,7 +1118,7 @@ jobs:
 
   actionlint:
     name: Actionlint
-    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.light-runner || inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 10

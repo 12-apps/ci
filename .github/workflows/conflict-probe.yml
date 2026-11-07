@@ -51,6 +51,17 @@ name: Conflict probe (reusable)
 on:
   workflow_call:
     inputs:
+      light-runner:
+        description: >-
+          Runner label for this workflow's short jobs only: the probe job.
+          They run for seconds and run no install, build or test suite of
+          their own, so a consumer with a fleet can send them to a pool of
+          small hosts (scripts/runner-host, a light pool). Empty (the default) runs them where every other job
+          of this workflow runs, so a caller that passes nothing sees no
+          change.
+        type: string
+        required: false
+        default: ''
       config:
         description: "Path to the caller's group config."
         type: string
@@ -92,7 +103,7 @@ permissions:
 jobs:
   probe:
     name: Probe open PRs
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.light-runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     permissions:
       contents: read

@@ -53,6 +53,17 @@ name: Post-merge regeneration (reusable)
 on:
   workflow_call:
     inputs:
+      light-runner:
+        description: >-
+          Runner label for this workflow's short jobs only: Pick the tip and Open and auto-merge the PR (never Run the regeneration, which runs the caller's command).
+          They run for seconds and run no install, build or test suite of
+          their own, so a consumer with a fleet can send them to a pool of
+          small hosts (scripts/runner-host, a light pool). Empty (the default) runs them where every other job
+          of this workflow runs, so a caller that passes nothing sees no
+          change.
+        type: string
+        required: false
+        default: ''
       runner:
         description: >-
           Runner label for every job. A nonempty caller value overrides
@@ -127,7 +138,7 @@ concurrency:
 jobs:
   prepare:
     name: Pick the tip
-    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.light-runner || inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     # `contents: write`: the keep path enables auto-merge, and merges a PR that
     # is already mergeable, and both need a token that can merge. This job runs
@@ -206,7 +217,7 @@ jobs:
     # A failed command lands nothing: the superseded PRs stay open with
     # auto-merge off until the next run replaces them.
     if: needs.prepare.outputs.action == 'regen' && needs.generate.result == 'success'
-    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.light-runner || inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: write

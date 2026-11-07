@@ -2,6 +2,7 @@
 // to the queue (scale.mjs); MODE=wake starts one stoppable host (wake.mjs).
 // deploy.sh sets the environment:
 //   WEBHOOK_SECRET, RUNNER_LABEL, REPOSITORY          both modes
+//   WEBHOOK_SECRET_PARAMETER (scale, instead of WEBHOOK_SECRET): an SSM SecureString holding it
 //   INSTANCE_ID                                       wake
 //   LAUNCH_TEMPLATE, REGIONS, INSTANCE_TYPES, TOKEN_PARAMETER, SLOTS_PER_HOST, MAX_HOSTS   scale
 //   SETTLE_SECONDS (0: launch at once; see scale.mjs, settling)                       scale
@@ -29,6 +30,19 @@ async function githubToken() {
   token ??= (await ssm.send(new GetParameterCommand({ Name: env.TOKEN_PARAMETER, WithDecryption: true })))
     .Parameter.Value.trim();
   return token;
+}
+
+// The webhook's secret. A fleet whose webhook someone created by hand (a light
+// pool's, README "A light pool") keeps it in an SSM SecureString named by
+// WEBHOOK_SECRET_PARAMETER, so the value is never in the function's
+// configuration, a deploy's checkout or a refresh's run; read once per
+// container. Without the parameter, WEBHOOK_SECRET as before.
+let webhookSecret;
+async function secret() {
+  if (!env.WEBHOOK_SECRET_PARAMETER) return env.WEBHOOK_SECRET;
+  webhookSecret ??= (await ssm.send(new GetParameterCommand({ Name: env.WEBHOOK_SECRET_PARAMETER, WithDecryption: true })))
+    .Parameter.Value.trim();
+  return webhookSecret;
 }
 
 // The queue's reads carry ETags, so a 304 does not spend the token's hourly
@@ -154,9 +168,13 @@ const budgetCfg = {
 // On-demand USD/hour, us-east-1 (the dearest of the fleet's regions, so a
 // host billed from this table is never under-counted). Only used when a host
 // is not spot or its pool's price cannot be read.
+// The .large rows are a light pool's (README, "A light pool"): without them its
+// on-demand hosts would be billed at the dearest 2xlarge rate.
 const ON_DEMAND = {
   "m7a.2xlarge": 0.4637, "m6a.2xlarge": 0.3456, "m7i.2xlarge": 0.4032, "m6i.2xlarge": 0.384,
   "r7a.2xlarge": 0.6086, "r6a.2xlarge": 0.4536, "r7i.2xlarge": 0.5292, "r6i.2xlarge": 0.504,
+  "m7a.large": 0.11592, "m6a.large": 0.0864, "m7i.large": 0.1008, "m6i.large": 0.096,
+  "r7a.large": 0.15215, "r6a.large": 0.1134, "r7i.large": 0.1323, "r6i.large": 0.126,
 };
 // A host's gp3 root (120 GB, 3000 IOPS, 250 MB/s: $14.6 a month) and its public IPv4.
 const PER_HOST_EXTRAS = 0.02 + 0.005;
@@ -421,7 +439,7 @@ async function ensureWebhook(url) {
   };
   const hook = {
     name: "web", active: true, events: ["workflow_job", "workflow_run"],
-    config: { url, content_type: "json", insecure_ssl: "0", secret: env.WEBHOOK_SECRET },
+    config: { url, content_type: "json", insecure_ssl: "0", secret: await secret() },
   };
   const existing = (await call("GET", "/hooks?per_page=100")).find((h) => h.config?.url === url);
   const saved = existing ? await call("PATCH", `/hooks/${existing.id}`, hook) : await call("POST", "/hooks", hook);
@@ -440,7 +458,7 @@ const serve = (env.MODE ?? "scale") === "wake"
       },
     })
   : makeScaler({
-      secret: env.WEBHOOK_SECRET, label: env.RUNNER_LABEL, repo: env.REPOSITORY, github, ec2: fleet,
+      secret: env.WEBHOOK_SECRET_PARAMETER ? secret : env.WEBHOOK_SECRET, label: env.RUNNER_LABEL, repo: env.REPOSITORY, github, ec2: fleet,
       slotsPerHost: Number(env.SLOTS_PER_HOST ?? 2), maxHosts: currentCap,
       settleSeconds: Number(env.SETTLE_SECONDS ?? 0),
       allowance: () => github.allowance(),
