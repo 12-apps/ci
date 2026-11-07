@@ -79,7 +79,7 @@ const HEX = "60e2a8efe06d8656d3a91e3dd7623c0c0a8d47ea44ec23097db6b5460518116b";
 const COLON = HEX.toUpperCase().replace(/(..)(?!$)/g, "$1:");
 
 /** A work dir with an `android/` folder, optional APK, and stub apksigner/aapt2 on PATH. */
-function fixture({ apk = true, apksigner = true, digest = HEX, signers = 1 } = {}) {
+function fixture({ apk = true, apksigner = true, digest = HEX, signers = 1, aapt2 = "com.paladira.motoboy" } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), "expo-apk-fp-"));
   const bin = path.join(dir, "bin");
   const android = path.join(dir, "android");
@@ -101,9 +101,12 @@ function fixture({ apk = true, apksigner = true, digest = HEX, signers = 1 } = {
   for (const t of ["cat", "sed", "tr", "ls", "sort", "tail", "mkdir"]) {
     spawnSync("ln", ["-s", spawnSync("which", [t], { encoding: "utf8" }).stdout.trim(), path.join(bin, t)]);
   }
-  const aapt2 = path.join(bin, "aapt2");
-  writeFileSync(aapt2, `#!${BASH}\necho com.paladira.motoboy\n`);
-  chmodSync(aapt2, 0o755);
+  // `aapt2: null` leaves it off PATH; an empty string makes it print nothing.
+  if (aapt2 !== null) {
+    const sh = path.join(bin, "aapt2");
+    writeFileSync(sh, `#!${BASH}\necho '${aapt2}'\n`);
+    chmodSync(sh, 0o755);
+  }
   return { dir, bin, android, done: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
@@ -167,6 +170,22 @@ test("fails loudly when the APK is missing", () => {
   fx.done();
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /No APK at app-release\.apk/);
+  assert.equal(r.summary, "");
+});
+
+test("fails loudly when aapt2 is missing or prints no package name", () => {
+  let fx = fixture({ aapt2: null });
+  let r = run(fx, true);
+  fx.done();
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /aapt2 not found/);
+  assert.equal(r.summary, "");
+
+  fx = fixture({ aapt2: "" });
+  r = run(fx, true);
+  fx.done();
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /aapt2 printed no package name/);
   assert.equal(r.summary, "");
 });
 

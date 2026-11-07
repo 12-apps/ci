@@ -759,8 +759,15 @@ jobs:
             exit 1
           fi
           AAPT2=$(tool aapt2)
-          PACKAGE=unknown
-          if [ -n "$AAPT2" ]; then PACKAGE=$("$AAPT2" dump packagename "$APK" 2>/dev/null || echo unknown); fi
+          if [ -z "$AAPT2" ]; then
+            echo "aapt2 not found on PATH or under \$ANDROID_HOME/build-tools." >&2
+            exit 1
+          fi
+          PACKAGE=$("$AAPT2" dump packagename "$APK" | tr -d '[:space:]')
+          if [ -z "$PACKAGE" ]; then
+            echo "aapt2 printed no package name for $APK." >&2
+            exit 1
+          fi
 
           CERTS=$("$APKSIGNER" verify --print-certs "$APK")
           # One `Signer #n certificate SHA-256 digest: <64 hex>` line per signer;
