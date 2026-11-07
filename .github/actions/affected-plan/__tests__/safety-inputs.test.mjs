@@ -83,7 +83,7 @@ test("invalid shard limits cannot turn a full fallback into an empty matrix", ()
 });
 
 test("the new input construction invalidates the previous hash format", () => {
-  assert.equal(INPUTS_VERSION, "test-inputs-v2");
+  assert.equal(INPUTS_VERSION, "test-inputs-v3", "v3 (FUT-4549): blobs read at the PR head");
 });
 
 test("global hashes include transitive dependencies and reject blind or untracked globals", () => {

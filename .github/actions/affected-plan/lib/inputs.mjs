@@ -20,7 +20,11 @@
  *     because only the consumer knows what its runner reads by path.
  *
  * Each file enters the hash as `<mode> <blob sha> <path>`, read from `git
- * ls-tree -r HEAD` once. Content is never read: the blob sha IS the content,
+ * ls-tree -r <PR head>` once (`hashTree`; `HEAD` off a pull request). Which
+ * files are inputs is decided on the checkout (`tree`): the graph that was
+ * walked, the globals and routes it holds. A file the checkout tracks but the
+ * PR head does not came from `main` alone and is left out (FUT-4549); a file
+ * neither tracks is still a missing input, and the test gets no hash. Content is never read: the blob sha IS the content,
  * and the mode is what `chmod +x` changes without the content moving. Two
  * trees that agree on every counted entry produce the same hash — that is the
  * whole claim, and it is deliberately narrow.
@@ -39,7 +43,17 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
 /** Bump when the construction below changes shape — see ci-test-fingerprint's FORMAT_VERSION. */
-export const INPUTS_VERSION = "test-inputs-v2";
+/**
+ * v3 (FUT-4549): each file's blob is read at the PULL REQUEST HEAD, not at the
+ * merge commit the checkout holds, and a file only `main` has is not an input.
+ * So a merge to `main` that touches nothing the PR changed — a lockfile bump,
+ * a catalog move, another PR's code in this test's closure — no longer retires
+ * a proof the PR's own head earned. A `main`-only change that breaks a test is
+ * caught by the daily full run (owner, 2026-11-07: "a PR compares against its
+ * own last tested commit, never against main"). A v2 manifest answers for the
+ * merge tree and is retired, not matched.
+ */
+export const INPUTS_VERSION = "test-inputs-v3";
 const MODULE_RE = /\.(?:[cm]?[jt]sx?)$/;
 
 /**
@@ -138,7 +152,9 @@ export function globalInputs({ edges, blind = [], globals = [], routes = [], tre
  * Global inputs include their transitive dependencies, not merely the blobs
  * of the setup/config files named by `globals`.
  */
-export function testInputs({ tests, edges, blind = [], globals = [], routes = [], tree }) {
+export function testInputs({ tests, edges, blind = [], globals = [], routes = [], tree, hashTree = tree }) {
+  // Membership on the checkout, bytes at the PR head. `undefined` = main-only.
+  const at = (file) => (tree.has(file) ? (hashTree.get(file) ?? undefined) : null);
   const blindFiles = new Set(blind);
   const routed = routedFiles(routes, tree);
   const globalRoots = [...tree.keys()].filter((p) => globals.some((re) => re.test(p)));
@@ -148,8 +164,9 @@ export function testInputs({ tests, edges, blind = [], globals = [], routes = []
     : globalClosure.blind ? "a global closure contains an import that did not resolve" : null;
   globalClosure.blind ||= Boolean(globalsUnbounded);
   const globalFiles = [...globalClosure.files].sort();
-  const globalMissing = globalFiles.some((file) => !tree.has(file));
-  const globalLines = globalFiles.map((p) => `${tree.get(p)} ${p}`);
+  const globalMissing = globalFiles.some((file) => at(file) === null);
+  const globalLines = globalFiles.filter((p) => at(p)).map((p) => `${at(p)} ${p}`);
+  let mainOnly = globalFiles.length - globalLines.length - globalFiles.filter((file) => at(file) === null).length;
 
   const inputs = {};
   let hashed = 0;
@@ -167,10 +184,14 @@ export function testInputs({ tests, edges, blind = [], globals = [], routes = []
     const lines = [];
     let complete = !globalMissing;
     for (const file of files) {
-      const entry = tree.get(file);
-      if (!entry) {
+      const entry = at(file);
+      if (entry === null) {
         complete = false;
         break;
+      }
+      if (entry === undefined) {
+        mainOnly++;
+        continue; // only main has it: not an input the PR head can answer for
       }
       lines.push(`${entry} ${file}`);
     }
@@ -190,5 +211,5 @@ export function testInputs({ tests, edges, blind = [], globals = [], routes = []
     inputs[test] = hash.digest("hex");
     hashed++;
   }
-  return { inputs, globalFiles, stats: { hashed, unbounded, missing, globals: globalFiles.length, globalsUnbounded } };
+  return { inputs, globalFiles, stats: { hashed, unbounded, missing, mainOnly, globals: globalFiles.length, globalsUnbounded } };
 }

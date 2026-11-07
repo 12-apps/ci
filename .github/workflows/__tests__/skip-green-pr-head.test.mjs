@@ -1,0 +1,54 @@
+// FUT-4549: both test lanes hand affected-plan the PR HEAD as the commit its
+// per-test input hashes read. Dropped, the hashes fall back to the merge
+// commit and every merge to main that touches a lane global retires every
+// skip-green proof on every open pull request (PR 4219: 2,127 unit + 608
+// integration entries between runs 42026943166 and 42034252075).
+import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { test } from "node:test";
+
+import { jobBlocks } from "./matrix-zero-guard.test.mjs";
+
+const here = fileURLToPath(new URL("../", import.meta.url));
+const source = readFileSync(path.join(here, "monorepo-tests.yml"), "utf8");
+const action = readFileSync(path.join(here, "../actions/affected-plan/action.yml"), "utf8");
+const verdictAction = readFileSync(path.join(here, "../actions/lane-verdict/action.yml"), "utf8");
+const jobs = Object.fromEntries(jobBlocks(source).map((j) => [j.name, j.body]));
+
+for (const lane of ["unit", "integration"]) {
+  test(`${lane}-plan: affected-plan reads input blobs at the PR head`, () => {
+    const at = jobs[`${lane}-plan`].indexOf("id: affected\n");
+    assert.notEqual(at, -1);
+    const step = jobs[`${lane}-plan`].slice(at, jobs[`${lane}-plan`].indexOf("\n      - name: ", at));
+    assert.match(step, /inputs-ref: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
+  });
+}
+
+test("affected-plan declares inputs-ref and hands it to plan.mjs through the environment", () => {
+  assert.match(action, /\n  inputs-ref:\n/);
+  assert.match(action, /INPUTS_REF: \$\{\{ inputs\.inputs-ref \}\}/);
+  assert.match(action, /--inputs-ref "\$INPUTS_REF"/);
+});
+
+for (const lane of ["unit", "integration"]) {
+  test(`${lane}-plan: the green-manifest key reads the identity with the caller's workflows at the PR head`, () => {
+    const body = jobs[`${lane}-plan`];
+    const at = body.indexOf("- name: Identify the CI implementation and runtime\n");
+    const identity = body.slice(at, body.indexOf("\n      - name: ", at + 1));
+    assert.match(identity, /consumer-ref: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
+    const k = body.indexOf("- name: Key the green manifest to how this lane runs\n");
+    const key = body.slice(k, body.indexOf("\n      - name: ", k + 1));
+    assert.match(key, /EXECUTION_ID: \$\{\{ steps\.execution\.outputs\.head-identity \}\}/);
+    const f = body.indexOf("- name: Fingerprint the test-relevant tree\n");
+    const fingerprint = body.slice(f, body.indexOf("\n      - name: ", f + 1));
+    assert.match(fingerprint, /steps\.execution\.outputs\.execution-identity/, "the tree fingerprint keeps the merge-commit identity (FUT-4556)");
+  });
+}
+
+test("lane-verdict declares consumer-ref and head-identity", () => {
+  assert.match(verdictAction, /\n  consumer-ref:\n/);
+  assert.match(verdictAction, /\n  head-identity:\n/);
+  assert.match(verdictAction, /CONSUMER_REF: \$\{\{ inputs\.consumer-ref \}\}/);
+});

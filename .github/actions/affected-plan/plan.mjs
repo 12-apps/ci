@@ -54,6 +54,10 @@ const perShard = positiveInteger(arg("min-tests-per-shard", "40"), 40);
 // argue with, and the cost of the cure is some lines in a log nobody reads
 // unless a lane looks wrong.
 const explain = arg("explain", "true") !== "false";
+// FUT-4549: where the per-test input hashes read their blobs — the pull
+// request's head, so a merge to main that the PR did not make retires nothing.
+// Empty (off a pull request, or an old caller) reads the checkout's HEAD.
+const inputsRef = arg("inputs-ref", "") || "";
 
 // A tree listing outgrows execFileSync's 1 MiB default: future-pay's `git
 // ls-files` crossed it on 2026-11-07 and every plan that reached the database
@@ -614,7 +618,9 @@ if (skipGreen && result.mode === "narrowed" && result.graph) {
       // that suite even though no import reaches it (lib/inputs.mjs).
       routes: [...inputRoutes, ...dbInputs],
       tree: inputTree,
+      hashTree: inputsRef ? treeIndex(repoRoot, inputsRef) : inputTree,
     });
+    if (inputsRef) console.error(`[inputs] blobs read at ${inputsRef.slice(0, 12)} (the pull request head); ${inputsReport.stats.mainOnly} closure file(s) only main has, left out`);
     console.error(
       `[inputs] ${inputsReport.stats.hashed} test(s) hashed over their import closure + ${inputsReport.stats.globals} global path(s)` +
         (inputsReport.stats.unbounded ? `; ${inputsReport.stats.unbounded} unbounded (an unresolved import) — never skippable` : "") +

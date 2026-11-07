@@ -106,6 +106,17 @@ function main(argv) {
       output({ "execution-identity": "" });
       console.log(`[lane-verdict] no execution identity — ${error.message}; run the lane.`);
     }
+    // FUT-4549: the same identity, with the caller's workflows read at the PR
+    // head rather than the merge commit — for per-test reuse (skip-green).
+    const consumerRef = process.env.CONSUMER_REF ?? "";
+    if (consumerRef) {
+      try {
+        output({ "head-identity": executionIdentity({ consumerRef }) });
+      } catch (error) {
+        output({ "head-identity": "" });
+        console.log(`[lane-verdict] no head identity at ${consumerRef} — ${error.message}; nothing keyed on it is reused.`);
+      }
+    }
     return 0;
   }
   if (mode === "key") {
