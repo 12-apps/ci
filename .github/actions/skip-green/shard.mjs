@@ -39,7 +39,7 @@
  * Outputs (GITHUB_OUTPUT): written (true|false), tests
  */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { isAbsolute, join, relative } from "node:path";
+import { basename, isAbsolute, join, relative } from "node:path";
 
 import { junitPrefix } from "../lane-timings/lib/reports.mjs";
 import { SHARD_RECORD_VERSION, appendOutputs, writeManifest } from "./lib/manifest.mjs";
@@ -75,11 +75,16 @@ const attr = (tag, name) => {
  */
 export function junitFiles(paths, cwd = process.cwd()) {
   const files = new Map();
+  // Reports at the junit root itself, by basename: `reports/junit/unit/
+  // packages-combos.xml` is one vitest run of the workspace `packages/combos`,
+  // its suites named relative to that workspace (see `junitRow`).
+  const bySlug = new Map();
   let reports = 0;
   const read = (path) => {
     const text = readFileSync(path, "utf8");
     reports++;
     const prefix = junitPrefix(relative(cwd, path));
+    const slug = prefix === "" ? basename(path).replace(/\.xml$/i, "") : null;
     for (const m of text.matchAll(/<testsuite\s[^>]*>/g)) {
       const name = attr(m[0], "name");
       const tests = Number(attr(m[0], "tests"));
@@ -87,8 +92,16 @@ export function junitFiles(paths, cwd = process.cwd()) {
       const skipped = Number(attr(m[0], "skipped")) || 0;
       const bad = (Number(attr(m[0], "failures")) || 0) + (Number(attr(m[0], "errors")) || 0);
       const key = `${prefix}${name}`;
-      const prev = files.get(key) ?? { ran: 0, bad: 0 };
-      files.set(key, { ran: prev.ran + Math.max(0, tests - skipped), bad: prev.bad + bad });
+      const row = { ran: Math.max(0, tests - skipped), bad };
+      const add = (map, k) => {
+        const prev = map.get(k) ?? { ran: 0, bad: 0 };
+        map.set(k, { ran: prev.ran + row.ran, bad: prev.bad + row.bad });
+      };
+      add(files, key);
+      if (slug) {
+        if (!bySlug.has(slug)) bySlug.set(slug, new Map());
+        add(bySlug.get(slug), name);
+      }
     }
   };
   const visit = (path) => {
@@ -100,7 +113,29 @@ export function junitFiles(paths, cwd = process.cwd()) {
     if (/\.xml$/i.test(path)) read(path);
   };
   for (const path of paths) visit(isAbsolute(path) ? path : join(cwd, path));
-  return reports === 0 ? null : files;
+  if (reports === 0) return null;
+  files.bySlug = bySlug;
+  return files;
+}
+
+/**
+ * The JUnit row for one planned file, or `undefined`. Exact in both forms:
+ *   - the row keyed by the file's own repo path (a report inside the
+ *     workspace, or one whose suites are named from the repo root);
+ *   - a row of a report sitting AT the junit root whose basename is a
+ *     workspace path with `/` turned to `-` (`packages-combos.xml`, the way a
+ *     per-workspace runner names it), naming the rest of the path — and only
+ *     when the file's own leading directories slugify to exactly that name.
+ */
+export function junitRow(junit, test) {
+  const own = junit.get(test);
+  if (own) return own;
+  for (let i = test.indexOf("/"); i > 0; i = test.indexOf("/", i + 1)) {
+    const rows = junit.bySlug?.get(test.slice(0, i).replace(/\//g, "-"));
+    const row = rows?.get(test.slice(i + 1));
+    if (row) return row;
+  }
+  return undefined;
 }
 
 /**
@@ -161,7 +196,7 @@ export function shardRecord({ lane, plan, leg, shard, shardTotal, outcome, headS
     // FUT-4563: only a file this shard's JUnit shows RUNNING, at least one test
     // case and none failed or errored. A planned file the runner never
     // collected exits 0 with "No test files found" — and has no row here.
-    const row = junit.get(test);
+    const row = junitRow(junit, test);
     if (!row || row.ran < 1 || row.bad > 0) {
       uncollected++;
       continue;

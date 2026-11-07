@@ -17,7 +17,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { SHARD_RECORD_VERSION } from "../lib/manifest.mjs";
-import { junitFiles, shardRecord } from "../shard.mjs";
+import { junitFiles, junitRow, shardRecord } from "../shard.mjs";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "shard.mjs");
 const TMP = mkdtempSync(join(tmpdir(), "skip-green-shard-"));
@@ -159,4 +159,26 @@ test("CLI: a green leg writes its passes; a red one writes an eviction", () => {
   assert.equal(green.emitted.written, "true");
   assert.equal(green.emitted.tests, "1");
   assert.deepEqual(JSON.parse(readFileSync(join(dir, "green/unit-s1.json"), "utf8")).tests, { "a.test.ts": H(1) }, "the uncollected c.test.ts is not recorded");
+});
+
+test("a report AT the junit root, named after its workspace, keys its package-relative suites onto that workspace only", () => {
+  const cwd = join(TMP, "slug");
+  mkdirSync(join(cwd, "reports/junit/unit"), { recursive: true });
+  // The way a per-workspace runner names it: `packages/combos` → `packages-combos.xml`.
+  writeFileSync(
+    join(cwd, "reports/junit/unit/packages-combos.xml"),
+    '<testsuites><testsuite name="src/core/__tests__/flow.test.ts" tests="3" failures="0" errors="0" skipped="0"/></testsuites>',
+  );
+  const junit = junitFiles(["reports/junit/unit"], cwd);
+  assert.deepEqual(junitRow(junit, "packages/combos/src/core/__tests__/flow.test.ts"), { ran: 3, bad: 0 });
+  // Same relative name in ANOTHER workspace: that report does not answer for it.
+  assert.equal(junitRow(junit, "packages/delivery/src/core/__tests__/flow.test.ts"), undefined);
+  assert.equal(junitRow(junit, "packages/combos/src/core/__tests__/other.test.ts"), undefined);
+  // A planned file the workspace's vitest did not collect is still absent.
+  const rec = shardRecord({
+    lane: "unit",
+    plan: { mode: "narrowed", tests: ["packages/combos/src/core/__tests__/flow.test.ts", "packages/combos/src/core/uncollected.test.ts"], inputs: { "packages/combos/src/core/__tests__/flow.test.ts": H(5), "packages/combos/src/core/uncollected.test.ts": H(6) } },
+    leg: null, shard: "1", shardTotal: "1", outcome: "success", headSha: HEAD, runId: "77", junit,
+  }).record;
+  assert.deepEqual(Object.keys(rec.tests), ["packages/combos/src/core/__tests__/flow.test.ts"]);
 });
