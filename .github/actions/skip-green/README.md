@@ -47,8 +47,14 @@ inputs** is reported as skipped and does not run.
    the run's hashes into the manifest and the workflow saves it under
    `green-<lane>-<key>-pr<N>-<run_id>`; the next run restores by the
    `green-<lane>-<key>-pr<N>-` prefix, so the newest green manifest of the PR
-   wins. `<key>` is the workflow's hash of the lane's Node version and
-   commands, so changing how the lane runs invalidates every entry.
+   wins. `<key>` is the workflow's hash of how the lane runs: its Node
+   version, its commands, the repository variables, and the engine's
+   execution identity. That last part is `lane-verdict`'s `scoped-identity`
+   for `monorepo-tests.yml` (FUT-4550): that workflow, the actions it names
+   transitively (without their tests and docs) and the modules they import,
+   with the caller's workflows read at the PR head (FUT-4549). Changing how
+   the lane runs therefore retires every entry, and nothing else does (see
+   [What retires a manifest](#what-retires-a-manifest)).
 4. **`shard`** (inside each shard, after its tests — FUT-4548) keeps a lane
    that did NOT pass from throwing its green shards away. A shard whose test
    step exited 0 writes the hashes of the files of its OWN list (the
@@ -63,11 +69,20 @@ inputs** is reported as skipped and does not run.
    lists are recorded, and evicted entries are DELETED — on a failed lane also
    the leg of every shard that left no record — so a test green at an earlier
    head and red now is never skipped on that old proof.
-   commands, so changing how the lane runs invalidates every entry. Its engine
-   half is `lane-verdict`'s `scoped-identity` for `monorepo-tests.yml`
-   (FUT-4550): that workflow, the actions it names transitively (without their
-   tests and docs) and the modules they import. An engine change outside it
-   keeps every manifest; a change to anything the lanes run retires them.
+
+## What retires a manifest
+
+A test's own proof is retired by a change to its hash (its file, its import
+closure, a lane global). The whole manifest is retired when `<key>` moves:
+
+| change | manifest |
+|---|---|
+| the lane's Node version, a command, a repository variable | retired |
+| `monorepo-tests.yml`, an engine action it runs, or a module one of those imports | retired |
+| the caller's workflow files at the PR head | retired |
+| a `v2` move that touches only other workflows, actions the lanes never run, or any `__tests__/` or `*.md` | kept |
+| a merge to the consumer's `main` that the PR did not make | kept (the PR head is what is hashed) |
+| the scoped identity cannot be computed | nothing reused: an empty key reuses nothing |
 
 ## Shadow first
 
