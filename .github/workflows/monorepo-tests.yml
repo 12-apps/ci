@@ -207,6 +207,20 @@ on:
         type: string
         required: false
         default: ''
+      build-turbo-restore:
+        description: >-
+          Restore the Build job's `.turbo` archive (prefix `turbo-build-`) on
+          a PULL REQUEST. Default true: today's behaviour. false skips only the
+          pull-request restore, for a consumer whose PR builds measurably reuse
+          nothing from the default branch's archive (future-pay: 169 of 175 PR
+          restores with zero reuse, a ~100 s download against a ~50 s build).
+          Off a pull request the restore always runs, and the save is never
+          affected: the default branch keeps writing its warm entry. Turbo's
+          own content hashes decide the build's outputs, so the build's result
+          is the same either way; only its duration can differ.
+        type: boolean
+        required: false
+        default: true
       run-integration:
         description: >-
           Run the integration lane. Consumers typically compute this from
@@ -1488,8 +1502,14 @@ jobs:
       # The prefix restore is unchanged and still does the work: a PR gets the
       # newest entry the default branch wrote, and turbo's own content hashes
       # decide what inside it is reusable. What a PR no longer does is WRITE.
+      #
+      # A caller may also stop a PR from READING (`build-turbo-restore: false`,
+      # FUT-4538) when its PR builds reuse nothing from that entry: the
+      # download then costs more than the build it would warm. Only the
+      # pull-request restore is skippable; the default branch always restores,
+      # and the save below never reads this input.
       - name: Restore turbo cache
-        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' && (github.event_name != 'pull_request' || inputs.build-turbo-restore) }}
         uses: actions/cache/restore@v4
         with:
           path: .turbo

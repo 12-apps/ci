@@ -102,3 +102,101 @@ test("every write is gated off pull requests", () => {
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// FUT-4538: a caller may skip the Build job's pull-request RESTORE.
+//
+// future-pay measured 169 of 175 PR Build restores reusing nothing, at a
+// median ~100 s download against a ~50 s build. `build-turbo-restore: false`
+// drops that download on pull requests only. Three regressions would all be
+// green: a default that flips (every consumer silently loses its warm PR
+// builds), the input leaking off pull requests (the default branch builds
+// cold every day), or the save starting to read it (main stops writing the
+// entry every PR restores). Each is pinned below.
+// ---------------------------------------------------------------------------
+
+const TESTS_YML = readFileSync(join(WORKFLOWS, "monorepo-tests.yml"), "utf8");
+
+/** The `build-turbo-restore` declaration block under workflow_call.inputs. */
+function buildTurboRestoreInput() {
+  const m = /\n {6}build-turbo-restore:\n((?: {8}.*\n| {10}.*\n)+)/.exec(TESTS_YML);
+  return m ? m[1] : null;
+}
+
+function buildSteps() {
+  return turboCacheSteps().filter((s) => s.file === "monorepo-tests.yml" && s.namespace === "turbo-build");
+}
+
+/** The single-line `if:` of a step block, as the text inside `${{ }}`. */
+function ifExpression(block) {
+  const m = /\n\s*if:\s*\$\{\{\s*(.*?)\s*\}\}\s*\n/.exec(`\n${block}\n`);
+  return m ? m[1] : null;
+}
+
+/**
+ * Evaluates the subset of GitHub's expression language these two `if:`s use
+ * (`!=`, `==`, `&&`, `||`, `!`, parentheses, string literals, three context
+ * reads). Anything else in the expression throws, so a rewrite that this
+ * cannot read fails loudly instead of being judged on a guess.
+ */
+function evaluate(expr, { event, input, hit }) {
+  const values = {
+    "steps.lane-verdict.outputs.hit": JSON.stringify(hit),
+    "github.event_name": JSON.stringify(event),
+    "inputs.build-turbo-restore": JSON.stringify(input),
+  };
+  let js = expr;
+  for (const [ref, value] of Object.entries(values)) js = js.split(ref).join(value);
+  const rest = js.replace(/'[^']*'|"[^"]*"|true|false|!=|==|&&|\|\||[()!\s]/g, "");
+  if (rest !== "") throw new Error(`unreadable expression: ${expr} (left: ${rest})`);
+  return Boolean(new Function(`return (${js.replace(/!=/g, "!==").replace(/([^!=])==/g, "$1===")});`)());
+}
+
+test("build-turbo-restore is declared as a boolean that defaults to TODAY's behaviour", () => {
+  const block = buildTurboRestoreInput();
+  assert.ok(block, "monorepo-tests.yml declares no build-turbo-restore input; a caller passing it is a startup_failure");
+  assert.match(block, /^\s+type: boolean$/m);
+  assert.match(block, /^\s+required: false$/m);
+  assert.match(block, /^\s+default: true$/m, "the default must keep the PR restore on, or every consumer silently loses it");
+});
+
+test("the Build restore honours build-turbo-restore on pull requests only", () => {
+  const restore = buildSteps().find((s) => /actions\/cache\/restore@/.test(s.block));
+  assert.ok(restore, "no turbo-build restore step found");
+  const expr = ifExpression(restore.block);
+  assert.ok(expr, `the restore step has no single-line if: ${restore.block}`);
+  const cases = [
+    // event, input, verdict hit -> restores?
+    ["pull_request", true, "", true],
+    ["pull_request", false, "", false],
+    ["push", true, "", true],
+    ["push", false, "", true],
+    ["schedule", false, "", true],
+    ["workflow_dispatch", false, "", true],
+    ["pull_request", true, "true", false],
+    ["push", false, "true", false],
+  ];
+  for (const [event, input, hit, want] of cases) {
+    assert.equal(
+      evaluate(expr, { event, input, hit }),
+      want,
+      `event=${event} build-turbo-restore=${input} verdict-hit=${hit || "no"}: restore ${want ? "must" : "must not"} run (if: ${expr})`,
+    );
+  }
+});
+
+test("the Build save never reads build-turbo-restore", () => {
+  const save = buildSteps().find((s) => /actions\/cache\/save@/.test(s.block));
+  assert.ok(save, "no turbo-build save step found");
+  assert.doesNotMatch(save.block, /build-turbo-restore/, "the save must not depend on the restore input: main keeps writing the entry PRs restore");
+  const expr = ifExpression(save.block);
+  for (const input of [true, false]) {
+    assert.equal(evaluate(expr, { event: "push", input, hit: "" }), true, "main/daily always save");
+    assert.equal(evaluate(expr, { event: "pull_request", input, hit: "" }), false, "a PR never saves");
+  }
+});
+
+test("the evaluator refuses what it cannot read", () => {
+  assert.throws(() => evaluate("contains(github.event_name, 'pull')", { event: "push", input: true, hit: "" }));
+  assert.equal(evaluate("github.event_name != 'pull_request' || inputs.build-turbo-restore", { event: "pull_request", input: false, hit: "" }), false);
+});
