@@ -711,7 +711,7 @@ jobs:
       - name: Skip what is already green
         id: skipgreen
         if: ${{ steps.skip-green-key.outputs.value != '' }}
-        uses: 12-apps/ci/.github/actions/skip-green@v2
+        uses: 12-apps/ci/.github/actions/skip-green@ci/fut-4548-probe
         with:
           mode: filter
           lane: unit
@@ -1234,7 +1234,7 @@ jobs:
           ${{ always()
               && needs.unit-plan.outputs.skip-green-key != ''
               && (steps.unit.outcome == 'success' || steps.unit.outcome == 'failure') }}
-        uses: 12-apps/ci/.github/actions/skip-green@v2
+        uses: 12-apps/ci/.github/actions/skip-green@ci/fut-4548-probe
         with:
           mode: shard
           lane: unit
@@ -1410,7 +1410,7 @@ jobs:
       - name: Record the green tests
         id: record
         if: ${{ needs.unit-plan.outputs.skip-green-key != '' }}
-        uses: 12-apps/ci/.github/actions/skip-green@v2
+        uses: 12-apps/ci/.github/actions/skip-green@ci/fut-4548-probe
         with:
           mode: record
           lane: unit
@@ -1472,7 +1472,7 @@ jobs:
             green-unit-${{ needs.unit-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-
       - name: Merge the green shards into the manifest
         id: record
-        uses: 12-apps/ci/.github/actions/skip-green@v2
+        uses: 12-apps/ci/.github/actions/skip-green@ci/fut-4548-probe
         with:
           mode: record
           lane: unit
@@ -1791,7 +1791,7 @@ jobs:
       - name: Skip what is already green
         id: skipgreen
         if: ${{ steps.skip-green-key.outputs.value != '' }}
-        uses: 12-apps/ci/.github/actions/skip-green@v2
+        uses: 12-apps/ci/.github/actions/skip-green@ci/fut-4548-probe
         with:
           mode: filter
           lane: integration
@@ -2216,7 +2216,7 @@ jobs:
           ${{ always()
               && needs.integration-plan.outputs.skip-green-key != ''
               && (steps.integration.outcome == 'success' || steps.integration.outcome == 'failure') }}
-        uses: 12-apps/ci/.github/actions/skip-green@v2
+        uses: 12-apps/ci/.github/actions/skip-green@ci/fut-4548-probe
         with:
           mode: shard
           lane: integration
@@ -2363,7 +2363,7 @@ jobs:
       - name: Record the green tests
         id: record
         if: ${{ needs.integration-plan.outputs.skip-green-key != '' }}
-        uses: 12-apps/ci/.github/actions/skip-green@v2
+        uses: 12-apps/ci/.github/actions/skip-green@ci/fut-4548-probe
         with:
           mode: record
           lane: integration
@@ -2425,7 +2425,7 @@ jobs:
             green-integration-${{ needs.integration-plan.outputs.skip-green-key }}-pr${{ github.event.pull_request.number }}-
       - name: Merge the green shards into the manifest
         id: record
-        uses: 12-apps/ci/.github/actions/skip-green@v2
+        uses: 12-apps/ci/.github/actions/skip-green@ci/fut-4548-probe
         with:
           mode: record
           lane: integration
