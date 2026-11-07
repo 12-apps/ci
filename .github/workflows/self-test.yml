@@ -332,6 +332,12 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/skip-green-wiring.test.mjs
 
+      # A shard records what IT passed and a red shard evicts what it ran;
+      # the merge runs only for a lane that did not pass (FUT-4548).
+      - name: skip-green shard wiring
+        shell: bash
+        run: node --test .github/workflows/__tests__/skip-green-shard-wiring.test.mjs
+
       # lane-verdict decides whether a whole job's install and work RUN. Its
       # key must refuse a push, a failing command and prose, and must move when
       # the lane's command or Node version moves; both directions are asserted.
