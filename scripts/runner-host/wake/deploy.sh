@@ -51,6 +51,16 @@
 # checkout's defaults. On 2026-09-30 a deploy from an older checkout put the
 # fleet back on 6000/500 disks and 4xlarge hosts for a day. 1 skips the check.
 # PNPM_STORE (off): `on` mounts the image's warm pnpm store into every job.
+# HOST_LABELS (unset: the labels the image was built with): the runner labels
+# this fleet's hosts register with, written over the image's CI_RUNNER_LABELS
+# at boot. It must include RUNNER_LABEL. A second fleet from the SAME image (a
+# light pool, README "A light pool") sets it to its own label; unset, the user
+# data is what it was before this setting existed.
+# WEBHOOK_SECRET_PARAMETER (unset): an SSM SecureString in AWS_REGION that holds
+# the webhook's secret, created by hand with the webhook itself. The scaler
+# reads it at run time and the function's configuration never holds it; the
+# deploy reads it once, into a 0600 file it deletes, to sign its own ping.
+# Unset, the secret is WAKE_SECRET_FILE's, in the function's environment, as before.
 # PRUNE_IMAGES (1): after a deploy, delete each region's older fleet images and
 # their snapshots, keeping the image in use, the one before it and any a live
 # host runs on (prune-images.mjs). Needs ec2:DeregisterImage and
@@ -83,6 +93,13 @@ settle_seconds="${SETTLE_SECONDS:-30}"
 # The scaler sleeps the settle inside an invocation with a 120 s timeout (below):
 # a settle near that never launches, so a value over 90 stops the deploy.
 [[ "$settle_seconds" =~ ^[0-9]{1,3}$ ]] && (( 10#$settle_seconds <= 90 )) || { echo "deploy: SETTLE_SECONDS must be a whole number from 0 to 90, got '${settle_seconds}'" >&2; exit 1; }
+host_labels="${HOST_LABELS:-}"
+if [[ -n "$host_labels" ]]; then
+  [[ "$host_labels" =~ ^[A-Za-z0-9._-]+(,[A-Za-z0-9._-]+)*$ ]] || { echo "deploy: HOST_LABELS must be comma-separated runner labels, got '${host_labels}'" >&2; exit 1; }
+  [[ ",${host_labels}," == *",${label},"* ]] || { echo "deploy: HOST_LABELS '${host_labels}' must include RUNNER_LABEL '${label}', or no host would take this fleet's jobs" >&2; exit 1; }
+fi
+secret_param="${WEBHOOK_SECRET_PARAMETER:-}"
+[[ -z "$secret_param" || "$secret_param" =~ ^/[A-Za-z0-9_./-]+$ ]] || { echo "deploy: WEBHOOK_SECRET_PARAMETER must be an SSM parameter name starting with /, got '${secret_param}'" >&2; exit 1; }
 pnpm_store="${PNPM_STORE:-off}"
 [[ "$pnpm_store" == on || "$pnpm_store" == off ]] || { echo "deploy: PNPM_STORE must be on or off" >&2; exit 1; }
 # Boot-time settings, applied to the image's /etc/ci-runner/env by cloud-init's
@@ -100,6 +117,15 @@ pnpm_store="${PNPM_STORE:-off}"
 #    the job's own store. Node in the tool cache is unaffected.
 store_cmd=""
 [[ "$pnpm_store" == off ]] && store_cmd="  - [sh, -c, \"sed -i 's/^CI_RUNNER_PNPM_STORE=.*/CI_RUNNER_PNPM_STORE=/' /etc/ci-runner/env\"]"
+#  - the runner labels, only with HOST_LABELS: one image serves two fleets
+#    (a light pool), and a host registers with the labels of the fleet that
+#    launched it. Without it no line is written, so the image's labels stand.
+labels_cmd=""
+[[ -n "$host_labels" ]] && labels_cmd="  - [sh, -c, \"sed -i 's/^CI_RUNNER_LABELS=.*/CI_RUNNER_LABELS=${host_labels}/' /etc/ci-runner/env\"]"
+# On the store's line, so the user data of a fleet without HOST_LABELS is byte
+# for byte what it was.
+nl=$'\n'
+[[ -z "$labels_cmd" ]] || store_cmd+="${store_cmd:+$nl}${labels_cmd}"
 user_data=$(base64 -w0 <<UD
 #cloud-config
 bootcmd:
@@ -290,6 +316,7 @@ policy=$(jq -n --arg lts "$template_arns" --arg hostrole "$host_role" --arg labe
   --arg param "arn:aws:ssm:${region}:${account}:parameter${param}" \
   --arg spend "arn:aws:ssm:${region}:${account}:parameter/ci-runner/spend-${label}" \
   --arg alert "arn:aws:ssm:${region}:${account}:parameter${alert_param}" \
+  --arg hooksecret "${secret_param:+arn:aws:ssm:${region}:${account}:parameter${secret_param}}" \
   --arg queue "arn:aws:dynamodb:${region}:${account}:table/${queue_table}" \
   --arg logs "arn:aws:logs:${region}:${account}:log-group:/aws/lambda/${fn}" '{
   Version: "2012-10-17",
@@ -302,7 +329,7 @@ policy=$(jq -n --arg lts "$template_arns" --arg hostrole "$host_role" --arg labe
     {Effect: "Allow", Action: "ec2:StartInstances", Resource: "*", Condition: {StringEquals: {"aws:ResourceTag/ci-runner-pool": $label}}},
     {Effect: "Allow", Action: "iam:PassRole", Resource: $hostrole},
     {Effect: "Allow", Action: "ec2:DescribeInstances", Resource: "*"},
-    {Effect: "Allow", Action: "ssm:GetParameter", Resource: [$param, $alert]},
+    {Effect: "Allow", Action: "ssm:GetParameter", Resource: ([$param, $alert] + (if $hooksecret == "" then [] else [$hooksecret] end))},
     {Effect: "Allow", Action: ["ssm:GetParameter", "ssm:PutParameter"], Resource: $spend},
     {Effect: "Allow", Action: ["dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:Scan", "dynamodb:UpdateItem"], Resource: $queue},
     {Effect: "Allow", Action: "kms:Decrypt", Resource: "*", Condition: {StringEquals: {"kms:ViaService": "ssm.\($param | split(":")[3]).amazonaws.com"}}},
@@ -315,17 +342,25 @@ aws iam create-service-linked-role --aws-service-name ec2fleet.amazonaws.com >/d
 (( new_role )) && sleep 15
 
 # ── secret, function, URL ────────────────────────────────────────────────────
-[[ -s "$secret_file" ]] || (umask 077; openssl rand -hex 32 > "$secret_file")
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-(umask 077; jq -n --rawfile s "$secret_file" --arg l "$label" --arg r "$repo" --arg t "$template" \
+if [[ -n "$secret_param" ]]; then
+  # Into a 0600 file that goes with $work, never into a variable or the output.
+  (umask 077; aws ssm get-parameter --name "$secret_param" --with-decryption --query Parameter.Value > "$work/webhook-secret") \
+    || { echo "deploy: cannot read the webhook secret ${secret_param} (create it first: README, \"A light pool\")" >&2; exit 1; }
+  [[ -s "$work/webhook-secret" ]] || { echo "deploy: ${secret_param} is empty" >&2; exit 1; }
+  secret_file="$work/webhook-secret"
+else
+  [[ -s "$secret_file" ]] || (umask 077; openssl rand -hex 32 > "$secret_file")
+fi
+(umask 077; jq -n --rawfile s "$secret_file" --arg sp "$secret_param" --arg l "$label" --arg r "$repo" --arg t "$template" \
   --arg p "$param" --arg types "$types" --arg regions "$live_regions" --arg slots "$slots" --arg max "$max_hosts" \
   --arg budget "$daily_budget" --arg degraded "$degraded_max_hosts" --arg offset "$budget_utc_offset" --arg alert "$alert_param" --arg strategy "$spot_strategy" \
   --arg settle "$settle_seconds" \
-  '{Variables: {MODE: "scale", WEBHOOK_SECRET: ($s | rtrimstr("\n")), RUNNER_LABEL: $l, REPOSITORY: $r,
+  '{Variables: ({MODE: "scale"} + (if $sp == "" then {WEBHOOK_SECRET: ($s | rtrimstr("\n"))} else {WEBHOOK_SECRET_PARAMETER: $sp} end) + {RUNNER_LABEL: $l, REPOSITORY: $r,
     LAUNCH_TEMPLATE: $t, TOKEN_PARAMETER: $p, INSTANCE_TYPES: $types, REGIONS: $regions, SLOTS_PER_HOST: $slots, MAX_HOSTS: $max,
     DAILY_BUDGET: $budget, DEGRADED_MAX_HOSTS: $degraded, BUDGET_UTC_OFFSET: $offset, ALERT_PARAMETER: $alert, SPOT_STRATEGY: $strategy,
-    SETTLE_SECONDS: $settle}}' > "$work/env.json")
+    SETTLE_SECONDS: $settle})}' > "$work/env.json")
 cp "$here/wake.mjs" "$here/scale.mjs" "$here/budget.mjs" "$here/github.mjs" "$here/queue.mjs" "$here/index.mjs" "$work/"
 (cd "$work" && python3 -m zipfile -c fn.zip wake.mjs scale.mjs budget.mjs github.mjs queue.mjs index.mjs)
 if aws lambda get-function --function-name "$fn" >/dev/null 2>&1; then
@@ -376,8 +411,18 @@ fi
 # on 2026-09-25. Last, so only a deploy that got this far prunes anything.
 # prune-images.mjs decides; this only lists and deletes. Scoped by name to this
 # fleet's images, so another project's AMIs in the account are never listed.
+# The $Default image of every other ci-runner-fleet-* template in a region.
+other_fleet_images() {
+  local r=$1 t
+  for t in $(in_region "$r" ec2 describe-launch-templates --filters "Name=launch-template-name,Values=ci-runner-fleet-*" \
+      --query 'LaunchTemplates[].LaunchTemplateName'); do
+    [[ "$t" == "$template" ]] && continue
+    in_region "$r" ec2 describe-launch-template-versions --launch-template-name "$t" --versions '$Default' \
+      --query 'LaunchTemplateVersions[0].LaunchTemplateData.ImageId' || return 1
+  done
+}
 prune_region() {
-  local r=$1 live image snaps s
+  local r=$1 live others image snaps s
   command aws --region "$r" --output json ec2 describe-images --owners self \
     --filters "Name=name,Values=ci-runner-${label}-*" > "$work/images-${r}.json" || return 1
   command aws --region "$r" --output json ec2 describe-launch-template-versions \
@@ -385,6 +430,11 @@ prune_region() {
   live=$(in_region "$r" ec2 describe-instances --filters Name=tag-key,Values=ci-runner-fleet \
     "Name=instance-state-name,Values=pending,running,shutting-down,stopping,stopped" \
     --query 'Reservations[].Instances[].ImageId') || return 1
+  # What ANOTHER fleet's template launches is in use too: a light pool launches
+  # this fleet's image (README, "A light pool") under a template of its own,
+  # which this fleet's history does not see. With no other fleet, nothing is added.
+  others=$(other_fleet_images "$r") || return 1
+  live="${live} ${others}"
   while read -r image snaps; do
     [[ -n "$image" ]] || continue
     if ! in_region "$r" ec2 deregister-image --image-id "$image" >/dev/null; then
@@ -405,6 +455,8 @@ if [[ "${PRUNE_IMAGES:-1}" == 1 ]]; then
   done
 fi
 
+secret_where="the contents of ${secret_file}"
+[[ -z "$secret_param" ]] || secret_where="the value of the SSM parameter ${secret_param} (the one the webhook already has)"
 cat <<DONE
 deploy: fleet ready. AMI ${AMI_ID}, template ${template} in ${live_regions} (tried in that order,
 then by spot placement score), up to ${max_hosts} hosts × ${slots} slots,
@@ -414,7 +466,7 @@ Scaler: ${url}
 Webhook on ${repo}: ${hook}. To add it by hand instead (CREATE_WEBHOOK=0), use Settings → Webhooks:
   Payload URL   ${url}
   Content type  application/json
-  Secret        the contents of ${secret_file}
+  Secret        ${secret_where}
   Events        "Workflow jobs" and "Workflow runs"
 The token in ${param} needs Actions: Read and write (count the queue, re-run jobs lost to a
 reclaimed host) and, for the webhook step, Webhooks: Read and write.

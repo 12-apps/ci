@@ -37,6 +37,7 @@ const reply = (statusCode, message, extra = {}) => ({ statusCode, body: JSON.str
 
 /**
  * @param {object} cfg
+ * @param {string | (() => string | Promise<string>)} cfg.secret the webhook secret, or a function that reads it
  * @param {{ queuedJobs(label: string): Promise<number>, idleRunners(label: string): Promise<number>, lostJobs(runId: number, attempt: number): Promise<number>, rerunFailed(runId: number): Promise<void> }} cfg.github
  * @param {number | (() => number | Promise<number>)} [cfg.maxHosts] the fleet's ceiling, or a function of the moment
  * @param {{ hosts(): Promise<{ id: string, state: string, launchedAt: number, pool?: boolean }[]>, launch(tokens: string[]): Promise<string[]>, start(ids: string[]): Promise<string[]> }} cfg.ec2
@@ -198,7 +199,10 @@ export function makeScaler({
   return async (event) => {
     const headers = Object.fromEntries(Object.entries(event.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]));
     const raw = event.isBase64Encoded ? Buffer.from(event.body ?? "", "base64") : Buffer.from(event.body ?? "");
-    if (!signatureValid(secret, raw, headers["x-hub-signature-256"])) return reply(401, "bad signature");
+    // A function when the secret lives in SSM (index.mjs, WEBHOOK_SECRET_PARAMETER):
+    // read on the first delivery a container serves, then kept.
+    const key = typeof secret === "function" ? await secret() : secret;
+    if (!signatureValid(key, raw, headers["x-hub-signature-256"])) return reply(401, "bad signature");
     const kind = headers["x-github-event"];
     if (kind === "ping") return reply(200, "pong");
     if (kind !== "workflow_job" && kind !== "workflow_run") return reply(202, `ignored event ${kind}`);
