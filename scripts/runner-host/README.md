@@ -266,6 +266,137 @@ run is back on GitHub's runners**, with no commit needed. If the machine goes
 down, jobs queue (they do not fail) until it comes back or the variable is
 removed.
 
+## A light pool for short jobs
+
+A plan, a verdict, Detect Changes or an upkeep probe runs for seconds and
+installs nothing, yet on the fleet each one holds a 4-core, 14 GB slot of an
+8-vCPU spot host, and a burst of them launches hosts that boot for ~3 minutes
+to run a 20-second job (FUT-4536). A **light pool** is a second fleet for
+exactly those jobs: the same image and the same scaler, deployed again under
+its own label, on 2-vCPU, 8 GB hosts.
+
+**What the jobs use**, from their `ci-runner-usage` lines on future-pay
+(2026-11-05): the Unit, Integration and SPA E2E plans average 0.84–1.1 cores
+with a working set of 0.67–1.5 GiB; Detect Changes 0.5–0.8 cores and 0.3 GiB;
+the conflict probes and the commit-message enforcement under 1.1 cores and
+0.63 GiB. A light host keeps the image's **two slots**, so each slot owns one
+vCPU and ~3.6 GB (90% of 8 GB ÷ 2), and no slot unit changes.
+
+**How it is made.** Nothing on the main fleet changes; every setting below is
+optional and its absence is today's behaviour:
+
+- `deploy.sh` with `HOST_LABELS=<light label>` writes the label over the
+  image's `CI_RUNNER_LABELS` at boot, so a host from the main fleet's image
+  registers for the light pool. Its own `FUNCTION_NAME`, launch template
+  (`ci-runner-fleet-<light label>`), queue table, daily budget and spend
+  parameter all follow from `RUNNER_LABEL`.
+- `WEBHOOK_SECRET_PARAMETER=<SSM name>`: the scaler reads its webhook secret
+  from an SSM SecureString at run time instead of carrying it in its
+  configuration. The webhook is created by hand (below), so the secret is made
+  once by its owner and never passes through a deploy's checkout or a refresh's
+  log.
+- Pruning keeps the image every OTHER fleet template launches, so the main
+  fleet's deploy never deletes the image the light pool still runs.
+- `refresh-image.sh` with `LIGHT_FUNCTION_NAME` (the workflow's
+  `light_function_name`) deploys the new image to the light pool too, after
+  the main fleet, with the light scaler's own live settings, and never touches
+  its webhook (`CREATE_WEBHOOK=0`).
+- The reusable workflows take `light-runner` and send only their short jobs
+  to it (`.github/workflows/__tests__/light-runner.test.mjs` lists them);
+  empty, every job runs where it runs today.
+
+A second scaler means a second webhook, because each scaler has its own
+function URL and acts only on its own label (`scale-light.test.mjs`).
+
+### Turning it on (the owner, once)
+
+Do these in order. Until step 7 no job moves, so every step can be checked
+before the next. `future-pay-ci-light` and `ci-runner-scale-light` are the
+names the consumer's variables expect; the region is the fleet's home region.
+
+1. **Merge the engine change and let its release move `v2`**, then merge the
+   consumer's. With the repository variables of steps 5 and 7 unset, the
+   consumer's CI runs exactly where it ran before.
+2. **Make the webhook secret** on your own machine, never in a chat or a log:
+
+   ```bash
+   umask 077; openssl rand -hex 32 | tr -d '\n' > ~/ci-runner-light-webhook-secret
+   ```
+
+3. **Store it in SSM**, in the fleet's home region, under this exact name:
+   `/ci-runner/webhook-secret-future-pay-ci-light`. *AWS console → Systems
+   Manager → Parameter Store → Create parameter*: Tier **Standard**, Type
+   **SecureString**, KMS key `alias/aws/ssm`, Value: the file's contents. Or:
+
+   ```bash
+   aws ssm put-parameter --region us-east-1 --type SecureString \
+     --name /ci-runner/webhook-secret-future-pay-ci-light \
+     --value "file://$HOME/ci-runner-light-webhook-secret"
+   ```
+
+4. **Deploy the light scaler** from a checkout of `main`, with the account's
+   admin profile. `AMI_ID` is what the main fleet launches now, and `REGIONS`
+   its live regions:
+
+   ```bash
+   ami=$(aws ec2 describe-launch-template-versions --region us-east-1 --launch-template-name ci-runner-fleet-future-pay-ci \
+     --versions '$Default' --query 'LaunchTemplateVersions[0].LaunchTemplateData.ImageId' --output text)
+   regions=$(aws lambda get-function-configuration --region us-east-1 --function-name ci-runner-scale \
+     --query Environment.Variables.REGIONS --output text)
+   cd scripts/runner-host/wake
+   AWS_REGION=us-east-1 REPOSITORY=12-apps/future-pay \
+   RUNNER_LABEL=future-pay-ci-light FUNCTION_NAME=ci-runner-scale-light HOST_LABELS=future-pay-ci-light \
+   WEBHOOK_SECRET_PARAMETER=/ci-runner/webhook-secret-future-pay-ci-light CREATE_WEBHOOK=0 \
+   AMI_ID="$ami" REGIONS="$regions" \
+   SUBNET_ID=<as the main fleet> SECURITY_GROUP_ID=<as the main fleet> INSTANCE_PROFILE_ARN=<as the main fleet> \
+   INSTANCE_TYPES=m7a.large,m6a.large,m7i.large,m6i.large,r7a.large,r6a.large,r7i.large,r6i.large \
+   SLOTS_PER_HOST=2 MAX_HOSTS=10 DAILY_BUDGET=4 DEGRADED_MAX_HOSTS=1 IDLE_MINUTES=5 ROOT_THROUGHPUT=125 \
+     ./deploy.sh
+   ```
+
+   It ends with `Scaler: https://….lambda-url.us-east-1.on.aws/`; the signed
+   ping it sends proves the function reads the secret. `IDLE_MINUTES=5` keeps a
+   cheap host for the next burst (modelled: half the launches of 2 minutes for
+   6% more host-hours); `ROOT_THROUGHPUT=125` is gp3's free baseline, which a
+   job that installs nothing does not exceed. `MAX_HOSTS=10` is 20 vCPU on top
+   of the main fleet's 240 against the account's spot vCPU quota (L-34B43A08):
+   check the quota has room in every region in `REGIONS`.
+5. **Create webhook #2.** *github.com/12-apps/future-pay → Settings → Webhooks
+   → Add webhook*: Payload URL = the `Scaler:` URL from step 4, exactly
+   (trailing slash included); Content type `application/json`; Secret = the
+   same value as step 3; SSL verification on; *Let me select individual
+   events* → **Workflow jobs** and **Workflow runs** only; Active. Its *Recent
+   Deliveries* must show the ping answered `200` with `pong`. Then delete
+   `~/ci-runner-light-webhook-secret`.
+6. **Let the weekly refresh carry it.** Give the refresh role (README in
+   `wake/`, "One-time setup") the same rights over `ci-runner-scale-light`
+   (function and role), `ci-runner-fleet-future-pay-ci-light` (template),
+   `ci-runner-queue-future-pay-ci-light` (table),
+   `/ci-runner/spend-future-pay-ci-light` and the secret parameter of step 3
+   (`ssm:GetParameter` with decryption) as it has over the main fleet's, then
+   set the consumer's repository variable `CI_LIGHT_RUNNER_FUNCTION` =
+   `ci-runner-scale-light`. Unset, a refresh redeploys the main fleet only and
+   the light pool stays on its image until someone redeploys it.
+7. **Flip the switch**: repository variable `CI_LIGHT_RUNNER` =
+   `future-pay-ci-light`. The next run's short jobs queue for the light pool.
+   **Delete the variable and they are back on the main fleet** with the next
+   run, no commit needed; if the light pool is down, its jobs queue (they do
+   not fail) until it is back or the variable is gone.
+
+**Its own GitHub credential (optional).** The light scaler reads the token at
+`TOKEN_PARAMETER` (default the main fleet's `/ci-runner/github-app-key`), and
+its reads come out of that token's hourly allowance: about one runner listing
+per delivery that evaluates, and one reconcile every 10 minutes. To keep the
+main scaler's allowance whole, store a second token (same permissions:
+*Administration* and *Actions* read and write) as another SecureString and
+deploy the light scaler with `TOKEN_PARAMETER=<its name>`. The hosts still
+mint their runners with the image's credential.
+
+**Reading it back.** `fleet-cost.mjs`, `usage-report.mjs` and
+`daily-report.mjs` take `--label future-pay-ci-light` (and `--slots 2`) for
+the light pool's own numbers. `cost-report.yml` prices every self-hosted job
+at one rate, so its PR comment overstates a light job's cost.
+
 ## What stays on GitHub's runners
 
 (`expo-apk.yml`'s `apk` job moved to the fleet: the image carries the Android
