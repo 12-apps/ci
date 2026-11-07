@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 const workflows = new Map([
-  ['monorepo-static', 5], ['monorepo-tests', 9],
+  ['monorepo-static', 5], ['monorepo-tests', 11],
   ['commitlint', 1], ['post-merge-regen', 3],
 ]);
 const expected = "inputs.runner || vars.CI_RUNNER || 'ubuntu-latest'";

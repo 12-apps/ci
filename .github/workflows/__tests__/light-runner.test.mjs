@@ -24,7 +24,7 @@ import { declaredInputs } from "./declared-inputs.test.mjs";
 /** `<file>` → the jobs that read `light-runner`, and nothing else in the file. */
 export const LIGHT_JOBS = new Map([
   ["monorepo-static.yml", ["changes", "actionlint"]],
-  ["monorepo-tests.yml", ["unit-plan", "unit-signal", "unit-verdict", "integration-plan", "integration-signal", "integration-verdict"]],
+  ["monorepo-tests.yml", ["unit-plan", "unit-signal", "unit-verdict", "unit-green-shards", "integration-plan", "integration-signal", "integration-verdict", "integration-green-shards"]],
   ["cost-report.yml", ["report"]],
   ["conflict-overlap.yml", ["overlap"]],
   ["conflict-probe.yml", ["probe"]],

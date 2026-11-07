@@ -15,12 +15,18 @@ description: >-
 
   Fails safe in every direction: no manifest, an unreadable one, a plan without
   hashes, a test with no bounded hash, a test on the consumer's always-run list,
-  an always-run list that cannot be read — each runs the test. Only a lane
-  whose result is `success` records anything.
+  an always-run list that cannot be read — each runs the test. Only what
+  passed is recorded: a lane whose result is `success` records every test it
+  ran; a lane that failed or was cancelled records only the lists of the
+  shards whose own test step exited 0 (`shard` mode, FUT-4548).
 
 inputs:
   mode:
-    description: '`filter` (in the plan job, before the matrix is sized) or `record` (after the matrix, in a green lane).'
+    description: >-
+      `filter` (in the plan job, before the matrix is sized), `shard` (inside a
+      shard whose test step succeeded: write what THIS shard proved), or
+      `record` (after the matrix: a green lane's tests, or a failed/cancelled
+      lane's green shard records).
     required: true
   lane:
     description: 'Lane name (`unit`, `integration`); the manifest is per lane.'
@@ -58,6 +64,43 @@ inputs:
     description: '`record` only: the pull request head the green run tested (what the skip line names). Defaults to GITHUB_SHA.'
     required: false
     default: ''
+  shard-records:
+    description: >-
+      `record` only: directory of the shard records (`shard` mode) of THIS run.
+      Read only when `lane-result` is `failure` or `cancelled`; a green lane
+      records from the plan as it always has. Empty for none.
+    required: false
+    default: ''
+  leg:
+    description: >-
+      `shard` only: this leg's file list (lane-timings `leg` output). Empty when
+      the lane was not sized, which records nothing above one shard — a shard
+      split by the runner cannot name the files it ran.
+    required: false
+    default: ''
+  shard:
+    description: '`shard` only: this shard''s index.'
+    required: false
+    default: ''
+  shard-total:
+    description: '`shard`, and `record` with `shard-records`: the lane''s shard count (the merge evicts the leg of a shard that left no record when the plan carries no `legs`).'
+    required: false
+    default: ''
+  outcome:
+    description: '`shard` only: the outcome of the shard''s test step. `success` writes a green record, `failure` an eviction record, anything else nothing.'
+    required: false
+    default: ''
+  reports:
+    description: >-
+      `shard` only: the lane's JUnit report paths (space-separated, globs
+      expanded). When set, a shard whose reports hold zero test cases records
+      nothing. Empty skips that check.
+    required: false
+    default: ''
+  out:
+    description: '`shard` only: where to write the shard record, relative to working-directory.'
+    required: false
+    default: '.skip-green-shard/record.json'
   working-directory:
     description: 'Consumer checkout root.'
     required: false
@@ -86,6 +129,9 @@ outputs:
       rather than from the unfiltered plan; anything else means the plan on
       disk is the one `affected-plan` wrote.
     value: ${{ steps.filter.outputs.filtered }}
+  written:
+    description: '`shard`: `true` when a shard record was written.'
+    value: ${{ steps.shard.outputs.written }}
   recorded:
     description: '`record`: `true` when a manifest was written.'
     value: ${{ steps.record.outputs.recorded }}
@@ -118,6 +164,34 @@ runs:
           --always-run "$ALWAYS_RUN" --max-shards "$MAX_SHARDS" --min-tests-per-shard "$PER_SHARD" \
           || echo "::warning::skip-green ($LANE): the filter could not run — the plan runs unfiltered."
 
+    - name: Record what this green shard proved
+      id: shard
+      if: ${{ inputs.mode == 'shard' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        LANE: ${{ inputs.lane }}
+        PLAN: ${{ inputs.plan }}
+        LEG: ${{ inputs.leg }}
+        SHARD: ${{ inputs.shard }}
+        SHARD_TOTAL: ${{ inputs.shard-total }}
+        OUTCOME: ${{ inputs.outcome }}
+        REPORTS: ${{ inputs.reports }}
+        OUT: ${{ inputs.out }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+      run: |
+        set -uo pipefail
+        # Globs in REPORTS (`apps/*/reports/junit/unit`) are expanded here, the
+        # way the zero-test guard's paths are; a glob matching nothing stays
+        # literal and simply does not exist.
+        # shellcheck disable=SC2086
+        expanded="$(printf '%s ' $REPORTS)"
+        node "$GITHUB_ACTION_PATH/shard.mjs" \
+          --lane "$LANE" --plan "$PLAN" --leg "$LEG" --shard "$SHARD" --shard-total "$SHARD_TOTAL" \
+          --outcome "$OUTCOME" --reports "$expanded" --out "$OUT" \
+          --head-sha "${HEAD_SHA:-$GITHUB_SHA}" --run-id "$GITHUB_RUN_ID" \
+          || echo "::warning::skip-green ($LANE): the shard record could not be written — this shard's tests re-run if the lane fails."
+
     - name: Record what this green lane proved
       id: record
       if: ${{ inputs.mode == 'record' }}
@@ -129,9 +203,12 @@ runs:
         MANIFEST: ${{ inputs.manifest }}
         LANE_RESULT: ${{ inputs.lane-result }}
         HEAD_SHA: ${{ inputs.head-sha }}
+        SHARD_RECORDS: ${{ inputs.shard-records }}
+        SHARD_TOTAL: ${{ inputs.shard-total }}
       run: |
         set -uo pipefail
         node "$GITHUB_ACTION_PATH/record.mjs" \
           --lane "$LANE" --plan "$PLAN" --manifest "$MANIFEST" \
           --lane-result "$LANE_RESULT" --head-sha "${HEAD_SHA:-$GITHUB_SHA}" --run-id "$GITHUB_RUN_ID" \
+          --shard-records "$SHARD_RECORDS" --shard-total "$SHARD_TOTAL" \
           || echo "::warning::skip-green ($LANE): the record step could not run — nothing recorded."

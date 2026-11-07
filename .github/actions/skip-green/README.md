@@ -45,6 +45,16 @@ inputs** is reported as skipped and does not run.
    `green-<lane>-<key>-pr<N>-` prefix, so the newest green manifest of the PR
    wins. `<key>` is the workflow's hash of the lane's Node version and
    commands, so changing how the lane runs invalidates every entry.
+4. **`shard`** (inside each shard, after its tests — FUT-4548) keeps a lane
+   that did NOT pass from throwing its green shards away. A shard whose test
+   step exited 0 writes the hashes of its OWN list (the lane-timings leg, or
+   the plan at one shard; a shard split by the runner's `--shard` cannot name
+   its files and writes nothing); a shard whose test step FAILED writes an
+   eviction of its whole list. When the matrix failed or was cancelled,
+   `<lane>-green-shards` merges them (`record` with `shard-records`): green
+   lists are recorded, and evicted entries are DELETED — on a failed lane also
+   the leg of every shard that left no record — so a test green at an earlier
+   head and red now is never skipped on that old proof.
 
 ## Shadow first
 
@@ -63,9 +73,15 @@ the hash (or a non-hermetic test for the always-run list) to fix first.
 | test with `null` inputs (unresolved import in its closure) | runs |
 | test whose closure reaches a file git does not track (a workspace package's built `dist/` present at plan time wins over its `src/` — plan on a CLEAN checkout, before any install or build) | runs; the plan log says `N with a closure file git does not track` |
 | test on the always-run list, or the list cannot be read | runs (all run, if the list is unreadable) |
-| lane result is anything but `success` | nothing recorded |
+| lane result is `failure` or `cancelled` | only green SHARDS' lists are recorded; every file a red shard ran (and, on `failure`, every shard that left no record) is evicted |
+| a shard's test step failed | none of its tests is recorded; its whole list is evicted |
+| a shard split by the runner (no leg list, more than one shard) | that shard records nothing |
+| lane result is anything else (`skipped`, empty) | nothing recorded |
 | push / dispatch runs | the workflow never calls this: the full suite skips nothing |
 
-Tests: `__tests__/filter.test.mjs`, `__tests__/record.test.mjs`, and
+Tests: `__tests__/filter.test.mjs`, `__tests__/record.test.mjs`,
+`__tests__/shard.test.mjs`, `__tests__/record-shards.test.mjs` (the shard
+records and eviction), and
 `../affected-plan/__tests__/inputs.test.mjs` for the hash; the wiring in
-`monorepo-tests.yml` is pinned by `.github/workflows/__tests__/skip-green-wiring.test.mjs`.
+`monorepo-tests.yml` is pinned by `.github/workflows/__tests__/skip-green-wiring.test.mjs`
+and `skip-green-shard-wiring.test.mjs`.
