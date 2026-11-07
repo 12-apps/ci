@@ -117,6 +117,18 @@ function main(argv) {
         console.log(`[lane-verdict] no head identity at ${consumerRef} — ${error.message}; nothing keyed on it is reused.`);
       }
     }
+    // FUT-4550: the identity of only what ONE workflow executes, for a
+    // per-test reuse that should not be retired by an unrelated engine change.
+    // With a consumer ref, its caller workflows are read at that commit too.
+    const workflow = process.env.SCOPE_WORKFLOW ?? "";
+    if (workflow) {
+      try {
+        output({ "scoped-identity": executionIdentity({ workflow, ...(consumerRef ? { consumerRef } : {}) }) });
+      } catch (error) {
+        output({ "scoped-identity": "" });
+        console.log(`[lane-verdict] no scoped identity for ${workflow} — ${error.message}; nothing scoped to it is reused.`);
+      }
+    }
     return 0;
   }
   if (mode === "key") {

@@ -63,6 +63,11 @@ inputs** is reported as skipped and does not run.
    lists are recorded, and evicted entries are DELETED — on a failed lane also
    the leg of every shard that left no record — so a test green at an earlier
    head and red now is never skipped on that old proof.
+   commands, so changing how the lane runs invalidates every entry. Its engine
+   half is `lane-verdict`'s `scoped-identity` for `monorepo-tests.yml`
+   (FUT-4550): that workflow, the actions it names transitively (without their
+   tests and docs) and the modules they import. An engine change outside it
+   keeps every manifest; a change to anything the lanes run retires them.
 
 ## Shadow first
 

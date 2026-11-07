@@ -40,7 +40,9 @@ for (const lane of ["unit", "integration"]) {
     assert.match(identity, /consumer-ref: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
     const k = body.indexOf("- name: Key the green manifest to how this lane runs\n");
     const key = body.slice(k, body.indexOf("\n      - name: ", k + 1));
-    assert.match(key, /EXECUTION_ID: \$\{\{ steps\.execution\.outputs\.head-identity \}\}/);
+    // Since FUT-4550 the key reads the SCOPED identity, which also reads the
+    // caller's workflows at `consumer-ref` (lane-verdict verdict.mjs).
+    assert.match(key, /EXECUTION_ID: \$\{\{ steps\.execution\.outputs\.scoped-identity \}\}/);
     const f = body.indexOf("- name: Fingerprint the test-relevant tree\n");
     const fingerprint = body.slice(f, body.indexOf("\n      - name: ", f + 1));
     assert.match(fingerprint, /steps\.execution\.outputs\.execution-identity/, "the tree fingerprint keeps the merge-commit identity (FUT-4556)");
