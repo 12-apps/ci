@@ -74,6 +74,13 @@ on:
         description: The root volume in GiB, with golden_base ubuntu only
         type: string
         default: ''
+      settle_seconds:
+        description: >-
+          Replace the scaler's live SETTLE_SECONDS for this deploy and every
+          later refresh (refresh-image.sh, SETTLE_OVERRIDE). Empty keeps the
+          live value.
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -138,6 +145,7 @@ jobs:
           INSTANCE_PROFILE_ARN: ${{ inputs.instance_profile_arn }}
           GOLDEN_BASE: ${{ inputs.golden_base }}
           ROOT_GB: ${{ inputs.root_gb }}
+          SETTLE_OVERRIDE: ${{ inputs.settle_seconds }}
         run: exec bash .ci-engine/scripts/runner-host/wake/refresh-image.sh
       # A cancelled or timed-out step is SIGKILLed with its process tree, so
       # the script's exit trap may never run: terminate what this run tagged.

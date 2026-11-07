@@ -23,7 +23,8 @@
 #      Node in the tool cache and the slot units must all be there. A failure
 #      here deploys nothing;
 #   3. deploy.sh with AMI_ID and the fleet's live settings (live-settings.mjs:
-#      budget, regions, idle minutes, pnpm store, and the webhook secret, so a
+#      budget, regions, idle minutes, settle seconds, pnpm store, and the
+#      webhook secret, so a
 #      refresh never rotates it), which copies the image to every region,
 #      points the templates at it and prunes the old images.
 #
@@ -181,6 +182,30 @@ if [[ "$RUNNER_LABEL" != "$label" ]]; then
   exit 1
 fi
 log "live settings: regions ${REGIONS}, budget ${DAILY_BUDGET}, idle ${IDLE_MINUTES:-default}, pnpm store ${PNPM_STORE}, pool ${POOL_SIZE}"
+# SETTLE_OVERRIDE replaces the scaler's live SETTLE_SECONDS (the wait before a
+# launch, scale.mjs). A refresh otherwise carries the live value over, so this
+# is the one reviewed way to change it: the next deploys keep what this one set.
+# Refused before anything is launched unless it is a whole number of seconds
+# from 0 to 90: the scaler sleeps the settle INSIDE its invocation (scale.mjs)
+# and deploy.sh gives it a 120 s timeout, so a settle near that never launches
+# anything and, holding the settle claim, stops every other evaluation too.
+if [[ -n "${SETTLE_OVERRIDE:-}" ]]; then
+  [[ "$SETTLE_OVERRIDE" =~ ^[0-9]{1,3}$ ]] && (( 10#$SETTLE_OVERRIDE <= 90 )) \
+    || { log "SETTLE_OVERRIDE must be a whole number of seconds from 0 to 90 (the scaler's timeout is 120 s), got '${SETTLE_OVERRIDE}': nothing launched"; exit 64; }
+  settle=$(( 10#$SETTLE_OVERRIDE ))
+  if [[ "$settle" == "${SETTLE_SECONDS:-}" ]]; then
+    log "settle: ${settle} (SETTLE_OVERRIDE, unchanged)"
+  else
+    log "settle: ${SETTLE_SECONDS:-default} -> ${settle} (SETTLE_OVERRIDE)"
+  fi
+  export SETTLE_SECONDS="$settle"
+fi
+# The value carried over must pass deploy.sh's own bound too, checked here so a
+# bad live value stops the run before ~50 minutes of golden and smoke hosts.
+if [[ -n "${SETTLE_SECONDS:-}" ]] && ! { [[ "$SETTLE_SECONDS" =~ ^[0-9]{1,3}$ ]] && (( 10#$SETTLE_SECONDS <= 90 )); }; then
+  log "the live SETTLE_SECONDS '${SETTLE_SECONDS}' is outside 0 to 90; pass settle_seconds to replace it: nothing launched"
+  exit 64
+fi
 
 # ── 1. golden ────────────────────────────────────────────────────────────────
 if [[ "$golden_base" == ubuntu ]]; then
@@ -261,5 +286,5 @@ EOF
 ssm "$fresh" "$work/smoke.sh" 900 || { log "the fresh host failed its checks — nothing deployed; ${ami} stays for inspection"; exit 1; }
 
 # ── 3. deploy with the live settings ────────────────────────────────────────
-log "deploying ${ami} with the live settings: regions ${REGIONS}, budget ${DAILY_BUDGET}, idle ${IDLE_MINUTES:-default}, pnpm store ${PNPM_STORE}"
+log "deploying ${ami} with the live settings: regions ${REGIONS}, budget ${DAILY_BUDGET}, idle ${IDLE_MINUTES:-default}, pnpm store ${PNPM_STORE}, settle ${SETTLE_SECONDS:-default}"
 AMI_ID="$ami" WAKE_SECRET_FILE="$work/wake-secret" AWS_REGION="$region" bash "$here/deploy.sh"

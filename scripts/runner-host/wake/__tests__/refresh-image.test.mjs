@@ -34,9 +34,13 @@ function run(...failOn) {
 }
 
 function runWith(overrides, ...failOn) {
+  return runWithLambda(lambdaEnv, overrides, ...failOn);
+}
+
+function runWithLambda(lambda, overrides, ...failOn) {
   const dir = mkdtempSync(path.join(tmpdir(), "refresh-image-"));
   const calls = path.join(dir, "calls.log");
-  writeFileSync(path.join(dir, "lambda.json"), JSON.stringify(lambdaEnv));
+  writeFileSync(path.join(dir, "lambda.json"), JSON.stringify(lambda));
   writeFileSync(path.join(dir, "template.json"), JSON.stringify(templateData));
   writeFileSync(
     path.join(dir, "aws"),
@@ -333,4 +337,67 @@ test("a pending image stops after 270 twenty-second waits", () => {
   assert.equal(log.filter((l) => l.includes("--query Images[0].State")).length, 270);
   assert.deepEqual(sleeps, ["sleep 10", ...Array(270).fill("sleep 20")]);
   assert.equal(log.filter((l) => l.includes("run-instances")).length, 1);
+});
+
+// FUT-4539: a refresh carries the scaler's live settings over, so changing
+// SETTLE_SECONDS by hand on the Lambda would be invisible and changing it in
+// deploy.sh's default would be ignored. SETTLE_OVERRIDE is the reviewed way.
+test("without SETTLE_OVERRIDE the deploy keeps the scaler's live settle", () => {
+  const live = { ...lambdaEnv, SETTLE_SECONDS: "30" };
+  // The fake AWS cannot finish deploy.sh itself; what matters is what it was handed.
+  const { stderr } = runWithLambda(live, { SETTLE_OVERRIDE: undefined });
+  assert.doesNotMatch(stderr, /SETTLE_OVERRIDE/);
+  assert.match(stderr, /deploying ami-new with the live settings: .*settle 30$/m);
+});
+
+test("SETTLE_OVERRIDE replaces the live settle for the deploy", () => {
+  const live = { ...lambdaEnv, SETTLE_SECONDS: "30" };
+  const { stderr } = runWithLambda(live, { SETTLE_OVERRIDE: "60" });
+  assert.match(stderr, /settle: 30 -> 60 \(SETTLE_OVERRIDE\)/);
+  assert.match(stderr, /deploying ami-new with the live settings: .*settle 60$/m);
+});
+
+for (const bad of ["60s", "-1", "1.5", " 60", "91", "120", "1e20"]) {
+  test(`SETTLE_OVERRIDE=${JSON.stringify(bad)} is refused before any host starts`, () => {
+    const { status, stderr, log } = runWith({ SETTLE_OVERRIDE: bad });
+    assert.equal(status, 64);
+    assert.match(stderr, /SETTLE_OVERRIDE must be a whole number of seconds from 0 to 90/);
+    assert.ok(!log.some((l) => l.includes("run-instances")), "no host launched");
+  });
+}
+
+test("the workflow passes settle_seconds through, empty by default", () => {
+  const source = readFileSync(workflow, "utf8");
+  assert.match(source, /settle_seconds:\n(?: {8}.*\n)*? {8}default: ''\n/);
+  assert.match(source, /SETTLE_OVERRIDE: \$\{\{ inputs\.settle_seconds \}\}/);
+});
+
+test("SETTLE_OVERRIDE 0 and 90 are accepted, and a leading zero is read as decimal", () => {
+  const live = { ...lambdaEnv, SETTLE_SECONDS: "30" };
+  for (const [given, want] of [["0", "0"], ["90", "90"], ["060", "60"]]) {
+    const { stderr } = runWithLambda(live, { SETTLE_OVERRIDE: given });
+    assert.match(stderr, new RegExp(`settle: 30 -> ${want} \\(SETTLE_OVERRIDE\\)`));
+    assert.match(stderr, new RegExp(`deploying ami-new with the live settings: .*settle ${want}$`, "m"));
+  }
+});
+
+test("SETTLE_OVERRIDE equal to the live settle says unchanged", () => {
+  const live = { ...lambdaEnv, SETTLE_SECONDS: "60" };
+  const { stderr } = runWithLambda(live, { SETTLE_OVERRIDE: "60" });
+  assert.match(stderr, /settle: 60 \(SETTLE_OVERRIDE, unchanged\)/);
+});
+
+test("a live settle outside 0 to 90 stops a refresh with no override before any host starts", () => {
+  const live = { ...lambdaEnv, SETTLE_SECONDS: "120" };
+  const { status, stderr, log } = runWithLambda(live, { SETTLE_OVERRIDE: undefined });
+  assert.equal(status, 64);
+  assert.match(stderr, /the live SETTLE_SECONDS '120' is outside 0 to 90/);
+  assert.ok(!log.some((l) => l.includes("run-instances")), "no host launched");
+});
+
+test("an override replaces an out-of-range live settle", () => {
+  const live = { ...lambdaEnv, SETTLE_SECONDS: "120" };
+  const { stderr } = runWithLambda(live, { SETTLE_OVERRIDE: "60" });
+  assert.match(stderr, /settle: 120 -> 60 \(SETTLE_OVERRIDE\)/);
+  assert.doesNotMatch(stderr, /is outside 0 to 90/);
 });
