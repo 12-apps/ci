@@ -181,6 +181,15 @@ if [[ "$RUNNER_LABEL" != "$label" ]]; then
   exit 1
 fi
 log "live settings: regions ${REGIONS}, budget ${DAILY_BUDGET}, idle ${IDLE_MINUTES:-default}, pnpm store ${PNPM_STORE}, pool ${POOL_SIZE}"
+# SETTLE_OVERRIDE replaces the scaler's live SETTLE_SECONDS (the wait before a
+# launch, scale.mjs). A refresh otherwise carries the live value over, so this
+# is the one reviewed way to change it: the next deploys keep what this one set.
+# Refused before anything is launched unless it is a whole number of seconds.
+if [[ -n "${SETTLE_OVERRIDE:-}" ]]; then
+  [[ "$SETTLE_OVERRIDE" =~ ^[0-9]+$ ]] || { log "SETTLE_OVERRIDE must be a whole number of seconds, got '${SETTLE_OVERRIDE}': nothing launched"; exit 64; }
+  log "settle: ${SETTLE_SECONDS:-default} -> ${SETTLE_OVERRIDE} (SETTLE_OVERRIDE)"
+  export SETTLE_SECONDS="$SETTLE_OVERRIDE"
+fi
 
 # ── 1. golden ────────────────────────────────────────────────────────────────
 if [[ "$golden_base" == ubuntu ]]; then
@@ -261,5 +270,5 @@ EOF
 ssm "$fresh" "$work/smoke.sh" 900 || { log "the fresh host failed its checks — nothing deployed; ${ami} stays for inspection"; exit 1; }
 
 # ── 3. deploy with the live settings ────────────────────────────────────────
-log "deploying ${ami} with the live settings: regions ${REGIONS}, budget ${DAILY_BUDGET}, idle ${IDLE_MINUTES:-default}, pnpm store ${PNPM_STORE}"
+log "deploying ${ami} with the live settings: regions ${REGIONS}, budget ${DAILY_BUDGET}, idle ${IDLE_MINUTES:-default}, pnpm store ${PNPM_STORE}, settle ${SETTLE_SECONDS:-default}"
 AMI_ID="$ami" WAKE_SECRET_FILE="$work/wake-secret" AWS_REGION="$region" bash "$here/deploy.sh"

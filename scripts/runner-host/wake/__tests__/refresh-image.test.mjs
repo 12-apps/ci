@@ -34,9 +34,13 @@ function run(...failOn) {
 }
 
 function runWith(overrides, ...failOn) {
+  return runWithLambda(lambdaEnv, overrides, ...failOn);
+}
+
+function runWithLambda(lambda, overrides, ...failOn) {
   const dir = mkdtempSync(path.join(tmpdir(), "refresh-image-"));
   const calls = path.join(dir, "calls.log");
-  writeFileSync(path.join(dir, "lambda.json"), JSON.stringify(lambdaEnv));
+  writeFileSync(path.join(dir, "lambda.json"), JSON.stringify(lambda));
   writeFileSync(path.join(dir, "template.json"), JSON.stringify(templateData));
   writeFileSync(
     path.join(dir, "aws"),
@@ -333,4 +337,37 @@ test("a pending image stops after 270 twenty-second waits", () => {
   assert.equal(log.filter((l) => l.includes("--query Images[0].State")).length, 270);
   assert.deepEqual(sleeps, ["sleep 10", ...Array(270).fill("sleep 20")]);
   assert.equal(log.filter((l) => l.includes("run-instances")).length, 1);
+});
+
+// FUT-4539: a refresh carries the scaler's live settings over, so changing
+// SETTLE_SECONDS by hand on the Lambda would be invisible and changing it in
+// deploy.sh's default would be ignored. SETTLE_OVERRIDE is the reviewed way.
+test("without SETTLE_OVERRIDE the deploy keeps the scaler's live settle", () => {
+  const live = { ...lambdaEnv, SETTLE_SECONDS: "30" };
+  // The fake AWS cannot finish deploy.sh itself; what matters is what it was handed.
+  const { stderr } = runWithLambda(live, {});
+  assert.doesNotMatch(stderr, /SETTLE_OVERRIDE/);
+  assert.match(stderr, /deploying ami-new with the live settings: .*settle 30$/m);
+});
+
+test("SETTLE_OVERRIDE replaces the live settle for the deploy", () => {
+  const live = { ...lambdaEnv, SETTLE_SECONDS: "30" };
+  const { stderr } = runWithLambda(live, { SETTLE_OVERRIDE: "60" });
+  assert.match(stderr, /settle: 30 -> 60 \(SETTLE_OVERRIDE\)/);
+  assert.match(stderr, /deploying ami-new with the live settings: .*settle 60$/m);
+});
+
+for (const bad of ["60s", "-1", "1.5", " 60"]) {
+  test(`SETTLE_OVERRIDE=${JSON.stringify(bad)} is refused before any host starts`, () => {
+    const { status, stderr, log } = runWith({ SETTLE_OVERRIDE: bad });
+    assert.equal(status, 64);
+    assert.match(stderr, /SETTLE_OVERRIDE must be a whole number of seconds/);
+    assert.ok(!log.some((l) => l.includes("run-instances")), "no host launched");
+  });
+}
+
+test("the workflow passes settle_seconds through, empty by default", () => {
+  const source = readFileSync(workflow, "utf8");
+  assert.match(source, /settle_seconds:\n(?: {8}.*\n)*? {8}default: ''\n/);
+  assert.match(source, /SETTLE_OVERRIDE: \$\{\{ inputs\.settle_seconds \}\}/);
 });
