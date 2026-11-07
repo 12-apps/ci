@@ -675,6 +675,10 @@ jobs:
         with:
           lane: unit
           base: FETCH_HEAD
+          # Per-test input hashes read the PR HEAD's blobs, not the merge
+          # commit's (FUT-4549): a merge to main this PR did not make retires
+          # no skip-green proof; the daily full run catches a main-only break.
+          inputs-ref: ${{ github.event.pull_request.head.sha }}
           config: ${{ inputs.affected-plan-config }}
           out: affected-plan.unit.json
           max-shards: ${{ inputs.unit-shards }}
@@ -1855,6 +1859,10 @@ jobs:
         with:
           lane: integration
           base: FETCH_HEAD
+          # Per-test input hashes read the PR HEAD's blobs, not the merge
+          # commit's (FUT-4549): a merge to main this PR did not make retires
+          # no skip-green proof; the daily full run catches a main-only break.
+          inputs-ref: ${{ github.event.pull_request.head.sha }}
           config: ${{ inputs.affected-plan-config }}
           out: affected-plan.integration.json
           max-shards: ${{ inputs.integration-shards }}

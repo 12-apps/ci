@@ -338,6 +338,11 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/skip-green-shard-wiring.test.mjs
 
+      # Per-test input hashes read the PR head, not the merge commit (FUT-4549).
+      - name: skip-green PR-head inputs
+        shell: bash
+        run: node --test .github/workflows/__tests__/skip-green-pr-head.test.mjs
+
       # lane-verdict decides whether a whole job's install and work RUN. Its
       # key must refuse a push, a failing command and prose, and must move when
       # the lane's command or Node version moves; both directions are asserted.
