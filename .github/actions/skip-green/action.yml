@@ -97,6 +97,14 @@ inputs:
       nothing. Empty skips that check.
     required: false
     default: ''
+  log:
+    description: >-
+      `shard` only: the lane's test log (`unit.log`). A red shard records its
+      clean files only when this log shows no failure JUnit cannot pin on a
+      file (an unhandled error, a crashed or timed-out worker); unreadable
+      counts as one. Empty: a red shard records nothing.
+    required: false
+    default: ''
   out:
     description: '`shard` only: where to write the shard record, relative to working-directory.'
     required: false
@@ -178,6 +186,7 @@ runs:
         OUTCOME: ${{ inputs.outcome }}
         REPORTS: ${{ inputs.reports }}
         OUT: ${{ inputs.out }}
+        LANE_LOG: ${{ inputs.log }}
         HEAD_SHA: ${{ inputs.head-sha }}
       run: |
         set -uo pipefail
@@ -188,7 +197,7 @@ runs:
         expanded="$(printf '%s ' $REPORTS)"
         node "$GITHUB_ACTION_PATH/shard.mjs" \
           --lane "$LANE" --plan "$PLAN" --leg "$LEG" --shard "$SHARD" --shard-total "$SHARD_TOTAL" \
-          --outcome "$OUTCOME" --reports "$expanded" --out "$OUT" \
+          --outcome "$OUTCOME" --reports "$expanded" --log "$LANE_LOG" --out "$OUT" \
           --head-sha "${HEAD_SHA:-$GITHUB_SHA}" --run-id "$GITHUB_RUN_ID" \
           || echo "::warning::skip-green ($LANE): the shard record could not be written — this shard's tests re-run if the lane fails."
 

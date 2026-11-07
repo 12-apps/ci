@@ -26,9 +26,11 @@
  * exit 0 — is not recorded, whatever the exit code says. No readable JUnit,
  * no green record.
  *
- * A shard whose test step FAILED writes the opposite claim: evict every file
- * of its list from the manifest (see `shardRecord`). None of its tests — the
- * failed one or the ones beside it — is ever recorded as green.
+ * A shard whose test step FAILED evicts every file of its list that did not
+ * run clean, and records the clean ones — but only when its lane log shows no
+ * failure JUnit cannot pin on a file (an unhandled error, a crashed or timed
+ * out worker); with one, it records nothing and evicts its whole list. The
+ * failed test is never recorded green either way (see `shardRecord`).
  *
  * Usage:
  *   node shard.mjs --lane unit --plan .affected-plan/affected-plan.unit.json \
@@ -139,6 +141,56 @@ export function junitRow(junit, test) {
 }
 
 /**
+ * Did the shard's run fail in a way JUnit cannot pin on a file? (FUT-4548.)
+ * Vitest reports an unhandled error or rejection AFTER the files it ran, in
+ * its "Unhandled Errors" section, with no file attached; a worker that
+ * crashed, timed out or ran out of memory leaves files half-run. When any of
+ * these shows in the lane log, a red shard's clean JUnit rows prove nothing:
+ * the culprit may be one of them. A log that cannot be read counts as one.
+ * Over-matching (a passing test's NAME saying "unhandled error") only ever
+ * falls back to recording nothing — the safe direction.
+ */
+export const UNATTRIBUTED = [
+  /\bUnhandled (?:Errors?|Rejections?)\b/i,
+  /\bcaught \d+ unhandled error/i,
+  /\bWorker (?:exited|terminated)\b/i,
+  /\[vitest-pool\]/i,
+  /\bTimeout (?:calling|starting|terminating)\b/i,
+  /\bERR_IPC_CHANNEL_CLOSED\b/,
+  /heap out of memory/i,
+  /\b(?:SIGSEGV|SIGKILL|SIGABRT)\b|Segmentation fault/,
+];
+export function unattributedFailure(logText) {
+  if (typeof logText !== "string") return "the lane log could not be read";
+  const hit = UNATTRIBUTED.find((re) => re.test(logText));
+  return hit ? `the lane log matches ${hit}` : null;
+}
+
+/**
+ * The files of `list` this shard may record: handed to the lane by the plan,
+ * with a bounded hash, and shown by its JUnit RUNNING — at least one executed
+ * case, none failed or errored (FUT-4563: a planned file the runner never
+ * collected exits 0 with "No test files found", and has no row).
+ */
+function cleanFiles(list, plan, junit) {
+  const planned = new Set(plan.tests);
+  const tests = {};
+  let uncollected = 0;
+  for (const test of list) {
+    if (!planned.has(test)) continue;
+    const hash = plan.inputs[test];
+    if (!HASH_RE.test(String(hash))) continue;
+    const row = junitRow(junit, test);
+    if (!row || row.ran < 1 || row.bad > 0) {
+      uncollected++;
+      continue;
+    }
+    tests[test] = hash;
+  }
+  return { tests, uncollected };
+}
+
+/**
  * This shard's record, pure so the tests can drive it; `record: null` when
  * the shard may not claim anything.
  *
@@ -160,7 +212,7 @@ export function junitRow(junit, test) {
  * @param {Map<string,{ran:number,bad:number}>|null} o.junit  what this shard's JUnit says ran (`junitFiles`); null when none was read
  * @returns {{ record: object|null, why: string }}
  */
-export function shardRecord({ lane, plan, leg, shard, shardTotal, outcome, headSha, runId, junit }) {
+export function shardRecord({ lane, plan, leg, shard, shardTotal, outcome, headSha, runId, junit, unattributed = "not checked" }) {
   const none = (why) => ({ record: null, why });
   if (outcome !== "success" && outcome !== "failure") return none(`the shard's test step is ${JSON.stringify(outcome)} — no claim either way`);
   if (!plan || !plan.inputs || typeof plan.inputs !== "object") return none("plan carries no test inputs — nothing to record");
@@ -174,41 +226,43 @@ export function shardRecord({ lane, plan, leg, shard, shardTotal, outcome, headS
   const base = { version: SHARD_RECORD_VERSION, lane, inputs: plan.inputsVersion ?? null, sha: headSha, run: String(runId), shard: String(shard) };
 
   if (outcome === "failure") {
-    const evict = list ? [...new Set(list)] : "*";
+    // Which files are CLEAN: run, every case passed, collected — and only when
+    // nothing failed in a way JUnit cannot pin on a file (`unattributed`).
+    if (!list || unattributed || !(junit instanceof Map)) {
+      const evict = list ? [...new Set(list)] : "*";
+      const reason = !list ? "its list is unknown" : unattributed ? unattributed : "no JUnit report could be read";
+      return {
+        record: { ...base, passed: false, evict },
+        why: `shard ${shard}/${shardTotal} FAILED — ${reason}; evicting ${evict === "*" ? "every planned test" : `its ${evict.length} file(s)`}, recording none`,
+      };
+    }
+    const clean = cleanFiles(list, plan, junit);
+    const evict = [...new Set(list)].filter((t) => !(t in clean.tests));
     return {
-      record: { ...base, passed: false, evict },
-      why: `shard ${shard}/${shardTotal} FAILED — evicting ${evict === "*" ? "every planned test (its list is unknown)" : `its ${evict.length} file(s)`} from the manifest`,
+      record: { ...base, passed: false, evict, tests: clean.tests },
+      why: `shard ${shard}/${shardTotal} FAILED with no unattributed error — recording its ${Object.keys(clean.tests).length} clean file(s), evicting the other ${evict.length}`,
     };
   }
 
   if (!(junit instanceof Map)) return none("no JUnit report could be read — which files ran is unknown, so nothing is recorded");
   if (!list) return none(`shard ${shard}/${shardTotal} was split by the runner, not by a leg list — which files it ran is unknown, so nothing is recorded`);
 
-  const planned = new Set(plan.tests);
-  const tests = {};
-  let uncollected = 0;
-  for (const test of list) {
-    // Only a file the plan handed the lane, with a bounded hash: a leg line
-    // the plan does not hold is not a claim this run can make.
-    if (!planned.has(test)) continue;
-    const hash = plan.inputs[test];
-    if (!HASH_RE.test(String(hash))) continue;
-    // FUT-4563: only a file this shard's JUnit shows RUNNING, at least one test
-    // case and none failed or errored. A planned file the runner never
-    // collected exits 0 with "No test files found" — and has no row here.
-    const row = junitRow(junit, test);
-    if (!row || row.ran < 1 || row.bad > 0) {
-      uncollected++;
-      continue;
-    }
-    tests[test] = hash;
-  }
+  const { tests, uncollected } = cleanFiles(list, plan, junit);
   return {
     record: { ...base, passed: true, tests },
     why:
       `shard ${shard}/${shardTotal} passed ${Object.keys(tests).length} recordable test file(s)` +
       (uncollected ? `; ${uncollected} planned file(s) its JUnit does not show running — not recorded` : ""),
   };
+}
+
+function readLog(path) {
+  if (!path) return null;
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
 }
 
 function main() {
@@ -249,6 +303,7 @@ function main() {
     headSha: arg("head-sha", ""),
     runId: arg("run-id", process.env.GITHUB_RUN_ID ?? ""),
     junit: reports.length > 0 ? junitFiles(reports) : null,
+    unattributed: unattributedFailure(readLog(arg("log", ""))),
   });
   console.log(`[skip-green] ${lane}: ${why}`);
   if (!record || (record.passed && Object.keys(record.tests).length === 0)) {

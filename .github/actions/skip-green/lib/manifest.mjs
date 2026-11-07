@@ -101,7 +101,8 @@ export function readShardRecords(dir, lane) {
       const parsed = JSON.parse(readFileSync(path, "utf8"));
       const shaped =
         parsed?.passed === true ? !!parsed.tests && typeof parsed.tests === "object"
-        : parsed?.passed === false ? parsed.evict === "*" || Array.isArray(parsed.evict)
+        : parsed?.passed === false
+          ? (parsed.evict === "*" || Array.isArray(parsed.evict)) && (parsed.tests === undefined || (!!parsed.tests && typeof parsed.tests === "object"))
         : false;
       if (parsed?.version !== SHARD_RECORD_VERSION || parsed.lane !== lane || !shaped) {
         dropped++;

@@ -175,3 +175,17 @@ test("FUT-4563: a GREEN lane with shard records records only what they name, nev
   // No records at all: nothing recorded (the plan-wide path is never taken).
   assert.equal(partial({ laneResult: "success", shardRecords: [] }).manifest, null);
 });
+
+test("a red shard's CLEAN files are recorded and its failed ones evicted (no unattributed error)", () => {
+  const redClean = { ...shard2, evict: ["s2/failed.test.ts"], tests: { "s2/beside.test.ts": H(22) } };
+  const { manifest } = partial({ previous: GREEN_BEFORE, shardRecords: [shard1, redClean] });
+  assert.deepEqual(manifest.entries["s2/beside.test.ts"], { hash: H(22), sha: NEW, run: "9" }, "passed and untouched: never re-run");
+  assert.equal(manifest.entries["s2/failed.test.ts"], undefined, "the failed test is evicted");
+  // …so push 2 runs only the failed one.
+  const { plan } = decide({ plan: SHARD_PLAN, manifest, always: new Set(), policy: "enforce", maxShards: 4, perShard: 40 });
+  assert.deepEqual(plan.tests, ["s2/failed.test.ts"]);
+  // A red record naming a file it also evicts never records it.
+  const contradictory = { ...shard2, evict: ["s2/failed.test.ts"], tests: { "s2/failed.test.ts": H(21) } };
+  const out = partial({ previous: GREEN_BEFORE, shardRecords: [contradictory] }).manifest;
+  assert.equal(out.entries["s2/failed.test.ts"], undefined);
+});
