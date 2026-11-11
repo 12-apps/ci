@@ -189,20 +189,23 @@ export function loadOverlapConfig(path) {
  *   "restack": {
  *     "push": true,
  *     "ignoreHeads": ["renovate/", "chore/post-merge-regen-"],
- *     "command": "pnpm restack"
+ *     "command": "pnpm restack",
+ *     "quietMinutes": 15
  *   }
  *
  * `push: false` is the kill switch: the mode plans and logs and pushes
  * nothing. `ignoreHeads` are head-branch PREFIXES the bot never writes to.
  * `command` is the consumer's local command, quoted in the probe's comment
- * next to the raw git recipe. `raw` undefined or null (no key) is `null`:
+ * next to the raw git recipe. `quietMinutes` (default 0, off) keeps the bot
+ * off a DRAFT whose head commit is younger than that: a fix round in flight.
+ * `raw` undefined or null (no key) is `null`:
  * the mode has nothing to do.
  */
 export function parseRestackConfig(raw, source = "config") {
   if (raw == null) return null;
   const where = `${source}: "restack"`;
   if (typeof raw !== "object" || Array.isArray(raw)) throw new ConfigError(`${where} must be an object`);
-  const known = new Set(["push", "ignoreHeads", "command"]);
+  const known = new Set(["push", "ignoreHeads", "command", "quietMinutes"]);
   const unknown = Object.keys(raw).filter((k) => !known.has(k));
   if (unknown.length) throw new ConfigError(`${where} has unknown key(s): ${unknown.join(", ")}`);
   if (raw.push != null && typeof raw.push !== "boolean") throw new ConfigError(`${where}.push must be true or false`);
@@ -213,7 +216,11 @@ export function parseRestackConfig(raw, source = "config") {
   if (raw.command != null && (typeof raw.command !== "string" || !raw.command.trim() || /[\r\n`]/.test(raw.command))) {
     throw new ConfigError(`${where}.command must be a one-line string with no backtick`);
   }
-  return { push: raw.push !== false, ignoreHeads: heads, command: raw.command?.trim() ?? null };
+  const quiet = raw.quietMinutes ?? 0;
+  if (typeof quiet !== "number" || !Number.isFinite(quiet) || quiet < 0) {
+    throw new ConfigError(`${where}.quietMinutes must be a number of minutes, zero or more`);
+  }
+  return { push: raw.push !== false, ignoreHeads: heads, command: raw.command?.trim() ?? null, quietMinutes: quiet };
 }
 
 /** The bucket config and the `restack` block of one file. A missing file is no buckets and no block. */

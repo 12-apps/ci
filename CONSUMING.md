@@ -2303,7 +2303,8 @@ reads the BASE's config.
   "restack": {
     "push": true,
     "ignoreHeads": ["renovate/", "chore/post-merge-regen-"],
-    "command": "pnpm restack"
+    "command": "pnpm restack",
+    "quietMinutes": 15
   }
 }
 ```
@@ -2313,6 +2314,7 @@ reads the BASE's config.
 | `push` | `true` | `false` is the kill switch: plan, log and warn, push nothing |
 | `ignoreHeads` | `[]` | head-branch PREFIXES the bot never writes to |
 | `command` | none | your local command, quoted in the probe's comment next to the raw git recipe |
+| `quietMinutes` | `0` (off) | the bot leaves a DRAFT alone while its head commit is younger than this many minutes |
 
 A bad block (an unknown key, a wrong type) fails the restack job naming the
 reason. `report` never reads it, and `probe` reads only `command`, ignoring a
@@ -2367,7 +2369,15 @@ branch protection, or under a ruleset rule that stops a fast-forward push
 `required_signatures`, `required_deployments`, `merge_queue`, read from
 `GET /rules/branches/{branch}`); heads matching `ignoreHeads`. The branch
 API's `protected` flag alone does not exclude a PR: a repo-wide ruleset that
-only names branches or forbids force-pushes sets it on every branch. Drafts ARE re-stacked. A
+only names branches or forbids force-pushes sets it on every branch. Drafts ARE re-stacked,
+except, with `quietMinutes` set, a draft the bot would push to whose head commit
+is younger than that and is not the bot's own: a draft that was just pushed to is
+a fix round in flight, and a merge commit pushed under its author turns their
+next push into a non-fast-forward and spends a CI run on a head without the fix.
+The clock is the head's committer time, so a commit made long before its push is
+not held. The job logs `skipped — a draft pushed to N min ago`; the PR is planned
+again at the next push to the base, and until then the probe's comment carries
+the command. A
 PR whose base is not the default branch gets no comment either: the probe
 lists only default-base PRs, as before.
 
