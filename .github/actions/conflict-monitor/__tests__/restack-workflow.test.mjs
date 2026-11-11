@@ -54,11 +54,12 @@ test("the output the probe consumes is wired through", () => {
 test("parseRestackConfig: no key is null; a bad key fails naming it; parseConfig ignores the block", () => {
   assert.equal(parseRestackConfig(undefined), null);
   assert.equal(parseRestackConfig(null), null);
-  assert.deepEqual(parseRestackConfig({}), { push: true, ignoreHeads: [], command: null });
+  assert.deepEqual(parseRestackConfig({}), { push: true, ignoreHeads: [], command: null, quietMinutes: 0 });
   assert.deepEqual(parseRestackConfig({ push: false, ignoreHeads: ["renovate/"], command: " pnpm restack " }), {
     push: false,
     ignoreHeads: ["renovate/"],
     command: "pnpm restack",
+    quietMinutes: 0,
   });
   for (const [raw, re] of [
     [[], /must be an object/],

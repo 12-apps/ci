@@ -18,7 +18,8 @@
  * a head matching `restack.ignoreHeads`;
  * and a PR whose head branch was force-pushed over one of the bot's re-stacks
  * for the same parent (the probe's comment carries the command instead).
- * Drafts ARE re-stacked.
+ * Drafts ARE re-stacked, except, with `restack.quietMinutes`, a draft whose head
+ * commit is younger than that and is not the bot's own (`quietReason`).
  *
  * THE PUSH is a compare-and-swap: `--force-with-lease=<ref>:<planned head>`,
  * after asserting that the new commit descends from that head, so nothing is
@@ -99,6 +100,34 @@ export function exclusionOf(pr, { repo, base, restack }) {
   if (!ref || ref === base || PROTECTED_HEAD.test(ref)) return "a protected head";
   if (restack.ignoreHeads.some((p) => ref.startsWith(p))) return "an ignored head";
   return null;
+}
+
+/**
+ * Why the bot leaves this PR alone for now, or null: a DRAFT whose head commit
+ * is younger than `restack.quietMinutes` and is not the bot's own. A draft that
+ * was just pushed to is a fix round in flight: its author is preparing the next
+ * push, and a merge commit pushed under them turns that push into a
+ * non-fast-forward and spends a CI run on a head without the fix. A head the
+ * bot itself wrote is nobody's fix round (and is dated at the squash, so it
+ * would always look fresh). The clock is the head's committer time: a commit
+ * made long before its push is not held, which is today's behaviour. A held PR
+ * is planned again at the next push to the base; until then the probe's
+ * comment carries the command. Zero (the default) is off.
+ */
+export function quietReason(pr, { restack, headTime, headEmail = null, now }) {
+  const minutes = restack.quietMinutes ?? 0;
+  if (!(minutes > 0) || !pr.draft || !Number.isFinite(headTime) || headEmail === BOT.email) return null;
+  const age = (now - headTime) / 60;
+  if (age >= minutes) return null;
+  return `a draft pushed to ${Math.max(0, Math.floor(age))} min ago (quiet for ${minutes}); planned again at the next push to the base`;
+}
+
+/** A commit's committer time (seconds) and e-mail: `{ headTime, headEmail }`, NaN and null when unreadable. */
+export function commitStamp(sha, cwd) {
+  const res = git(["log", "-1", "--format=%ct %ce", sha], { cwd, ok: [0, 1, 128] });
+  if (res.status !== 0) return { headTime: Number.NaN, headEmail: null };
+  const [time, email = null] = res.out.trim().split(" ");
+  return { headTime: Number(time), headEmail: email };
 }
 
 /** A commit (as the compare API lists it) that is the bot's re-stack for one of `parents`. */
@@ -209,6 +238,7 @@ export async function runRestack({
   pushEnv = {},
   canPush = false,
   date = null,
+  now = Math.floor(Date.now() / 1000),
 }) {
   const pulls = only
     ? [await api.request("GET", `/repos/${repo}/pulls/${only}`)].filter(Boolean)
@@ -260,6 +290,12 @@ export async function runRestack({
     if (plan.status === "residual") {
       result.residual.push({ pr: pr.number, parents, files: plan.residual });
       log(`#${pr.number}: stacked on ${parents.map((n) => `#${n}`).join(", ")}; still conflicts on ${plan.residual.length} file(s) — not pushed`);
+      continue;
+    }
+    // Asked last, so only a PR the bot would push is held: a clean or residual one reports as before.
+    const quiet = quietReason(pr, { restack, now, ...commitStamp(head, cwd) });
+    if (quiet) {
+      skip(pr, quiet);
       continue;
     }
     ready.push({ pr, head, plan, parents });

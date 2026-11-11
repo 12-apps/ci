@@ -158,6 +158,26 @@ test("two children of one parent are two pushes on two branches; a draft is re-s
   assert.equal(result.pushed.find((p) => p.pr === 3).head, remoteHead("d"));
 });
 
+test("quietMinutes holds a freshly pushed draft, pushes its ready sibling, and re-stacks the draft once it is older", async () => {
+  const { world, run, remoteHead } = setup("two children", { prs: { 3: { draft: true } } });
+  const before = remoteHead("d");
+  const stamp = Number(git(["log", "-1", "--format=%ct", before], { cwd: world.dir }).out.trim());
+  const restack = restackConfig({ quietMinutes: 15 });
+  const held = await run({ restack, now: stamp + 60 });
+  assert.deepEqual(held.pushed.map((p) => p.pr), [2]);
+  assert.match(held.skipped.find((s) => s.pr === 3).reason, /a draft pushed to \d+ min ago \(quiet for 15\)/);
+  assert.equal(remoteHead("d"), before);
+  const later = await run({ restack, now: stamp + 3600 });
+  assert.deepEqual(later.pushed.map((p) => p.pr), [3]);
+  assert.notEqual(remoteHead("d"), before);
+});
+
+test("quietMinutes does not turn a clean draft into a skipped one", async () => {
+  const { run } = setup("default merge clean", { prs: { 2: { draft: true } } });
+  const result = await run({ restack: restackConfig({ quietMinutes: 15 }), now: 0 });
+  assert.deepEqual([result.clean, result.skipped], [1, []]);
+});
+
 test("the #1849 shape pushes nothing and reports the residual files", async () => {
   const { run, remoteHead } = setup("residual");
   const before = remoteHead("c");
