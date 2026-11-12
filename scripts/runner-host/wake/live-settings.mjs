@@ -6,7 +6,8 @@
 // fleet runs with today, or the defaults come back: DAILY_BUDGET 10 when the
 // fleet runs on 20, the pnpm store mounted again when it is off, a new webhook
 // secret. Those settings live in three places, all read here:
-//   - the scaler Lambda's environment (budget, regions, types, caps, strategy),
+//   - the scaler Lambda's environment (budget, regions, types, caps, strategy
+//     and its type priority),
 //     including WEBHOOK_SECRET, which is written to a file and never printed,
 //     or the name of the SSM parameter that holds it (WEBHOOK_SECRET_PARAMETER,
 //     a light pool's: then there is no secret to carry);
@@ -32,6 +33,9 @@ const FROM_LAMBDA = {
   BUDGET_UTC_OFFSET: "BUDGET_UTC_OFFSET",
   ALERT_PARAMETER: "ALERT_PARAMETER",
   SPOT_STRATEGY: "SPOT_STRATEGY",
+  // Only where it is set: an unset one stays unset, so the scaler's
+  // environment and its requests are what they were (FUT-4427).
+  TYPE_PRIORITY: "TYPE_PRIORITY",
   INSTANCE_TYPES: "INSTANCE_TYPES",
   MAX_HOSTS: "MAX_HOSTS",
   SLOTS_PER_HOST: "SLOTS_PER_HOST",

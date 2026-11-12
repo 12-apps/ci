@@ -401,3 +401,14 @@ test("an override replaces an out-of-range live settle", () => {
   assert.match(stderr, /settle: 120 -> 60 \(SETTLE_OVERRIDE\)/);
   assert.doesNotMatch(stderr, /is outside 0 to 90/);
 });
+
+// FUT-4427: a trial of capacity-optimized-prioritized lives in the scaler's
+// environment, and a refresh carries it over: its log says so, so a trial left
+// on past its verdict is visible in the weekly run.
+test("a live TYPE_PRIORITY is carried over and named in the deploy line; without one nothing is added", () => {
+  const trial = { ...lambdaEnv, SPOT_STRATEGY: "capacity-optimized-prioritized", TYPE_PRIORITY: "r7a.2xlarge,m7a.2xlarge", SETTLE_SECONDS: "30" };
+  assert.match(runWithLambda(trial, {}).stderr,
+    /deploying ami-new with the live settings: .*spot capacity-optimized-prioritized \(first: r7a\.2xlarge,m7a\.2xlarge\), settle 30$/m);
+  const plain = { ...lambdaEnv, SPOT_STRATEGY: "capacity-optimized", SETTLE_SECONDS: "30" };
+  assert.match(runWithLambda(plain, {}).stderr, /deploying ami-new with the live settings: .*spot capacity-optimized, settle 30$/m);
+});

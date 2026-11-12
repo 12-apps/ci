@@ -42,6 +42,12 @@
 # until local midnight, and fires the hook in ALERT_PARAMETER
 # (/ci-runner/budget-alert, a JSON SecureString {"url", "headers"}) once.
 # SPOT_STRATEGY (capacity-optimized): the EC2 Fleet spot allocation strategy.
+# TYPE_PRIORITY (unset): with SPOT_STRATEGY=capacity-optimized-prioritized only,
+# the INSTANCE_TYPES a spot launch prefers, most preferred first; every other
+# type follows in INSTANCE_TYPES order, so no pool leaves the request (FUT-4427:
+# the Intel pools were reclaimed 25-41 times per 100 host-hours, the AMD ones
+# 3-8). A type not in INSTANCE_TYPES stops the deploy. Unset, the scaler's
+# environment holds no TYPE_PRIORITY and every request is what it was.
 # IDLE_MINUTES (2): a host powers itself off after this long without a job.
 # SETTLE_SECONDS (30): a job queued with no free slot waits this long for one
 # before the scaler launches a host for it (scale.mjs, settling). Most fleet
@@ -88,6 +94,14 @@ degraded_max_hosts="${DEGRADED_MAX_HOSTS:-2}"
 budget_utc_offset="${BUDGET_UTC_OFFSET:--3}"
 alert_param="${ALERT_PARAMETER:-/ci-runner/budget-alert}"
 spot_strategy="${SPOT_STRATEGY:-capacity-optimized}"
+type_priority="${TYPE_PRIORITY:-}"
+if [[ -n "$type_priority" ]]; then
+  [[ "$type_priority" =~ ^[a-z0-9-]+\.[a-z0-9]+(,[a-z0-9-]+\.[a-z0-9]+)*$ ]] || { echo "deploy: TYPE_PRIORITY must be comma-separated instance types, got '${type_priority}'" >&2; exit 1; }
+  for t in ${type_priority//,/ }; do
+    [[ ",${types}," == *",${t},"* ]] || { echo "deploy: TYPE_PRIORITY names ${t}, which is not in INSTANCE_TYPES (${types})" >&2; exit 1; }
+  done
+  [[ "$spot_strategy" == capacity-optimized-prioritized ]] || echo "deploy: TYPE_PRIORITY is ignored unless SPOT_STRATEGY=capacity-optimized-prioritized (it is ${spot_strategy})" >&2
+fi
 idle_minutes="${IDLE_MINUTES:-2}"
 settle_seconds="${SETTLE_SECONDS:-30}"
 # The scaler sleeps the settle inside an invocation with a 120 s timeout (below):
@@ -356,11 +370,11 @@ fi
 (umask 077; jq -n --rawfile s "$secret_file" --arg sp "$secret_param" --arg l "$label" --arg r "$repo" --arg t "$template" \
   --arg p "$param" --arg types "$types" --arg regions "$live_regions" --arg slots "$slots" --arg max "$max_hosts" \
   --arg budget "$daily_budget" --arg degraded "$degraded_max_hosts" --arg offset "$budget_utc_offset" --arg alert "$alert_param" --arg strategy "$spot_strategy" \
-  --arg settle "$settle_seconds" \
+  --arg settle "$settle_seconds" --arg priority "$type_priority" \
   '{Variables: ({MODE: "scale"} + (if $sp == "" then {WEBHOOK_SECRET: ($s | rtrimstr("\n"))} else {WEBHOOK_SECRET_PARAMETER: $sp} end) + {RUNNER_LABEL: $l, REPOSITORY: $r,
     LAUNCH_TEMPLATE: $t, TOKEN_PARAMETER: $p, INSTANCE_TYPES: $types, REGIONS: $regions, SLOTS_PER_HOST: $slots, MAX_HOSTS: $max,
     DAILY_BUDGET: $budget, DEGRADED_MAX_HOSTS: $degraded, BUDGET_UTC_OFFSET: $offset, ALERT_PARAMETER: $alert, SPOT_STRATEGY: $strategy,
-    SETTLE_SECONDS: $settle})}' > "$work/env.json")
+    SETTLE_SECONDS: $settle} + (if $priority == "" then {} else {TYPE_PRIORITY: $priority} end))}' > "$work/env.json")
 cp "$here/wake.mjs" "$here/scale.mjs" "$here/budget.mjs" "$here/github.mjs" "$here/queue.mjs" "$here/index.mjs" "$work/"
 (cd "$work" && python3 -m zipfile -c fn.zip wake.mjs scale.mjs budget.mjs github.mjs queue.mjs index.mjs)
 if aws lambda get-function --function-name "$fn" >/dev/null 2>&1; then
