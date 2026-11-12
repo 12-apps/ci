@@ -323,7 +323,7 @@ EOF
 ssm "$fresh" "$work/smoke.sh" 900 || { log "the fresh host failed its checks — nothing deployed; ${ami} stays for inspection"; exit 1; }
 
 # ── 3. deploy with the live settings ────────────────────────────────────────
-log "deploying ${ami} with the live settings: regions ${REGIONS}, budget ${DAILY_BUDGET}, idle ${IDLE_MINUTES:-default}, pnpm store ${PNPM_STORE}, settle ${SETTLE_SECONDS:-default}"
+log "deploying ${ami} with the live settings: regions ${REGIONS}, budget ${DAILY_BUDGET}, idle ${IDLE_MINUTES:-default}, pnpm store ${PNPM_STORE}, spot ${SPOT_STRATEGY:-default}${TYPE_PRIORITY:+ (first: ${TYPE_PRIORITY})}, settle ${SETTLE_SECONDS:-default}"
 AMI_ID="$ami" WAKE_SECRET_FILE="$work/wake-secret" AWS_REGION="$region" bash "$here/deploy.sh"
 
 # ── 4. the light pool, on the same image ───────────────────────────────────

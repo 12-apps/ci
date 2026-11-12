@@ -88,11 +88,12 @@ test("the live-settings CLI needs no secret file for a scaler whose secret is in
 });
 
 // ── the scaler's environment and role ───────────────────────────────────────
-function lambdaEnv(secretParam) {
+function lambdaEnv(secretParam, { strategy = "capacity-optimized", priority = "" } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), "deploy-env-"));
   writeFileSync(path.join(dir, "secret"), "file-secret\n");
   const r = bash(`work='${dir}' secret_file='${dir}/secret' secret_param='${secretParam}' label=l repo=o/r template=t param=/p types=m7a.large \\
-live_regions=us-east-1 slots=2 max_hosts=10 daily_budget=3 degraded_max_hosts=1 budget_utc_offset=-3 alert_param=/a spot_strategy=capacity-optimized settle_seconds=30
+live_regions=us-east-1 slots=2 max_hosts=10 daily_budget=3 degraded_max_hosts=1 budget_utc_offset=-3 alert_param=/a spot_strategy=${strategy} settle_seconds=30 \\
+type_priority='${priority}'
 ${block('(umask 077; jq -n --rawfile s "$secret_file"', "\ncp ")}
 cat '${dir}/env.json'`);
   assert.equal(r.status, 0, r.stderr);
@@ -208,4 +209,44 @@ other_fleet_images us-east-1`);
   assert.equal(two.status, 0, two.stderr);
   assert.equal(two.stdout.trim(), "ami-light");
   assert.match(deploy, /others=\$\(other_fleet_images "\$r"\) \|\| return 1\n {2}live="\$\{live\} \$\{others\}"/);
+});
+
+// ── TYPE_PRIORITY (FUT-4427) ───────────────────────────────────────────────
+test("without TYPE_PRIORITY the scaler's environment has no such key: a deploy hands AWS what it did", () => {
+  assert.ok(!("TYPE_PRIORITY" in lambdaEnv("")));
+  assert.ok(!("TYPE_PRIORITY" in lambdaEnv("", { strategy: "capacity-optimized-prioritized" })));
+});
+
+test("with TYPE_PRIORITY the scaler's environment carries it next to the strategy", () => {
+  const env = lambdaEnv("", { strategy: "capacity-optimized-prioritized", priority: "r7a.2xlarge,m7a.2xlarge" });
+  assert.equal(env.SPOT_STRATEGY, "capacity-optimized-prioritized");
+  assert.equal(env.TYPE_PRIORITY, "r7a.2xlarge,m7a.2xlarge");
+});
+
+function priorityCheck(priority, strategy = "capacity-optimized-prioritized") {
+  return bash(`types=m7a.2xlarge,m6a.2xlarge,m7i.2xlarge,m6i.2xlarge,r7a.2xlarge,r7i.2xlarge SPOT_STRATEGY='${strategy}' TYPE_PRIORITY='${priority}'
+${block('spot_strategy="${SPOT_STRATEGY:-capacity-optimized}"', "\nidle_minutes=")}
+printf 'priority=%s' "$type_priority"`);
+}
+
+test("deploy.sh takes a TYPE_PRIORITY of INSTANCE_TYPES and refuses a type the fleet does not launch", () => {
+  const ok = priorityCheck("r7a.2xlarge,m7a.2xlarge,m6a.2xlarge");
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(ok.stdout, "priority=r7a.2xlarge,m7a.2xlarge,m6a.2xlarge");
+  assert.equal(ok.stderr, "");
+  // A typo would otherwise rank nothing first and the trial would measure nothing.
+  const typo = priorityCheck("r7a.2xlarge,m7a.2xlarg");
+  assert.notEqual(typo.status, 0);
+  assert.match(typo.stderr, /TYPE_PRIORITY names m7a\.2xlarg, which is not in INSTANCE_TYPES/);
+  for (const bad of ["r7a.2xlarge m7a.2xlarge", "r7a.2xlarge,", "$(id)"]) assert.notEqual(priorityCheck(bad).status, 0, bad);
+  // Unset is the default, and passes silently.
+  const none = priorityCheck("", "capacity-optimized");
+  assert.equal(none.status, 0, none.stderr);
+  assert.equal(none.stderr, "");
+});
+
+test("a TYPE_PRIORITY with a strategy that ignores it deploys, with a warning", () => {
+  const r = priorityCheck("r7a.2xlarge", "capacity-optimized");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /TYPE_PRIORITY is ignored unless SPOT_STRATEGY=capacity-optimized-prioritized/);
 });

@@ -62,6 +62,66 @@ export function spotAttempts(regions, offered, inPool, perPool) {
   return room.length ? room : regions.map((region) => ({ region, overrides: pools(region) })).filter((a) => a.overrides.length);
 }
 
+export const PRIORITIZED = "capacity-optimized-prioritized";
+
+/**
+ * The spot overrides of one request, with a `Priority` per pool when the
+ * strategy honours one (FUT-4427). Per host-hour the Intel pools (m7i, r7i,
+ * m6i) were reclaimed 25-41 times per 100 host-hours over 2026-10-12..11-11,
+ * the AMD pools (r7a, m7a) 3-8 times; dropping the Intel types would leave
+ * eu-north-1 with 9 spot pools instead of 15 and push jobs to us-east at about
+ * twice the price. So the preferred types come FIRST and every other pool
+ * stays in the request as a fallback.
+ *
+ * `priority` lists types most preferred first; a type it does not list comes
+ * after them, in `types` (INSTANCE_TYPES) order. Priority 0 is the highest
+ * (EC2 Fleet: a lower number is a higher priority). Every subnet of a type
+ * shares its priority. With any other strategy, or no priority list, the
+ * overrides are returned as they came (the same array), so the request is
+ * byte for byte what it was before this setting existed: plain
+ * capacity-optimized rejects nothing, but a Priority it ignores would still
+ * be a request nobody measured.
+ * @param {{ InstanceType: string, SubnetId: string }[]} overrides
+ * @param {string} strategy SPOT_STRATEGY
+ * @param {string[]} priority TYPE_PRIORITY
+ * @param {string[]} types INSTANCE_TYPES
+ */
+export function prioritized(overrides, strategy, priority, types) {
+  if (strategy !== PRIORITIZED || !priority.length) return overrides;
+  const rest = types.filter((t) => !priority.includes(t));
+  const order = [...priority, ...rest];
+  const rank = (t) => (order.includes(t) ? order.indexOf(t) : order.length);
+  return overrides.map((o) => ({ ...o, Priority: rank(o.InstanceType) }));
+}
+
+/**
+ * One host's instant EC2 Fleet request (CreateFleet input) in one region. Only
+ * a spot request's overrides go through `prioritized`; an on-demand request
+ * (lowest-price) is untouched.
+ * @param {object} p
+ * @param {string} p.clientToken
+ * @param {"spot" | "on-demand"} p.market
+ * @param {{ InstanceType: string, SubnetId: string }[]} p.overrides
+ * @param {string} p.template the launch template's name
+ * @param {string} p.strategy SPOT_STRATEGY
+ * @param {string[]} [p.priority] TYPE_PRIORITY
+ * @param {string[]} [p.types] INSTANCE_TYPES
+ */
+export function fleetRequest({ clientToken, market, overrides, template, strategy, priority = [], types = [] }) {
+  return {
+    Type: "instant",
+    ClientToken: clientToken.slice(0, 64),
+    TargetCapacitySpecification: { TotalTargetCapacity: 1, DefaultTargetCapacityType: market },
+    ...(market === "spot"
+      ? { SpotOptions: { AllocationStrategy: strategy, InstanceInterruptionBehavior: "terminate" } }
+      : { OnDemandOptions: { AllocationStrategy: "lowest-price" } }),
+    LaunchTemplateConfigs: [{
+      LaunchTemplateSpecification: { LaunchTemplateName: template, Version: "$Default" },
+      Overrides: market === "spot" ? prioritized(overrides, strategy, priority, types) : overrides,
+    }],
+  };
+}
+
 /**
  * Regions in the order a launch tries them. AWS's spot placement score (1-10)
  * says how likely a request is to be filled and to stay filled; it is read in

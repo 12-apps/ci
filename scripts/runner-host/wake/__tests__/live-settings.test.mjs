@@ -76,3 +76,15 @@ test("a live warm pool is kept, and a pool size that is not a count is refused",
   const cli = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "live-settings.mjs");
   assert.throws(() => execFileSync("node", [cli, path.join(dir, "env.json"), path.join(dir, "lt.json"), "", path.join(dir, "s")], { stdio: "pipe" }));
 });
+
+// FUT-4427: a trial of capacity-optimized-prioritized must survive the weekly
+// refresh's redeploy, and a fleet that never set TYPE_PRIORITY must not grow one.
+test("TYPE_PRIORITY is carried over only where the scaler has one", () => {
+  const trial = { ...lambdaEnv, SPOT_STRATEGY: "capacity-optimized-prioritized", TYPE_PRIORITY: "r7a.2xlarge,m7a.2xlarge,m6a.2xlarge" };
+  const { env } = liveSettings(trial, template("off"));
+  assert.equal(env.SPOT_STRATEGY, "capacity-optimized-prioritized");
+  assert.equal(env.TYPE_PRIORITY, "r7a.2xlarge,m7a.2xlarge,m6a.2xlarge");
+  assert.ok(!("TYPE_PRIORITY" in liveSettings(lambdaEnv, template("off")).env));
+  // The rollback deploys it unset, which leaves the key off the scaler: empty is unset too.
+  assert.ok(!("TYPE_PRIORITY" in liveSettings({ ...lambdaEnv, TYPE_PRIORITY: "" }, template("off")).env));
+});
