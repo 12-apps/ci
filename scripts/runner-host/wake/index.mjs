@@ -7,6 +7,7 @@
 //   LAUNCH_TEMPLATE, REGIONS, INSTANCE_TYPES, TOKEN_PARAMETER, SLOTS_PER_HOST, MAX_HOSTS   scale
 //   SETTLE_SECONDS (0: launch at once; see scale.mjs, settling)                       scale
 //   DAILY_BUDGET, DEGRADED_MAX_HOSTS, BUDGET_UTC_OFFSET, SPEND_PARAMETER, ALERT_PARAMETER   scale (budget.mjs)
+//   SPOT_STRATEGY, TYPE_PRIORITY (with capacity-optimized-prioritized only; scale.mjs, prioritized)   scale
 import {
   CreateFleetCommand, DescribeInstanceTypeOfferingsCommand, DescribeInstancesCommand, DescribeSubnetsCommand,
   DescribeSpotPriceHistoryCommand, EC2Client, GetSpotPlacementScoresCommand, StartInstancesCommand,
@@ -16,7 +17,7 @@ import { GetParameterCommand, PutParameterCommand, SSMClient } from "@aws-sdk/cl
 import { accrue, hostCap, reclaimLine } from "./budget.mjs";
 import { makeGithub } from "./github.mjs";
 import { makeQueue } from "./queue.mjs";
-import { makeScaler, regionOrder, spotAttempts } from "./scale.mjs";
+import { fleetRequest, makeScaler, regionOrder, spotAttempts } from "./scale.mjs";
 import { makeHandler } from "./wake.mjs";
 
 const env = process.env;
@@ -146,6 +147,10 @@ const regionOf = new Map();
 // capacity instead, for a somewhat higher price; `reclaimed:` log lines
 // (logReclaims) measure the difference.
 const spotStrategy = env.SPOT_STRATEGY ?? "capacity-optimized";
+// With capacity-optimized-prioritized only: the types a spot launch prefers,
+// most preferred first (prioritized, scale.mjs). Every other pool stays in the
+// request after them. Unset, or with any other strategy, nothing changes.
+const typePriority = list(env.TYPE_PRIORITY);
 
 // No spot capacity in a region, or no quota left there: the next region, then on-demand.
 const NO_ROOM = new Set([
@@ -347,18 +352,9 @@ const fleet = {
     }));
     // A ClientToken is unique per region, so the same token is reused across
     // regions: a region that refused it launched nothing under it.
-    const request = (r, clientToken, market, allowed) => throttled(() => client(r).send(new CreateFleetCommand({
-      Type: "instant",
-      ClientToken: clientToken.slice(0, 64),
-      TargetCapacitySpecification: { TotalTargetCapacity: 1, DefaultTargetCapacityType: market },
-      ...(market === "spot"
-        ? { SpotOptions: { AllocationStrategy: spotStrategy, InstanceInterruptionBehavior: "terminate" } }
-        : { OnDemandOptions: { AllocationStrategy: "lowest-price" } }),
-      LaunchTemplateConfigs: [{
-        LaunchTemplateSpecification: { LaunchTemplateName: env.LAUNCH_TEMPLATE, Version: "$Default" },
-        Overrides: allowed,
-      }],
-    })));
+    const request = (r, clientToken, market, allowed) => throttled(() => client(r).send(new CreateFleetCommand(fleetRequest({
+      clientToken, market, overrides: allowed, template: env.LAUNCH_TEMPLATE, strategy: spotStrategy, priority: typePriority, types,
+    }))));
     // Regions this evaluation has seen refuse: full (spot, then on-demand) or
     // broken (anything else, which on-demand would hit too).
     const spotFull = new Set();

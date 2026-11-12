@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { createHmac } from "node:crypto";
 import { test } from "node:test";
-import { makeScaler, regionOrder, spotAttempts } from "../scale.mjs";
+import { fleetRequest, makeScaler, PRIORITIZED, prioritized, regionOrder, spotAttempts } from "../scale.mjs";
 
 // The fleet grows to the queue and never past the cap. Getting it wrong one
 // way leaves PRs waiting for a slot; the other way bills idle machines.
@@ -225,4 +225,85 @@ test("regions go by placement tier, then by the configured (cheapest-first) orde
 test("without scores the configured order decides", () => {
   assert.deepEqual(regionOrder(["b", "a"], new Map()), ["b", "a"]);
   assert.deepEqual(regionOrder(["b", "a"], new Map([["a", 2]])), ["b", "a"]);
+});
+
+// ── AMD first, every pool kept (FUT-4427) ───────────────────────────────────
+// The live fleet's types, in INSTANCE_TYPES order, and the pools one region
+// offers: each type in two zones.
+const LIVE_TYPES = ["m7a.2xlarge", "m6a.2xlarge", "m7i.2xlarge", "m6i.2xlarge", "r7a.2xlarge", "r7i.2xlarge"];
+const AMD_FIRST = ["r7a.2xlarge", "m7a.2xlarge", "m6a.2xlarge"];
+const REGION_POOLS = LIVE_TYPES.flatMap((t) => ["subnet-a", "subnet-b"].map((s) => ({ InstanceType: t, SubnetId: s })));
+
+// The request index.mjs sent before TYPE_PRIORITY existed, written out by hand
+// from that code (5e71df6): the golden every unprioritized request must equal.
+const before = (market, strategy, overrides) => ({
+  Type: "instant",
+  ClientToken: "fleet-fp-ci-60000000-7",
+  TargetCapacitySpecification: { TotalTargetCapacity: 1, DefaultTargetCapacityType: market },
+  ...(market === "spot"
+    ? { SpotOptions: { AllocationStrategy: strategy, InstanceInterruptionBehavior: "terminate" } }
+    : { OnDemandOptions: { AllocationStrategy: "lowest-price" } }),
+  LaunchTemplateConfigs: [{
+    LaunchTemplateSpecification: { LaunchTemplateName: "ci-runner-fleet-fp-ci", Version: "$Default" },
+    Overrides: overrides,
+  }],
+});
+const request = (market, strategy, priority) => fleetRequest({
+  clientToken: "fleet-fp-ci-60000000-7", market, overrides: REGION_POOLS, template: "ci-runner-fleet-fp-ci", strategy, priority, types: LIVE_TYPES,
+});
+
+test("without the prioritized strategy, or without TYPE_PRIORITY, the request is byte for byte what it was", () => {
+  for (const strategy of ["capacity-optimized", "price-capacity-optimized", "lowest-price", PRIORITIZED]) {
+    for (const priority of [[], AMD_FIRST]) {
+      if (strategy === PRIORITIZED && priority.length) continue;
+      const sent = request("spot", strategy, priority);
+      assert.equal(JSON.stringify(sent), JSON.stringify(before("spot", strategy, REGION_POOLS)), `${strategy} [${priority}]`);
+      assert.ok(!JSON.stringify(sent).includes("Priority"), `${strategy}: no Priority is sent`);
+    }
+  }
+  // The same array, not a copy: nothing downstream can tell the difference.
+  assert.equal(prioritized(REGION_POOLS, "capacity-optimized", AMD_FIRST, LIVE_TYPES), REGION_POOLS);
+});
+
+test("an on-demand request is untouched, whatever the spot strategy and priority", () => {
+  for (const strategy of ["capacity-optimized", PRIORITIZED]) {
+    assert.equal(JSON.stringify(request("on-demand", strategy, AMD_FIRST)), JSON.stringify(before("on-demand", strategy, REGION_POOLS)));
+  }
+});
+
+test("prioritized: the listed types first, every other pool kept after them in INSTANCE_TYPES order", () => {
+  const sent = request("spot", PRIORITIZED, AMD_FIRST);
+  assert.equal(sent.SpotOptions.AllocationStrategy, PRIORITIZED);
+  const overrides = sent.LaunchTemplateConfigs[0].Overrides;
+  // Counterexample guard: an "AMD only" implementation drops the Intel pools
+  // and leaves eu-north-1 with 9 spot pools instead of 15. Every pool stays.
+  assert.equal(overrides.length, REGION_POOLS.length);
+  assert.deepEqual(overrides.map(({ InstanceType, SubnetId }) => ({ InstanceType, SubnetId })), REGION_POOLS);
+  const priorityOf = Object.fromEntries(overrides.map((o) => [o.InstanceType, o.Priority]));
+  // 0 is the highest priority (EC2 Fleet: lower number, higher priority).
+  assert.deepEqual(priorityOf, {
+    "r7a.2xlarge": 0, "m7a.2xlarge": 1, "m6a.2xlarge": 2, "m7i.2xlarge": 3, "m6i.2xlarge": 4, "r7i.2xlarge": 5,
+  });
+  // Both zones of a type share its priority.
+  for (const t of LIVE_TYPES) assert.equal(new Set(overrides.filter((o) => o.InstanceType === t).map((o) => o.Priority)).size, 1, t);
+  // Every Intel pool ranks below every AMD pool.
+  const worstAmd = Math.max(...overrides.filter((o) => /a\./.test(o.InstanceType)).map((o) => o.Priority));
+  const bestIntel = Math.min(...overrides.filter((o) => /i\./.test(o.InstanceType)).map((o) => o.Priority));
+  assert.ok(worstAmd < bestIntel, `AMD ${worstAmd} before Intel ${bestIntel}`);
+  // The pools passed in are not mutated: a later on-demand request reuses them.
+  assert.ok(REGION_POOLS.every((o) => !("Priority" in o)));
+});
+
+test("a type offered but in neither list ranks last; a listed type no region offers is harmless", () => {
+  const offered = [{ InstanceType: "c7a.2xlarge", SubnetId: "s" }, { InstanceType: "m7i.2xlarge", SubnetId: "s" }];
+  assert.deepEqual(prioritized(offered, PRIORITIZED, ["m9z.2xlarge", "m7a.2xlarge"], LIVE_TYPES).map((o) => `${o.InstanceType}=${o.Priority}`),
+    ["c7a.2xlarge=7", "m7i.2xlarge=3"]);
+});
+
+test("index.mjs builds every launch with fleetRequest, from SPOT_STRATEGY and TYPE_PRIORITY", async () => {
+  const { readFileSync } = await import("node:fs");
+  const index = readFileSync(new URL("../index.mjs", import.meta.url), "utf8");
+  assert.match(index, /const typePriority = list\(env\.TYPE_PRIORITY\);/);
+  assert.match(index, /new CreateFleetCommand\(fleetRequest\(\{\n\s+clientToken, market, overrides: allowed, template: env\.LAUNCH_TEMPLATE, strategy: spotStrategy, priority: typePriority, types,\n/);
+  assert.equal(index.match(/new CreateFleetCommand\(/g).length, 1, "one request builder, so no launch skips it");
 });
