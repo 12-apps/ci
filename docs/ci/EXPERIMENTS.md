@@ -806,3 +806,40 @@ file's environment + prepare + collect + setup + test time, and widens the unit 
 often, or the refresh's Unit concurrency comes out implausible (below 1 or above the pool size).
 Rollback: revert this PR; `v2` moves on the merge. The reverted engine parses the consumer's JSON as
 JUnit, finds no `<testsuite>` in it and reads nothing from it, so no consumer change is needed.
+
+## E-013 — A serial leg pays its boot; a pooled leg ships its imports (FUT-4409)
+
+**Date:** 2026-11-12 · **Status:** Open; hosted proof is the first daily refresh after the consumer opts in
+
+**Evidence:** future-pay's verdict on its 12-minute leg ceiling (its E-144 addenda) found legs over
+14 minutes in two more lanes than Unit:
+- **Integration:** three, all in one run (42508067169). Leg 3/7 was packed at ~597 s by the ledger
+  and ran 878 s; its vitest summary reads `collect 471s, tests 2055s`. Like Unit (E-012), the
+  integration ledger is built from JUnit, which leaves the imports out.
+- **Gherkin:** two, in two runs. Gherkin runs Playwright on one worker. On the daily run 43265976316
+  every leg's step was 60–81 s longer than its summed features (median 68.5 s), and the ratio-only
+  concurrency (0.88) folded that boot into every feature instead.
+
+A least-squares fit of step = fixed + items / concurrency over one run's legs works for neither kind
+of lane:
+- **Unit:** the fit gave −438 s fixed.
+- **Integration:** it gave 24 s fixed at concurrency 1.57, against a ratio of 1.37.
+
+The legs of a full run are too alike (coefficient of variation 0.05–0.19) to separate a boot from
+a pool.
+
+**Change:**
+- **Serial lanes, opt-in (`fixedCost: true`).** The refresh stores `fixedSeconds`, the median over
+  the run's paired legs of step minus items, floored at 0. Concurrency becomes items over the steps
+  minus that cost. `size` gives each leg `target − fixedSeconds`, never less than a quarter of the
+  target, and reports each leg with its boot. The cap report counts it too.
+- **Pooled lanes.** The JUnit staging steps of `monorepo-tests.yml` (unit and integration) now ship
+  each `x.xml`'s `x.durations.json` when it exists. The integration lane's report is a single file,
+  not a directory, so before this its durations never left the runner. The zero-test guard reads
+  only `*.xml`.
+- **Tests.** `fixed-cost.test.mjs` uses the real Gherkin pairs and fails on main. The new case in
+  `lane-timings-wiring.test.mjs` runs both staging step bodies in bash and fails on the old ones.
+
+**Revert if:** an opted-in lane's `fixedSeconds` exceeds a third of the target, or its legs run
+past 12 minutes as often as before. Rollback: revert this PR. A ledger's `fixedSeconds` is ignored
+by the reverted engine.

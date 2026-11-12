@@ -81,7 +81,11 @@ export function normaliseLedger(parsed) {
     typeof parsed.concurrency === "number" && Number.isFinite(parsed.concurrency) && parsed.concurrency > 0
       ? parsed.concurrency
       : 1;
-  return { ...parsed, version: LEDGER_VERSION, unit: "seconds", concurrency, files };
+  const fixedSeconds =
+    typeof parsed.fixedSeconds === "number" && Number.isFinite(parsed.fixedSeconds) && parsed.fixedSeconds > 0
+      ? parsed.fixedSeconds
+      : 0;
+  return { ...parsed, version: LEDGER_VERSION, unit: "seconds", concurrency, fixedSeconds, files };
 }
 
 /** The ledger as the JSON it is committed as: keys sorted, seconds to 0.1. */
@@ -89,8 +93,10 @@ export function serialiseLedger(ledger) {
   const files = Object.fromEntries(
     [...ledger.files.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([k, v]) => [k, round1(v)]),
   );
-  const { files: _files, ...rest } = ledger;
-  return `${JSON.stringify({ ...rest, version: LEDGER_VERSION, unit: "seconds", files }, null, 2)}\n`;
+  const { files: _files, fixedSeconds, ...rest } = ledger;
+  // A lane that does not measure its fixed cost keeps the shape it had.
+  const fixed = fixedSeconds > 0 ? { fixedSeconds: round1(fixedSeconds) } : {};
+  return `${JSON.stringify({ ...rest, ...fixed, version: LEDGER_VERSION, unit: "seconds", files }, null, 2)}\n`;
 }
 
 export const round1 = (n) => Math.round(n * 10) / 10;
@@ -148,12 +154,18 @@ export function sizeLane(items, ledger, options = {}) {
     return {
       shardTotal: total, legs: Array.from({ length: total }, () => []), estimateSeconds: 0,
       legSeconds: Array.from({ length: total }, () => 0), wanted: total, binding: false,
-      targetSeconds, concurrency, unknown: [], largest: null,
+      targetSeconds, concurrency, fixedSeconds: ledger.fixedSeconds > 0 ? ledger.fixedSeconds : 0, unknown: [], largest: null,
     };
   }
 
+  // What every leg pays before its first item: booting the app, the browser,
+  // the stack (the ledger's `fixedSeconds`, measured by the refresh on lanes
+  // that opt in). A leg's items get the target minus that, never less than a
+  // quarter of it, so a mis-measured fixed cost cannot ask for unbounded legs.
+  const fixedSeconds = ledger.fixedSeconds > 0 ? ledger.fixedSeconds : 0;
+  const itemBudget = Math.max(targetSeconds - fixedSeconds, targetSeconds / 4);
   const estimateSeconds = unique.reduce((sum, item) => sum + cost(item), 0) / concurrency;
-  const wanted = Math.max(1, Math.ceil(estimateSeconds / targetSeconds));
+  const wanted = Math.max(1, Math.ceil(estimateSeconds / itemBudget));
   // Never more legs than items: an empty leg boots a runner to run nothing.
   const shardTotal = Math.min(clampInt(wanted, minShards, maxShards), unique.length);
   const packed = packLegs(unique, shardTotal, cost);
@@ -161,12 +173,13 @@ export function sizeLane(items, ledger, options = {}) {
   return {
     shardTotal,
     legs: packed.map((leg) => leg.items),
-    legSeconds: packed.map((leg) => round1(leg.load / concurrency)),
+    legSeconds: packed.map((leg) => round1(leg.load / concurrency + fixedSeconds)),
     estimateSeconds: round1(estimateSeconds),
     wanted,
     binding: wanted > maxShards,
     targetSeconds,
     concurrency,
+    fixedSeconds,
     unknown: unique.filter((item) => !ledger.files.has(item)).sort(),
     largest: { item: largestItem, seconds: round1(cost(largestItem) / concurrency) },
   };
