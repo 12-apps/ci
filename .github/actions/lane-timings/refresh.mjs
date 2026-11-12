@@ -110,7 +110,17 @@ function walk(dir, out = []) {
 const seconds = (step) =>
   step?.started_at && step?.completed_at ? (Date.parse(step.completed_at) - Date.parse(step.started_at)) / 1000 : null;
 
-function readReports(dir, lane) {
+/**
+ * The reports one leg's artifact holds, one `Map<item, row>` per file.
+ *
+ * A `.json` file is a durations map (`{ "<item>": seconds }`) whatever the
+ * lane's `format`, so a junit lane can ship one beside its XML. That is how a
+ * vitest lane counts what JUnit cannot see: a `<testsuite time>` is the test
+ * phase only, so a file whose cost is importing its module graph read as 0 s
+ * (future-pay's unit ledger had a median of 0 s and sized a 14-minute leg as
+ * 2 minutes, FUT-4409). Where both name an item, the larger wins.
+ */
+export function readReports(dir, lane) {
   const filesRe = new RegExp(lane.files);
   const reports = [];
   for (const file of walk(dir)) {
@@ -118,11 +128,16 @@ function readReports(dir, lane) {
     if (!filesRe.test(rel)) continue;
     const text = readFileSync(file, "utf8");
     const rows =
-      lane.format === "junit" ? parseJunit(text, junitPrefix(rel, lane.junitRoot ?? "reports/")) : parseDurationsJson(text);
+      lane.format === "junit" && !rel.endsWith(".json")
+        ? parseJunit(text, junitPrefix(rel, lane.junitRoot ?? "reports/"))
+        : parseDurationsJson(text);
     reports.push(reportItems(rows, lane.rewrite ?? []));
   }
   return reports;
 }
+
+/** A leg's measured seconds: each item once, at its largest report. */
+export const legSeconds = (reports) => [...mergeReports(reports).values()].reduce((a, row) => a + row.seconds, 0);
 
 /**
  * Leg n of an artifact (`…-s3`) or a job: `… · shard 3/6`, or a matrix job
@@ -158,7 +173,9 @@ async function measureLane(name, lane, { artifacts, jobs, scratch }) {
       const legReports = readReports(await download(artifact, scratch), lane);
       reports.push(...legReports);
       const leg = legOfArtifact(artifact.name);
-      const sum = legReports.reduce((a, r) => a + [...r.values()].reduce((b, x) => b + x.seconds, 0), 0);
+      // Per item, not per report: an item in both the XML and the durations
+      // JSON would otherwise count twice and inflate the lane's concurrency.
+      const sum = legSeconds(legReports);
       // A re-run attempt of the same leg: keep the larger, as mergeReports does per item.
       measuredByLeg.set(leg, Math.max(measuredByLeg.get(leg) ?? 0, sum));
     } catch (error) {
