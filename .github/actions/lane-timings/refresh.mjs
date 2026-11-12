@@ -190,6 +190,7 @@ async function measureLane(name, lane, { artifacts, jobs, scratch }) {
   // whose artifact expired or never uploaded would otherwise count its wall
   // time against nobody's measurements.
   const paired = { measured: 0, wall: 0 };
+  const pairs = []; // per leg, for a lane that measures its fixed cost
   for (const job of legs.sort((a, b) => legOfJob(a.name) - legOfJob(b.name))) {
     const step = (job.steps ?? []).find((s) => s.name === lane.step);
     const s = step?.status === "completed" ? seconds(step) : null;
@@ -202,9 +203,10 @@ async function measureLane(name, lane, { artifacts, jobs, scratch }) {
     if (measuredByLeg.has(leg)) {
       paired.measured += measuredByLeg.get(leg);
       paired.wall += s;
+      pairs.push({ leg, measured: measuredByLeg.get(leg), wall: s });
     }
   }
-  return { measured: mergeReports(reports), stepSeconds, paired, missing, artifactCount: mine.length };
+  return { measured: mergeReports(reports), stepSeconds, paired, pairs, missing, artifactCount: mine.length };
 }
 
 async function main() {
@@ -248,12 +250,14 @@ async function main() {
   for (const [name, lane] of Object.entries(config.lanes ?? {})) {
     const ledgerPath = join(root, lane.ledger);
     const ledger = readLedger(ledgerPath);
-    const { measured, stepSeconds, paired, missing, artifactCount } = await measureLane(name, lane, { artifacts, jobs, scratch });
+    const { measured, stepSeconds, paired, pairs, missing, artifactCount } = await measureLane(name, lane, { artifacts, jobs, scratch });
     let next = ledger;
     if (measured.size > 0) {
       const merged = mergeLedger(ledger, measured, {
         exists: (item) => existsSync(join(root, item)),
         paired,
+        pairs,
+        fixedCost: lane.fixedCost === true,
         measuredMeta: meta,
       });
       next = { ...merged.ledger, lane: name };
@@ -262,7 +266,8 @@ async function main() {
       console.log(
         `[lane-timings] ${name}: ${measured.size} item(s) from ${artifactCount} artifact(s); ` +
           `+${merged.changes.added.length} new, ${merged.changes.updated} updated, ${merged.changes.kept} kept, ` +
-          `-${merged.changes.removed.length} gone; concurrency ${next.concurrency}.`,
+          `-${merged.changes.removed.length} gone; concurrency ${next.concurrency}` +
+          `${lane.fixedCost === true ? `, fixed ${next.fixedSeconds ?? 0}s a leg` : ""}.`,
       );
     } else {
       console.log(`::warning title=lane-timings (${name})::no report measured anything in this run; the ledger is unchanged.`);

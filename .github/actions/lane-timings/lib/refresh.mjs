@@ -41,7 +41,11 @@ import { round1 } from "./timings.mjs";
  *   over the legs that left both a report and a step time
  * @param {object} [opts.measuredMeta]   { run, sha, at } to stamp the ledger with
  */
-export function mergeLedger(ledger, measured, { exists, paired = { measured: 0, wall: 0 }, measuredMeta = null } = {}) {
+export function mergeLedger(
+  ledger,
+  measured,
+  { exists, paired = { measured: 0, wall: 0 }, pairs = [], fixedCost = false, measuredMeta = null } = {},
+) {
   const files = new Map();
   const changes = { added: [], removed: [], updated: 0, kept: 0 };
   for (const [item, row] of measured) {
@@ -59,15 +63,55 @@ export function mergeLedger(ledger, measured, { exists, paired = { measured: 0, 
       changes.removed.push(item);
     }
   }
-  const concurrency =
-    paired.measured > 0 && paired.wall > 0 ? Math.max(round2(paired.measured / paired.wall), 0.1) : ledger.concurrency;
+  const { concurrency, fixedSeconds } = fixedCost
+    ? fitFixedCost(pairs, ledger)
+    : {
+        concurrency:
+          paired.measured > 0 && paired.wall > 0 ? Math.max(round2(paired.measured / paired.wall), 0.1) : ledger.concurrency,
+        fixedSeconds: ledger.fixedSeconds ?? 0,
+      };
   return {
-    ledger: { ...ledger, concurrency, ...(measuredMeta ? { measured: measuredMeta } : {}), files },
+    ledger: {
+      ...ledger,
+      concurrency,
+      ...(fixedSeconds > 0 || ledger.fixedSeconds > 0 ? { fixedSeconds } : {}),
+      ...(measuredMeta ? { measured: measuredMeta } : {}),
+      files,
+    },
     changes: { ...changes, added: changes.added.sort(), removed: changes.removed.sort() },
   };
 }
 
 const round2 = (n) => Math.round(n * 100) / 100;
+
+/**
+ * A lane's fixed cost per leg, and its concurrency once that is taken out.
+ *
+ * For a lane whose items run one at a time (Playwright on one worker: SPA E2E,
+ * Gherkin), a leg's test step is its boot — the app, the browser, the stack —
+ * plus the sum of its items. So the fixed cost is the MEDIAN, over the run's
+ * legs that left both a report and a step time, of step minus items, floored
+ * at 0; the median so one leg that waited on a slow runner does not move it.
+ * Concurrency is then the items over what is left of the steps.
+ *
+ * Opt-in (`fixedCost: true` in the lane's config), because for a POOLED lane
+ * (vitest) step minus items is not a boot: it is the pool's parallelism, and one
+ * run's legs are too alike to tell the two apart (FUT-4409: a fit across the
+ * unit legs of run 43265976316 gave a fixed cost of -438 s). A pooled lane's
+ * per-file cost is made whole instead, by a durations report (E-012).
+ *
+ * No paired leg keeps both of yesterday's numbers.
+ */
+export function fitFixedCost(pairs, ledger) {
+  const usable = pairs.filter((p) => p.measured > 0 && p.wall > 0);
+  if (usable.length === 0) return { concurrency: ledger.concurrency, fixedSeconds: ledger.fixedSeconds ?? 0 };
+  const gaps = usable.map((p) => Math.max(0, p.wall - p.measured)).sort((a, b) => a - b);
+  const mid = gaps.length >> 1;
+  const fixedSeconds = round1(gaps.length % 2 ? gaps[mid] : (gaps[mid - 1] + gaps[mid]) / 2);
+  const measured = usable.reduce((a, p) => a + p.measured, 0);
+  const rest = usable.reduce((a, p) => a + Math.max(p.wall - fixedSeconds, 1), 0);
+  return { concurrency: Math.max(round2(measured / rest), 0.1), fixedSeconds };
+}
 
 /**
  * What in this run deserves a human's eye. Never throws, never decides: the
@@ -84,7 +128,8 @@ export function slowReport(lane, measured, { slowFileSeconds, targetSeconds, ste
     .map((row) => ({ lane, leg: row.leg, seconds: round1(row.seconds) }))
     .filter((leg) => leg.seconds > targetSeconds);
   const total = [...ledger.files.values()].reduce((a, b) => a + b, 0) / (ledger.concurrency || 1);
-  const fullWidthWants = Math.max(1, Math.ceil(total / targetSeconds));
+  const fixed = ledger.fixedSeconds > 0 ? ledger.fixedSeconds : 0;
+  const fullWidthWants = Math.max(1, Math.ceil(total / Math.max(targetSeconds - fixed, targetSeconds / 4)));
   const cap =
     Number.isFinite(maxShards) && maxShards > 0
       ? { maxShards, fullWidthWants, binding: fullWidthWants > maxShards, fullWidthSeconds: round1(total) }

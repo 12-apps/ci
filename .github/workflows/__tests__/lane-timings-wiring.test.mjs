@@ -129,3 +129,38 @@ test("refresh: the default commit body passes commitlint's body-max-line-length"
   assert.ok(lines.length > 0);
   for (const line of lines) assert.ok(line.length <= 100, `over 100 characters: ${line}`);
 });
+
+// E-013: JUnit's testsuite time leaves out a vitest file's imports, so each
+// staged JUnit file ships with the durations JSON a consumer's reporter writes
+// beside it. Run the REAL step bodies, both of them, in a scratch directory.
+test("the JUnit staging steps ship each report's durations JSON when it exists", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync: read, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const bodies = [...tests.matchAll(/- name: Stage JUnit reports for the signal job\n[\s\S]*?\n {8}run: \|\n((?: {10}.*\n|\n)+)/g)]
+    .map((m) => m[1].replace(/^ {10}/gm, ""));
+  assert.equal(bodies.length, 2, "the unit and the integration staging steps");
+  for (const body of bodies) {
+    const dir = mkdtempSync(join(tmpdir(), "junit-stage-"));
+    try {
+      mkdirSync(join(dir, "reports/junit/unit"), { recursive: true });
+      writeFileSync(join(dir, "reports/junit/integration.xml"), "<testsuites/>");
+      writeFileSync(join(dir, "reports/junit/integration.durations.json"), "{}");
+      writeFileSync(join(dir, "reports/junit/root.xml"), "<testsuites/>"); // no JSON beside it
+      const out = join(dir, "out");
+      writeFileSync(out, "");
+      execFileSync("bash", ["-c", body], {
+        cwd: dir,
+        env: { PATH: process.env.PATH, GITHUB_OUTPUT: out, REPORTS: "reports/junit/integration.xml reports/junit/root.xml reports/junit/unit" },
+      });
+      assert.deepEqual(read(out, "utf8").split("\n").slice(1, -2), [
+        "reports/junit/integration.xml",
+        "reports/junit/integration.durations.json",
+        "reports/junit/root.xml",
+        "reports/junit/unit",
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});

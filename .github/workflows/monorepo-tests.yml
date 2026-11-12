@@ -1313,9 +1313,19 @@ jobs:
           REPORTS: ${{ inputs.unit-junit-reports }}
         run: |
           set -euo pipefail
+          # Each JUnit file ships with the per-file durations a consumer's
+          # reporter may write beside it (`x.xml` → `x.durations.json`):
+          # JUnit's testsuite time leaves out a vitest file's imports, and the
+          # lane-timings refresh reads the durations instead (E-012, E-013).
+          # The zero-test guard reads only *.xml, so the JSON never counts there.
           {
             echo "paths<<PATHS_EOF"
-            printf '%s\n' $REPORTS
+            for report in $REPORTS; do
+              printf '%s\n' "$report"
+              case "$report" in
+                *.xml) if [ -f "${report%.xml}.durations.json" ]; then printf '%s\n' "${report%.xml}.durations.json"; fi ;;
+              esac
+            done
             echo "PATHS_EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -2400,9 +2410,19 @@ jobs:
           REPORTS: ${{ inputs.integration-junit-reports }}
         run: |
           set -euo pipefail
+          # Each JUnit file ships with the per-file durations a consumer's
+          # reporter may write beside it (`x.xml` → `x.durations.json`):
+          # JUnit's testsuite time leaves out a vitest file's imports, and the
+          # lane-timings refresh reads the durations instead (E-012, E-013).
+          # The zero-test guard reads only *.xml, so the JSON never counts there.
           {
             echo "paths<<PATHS_EOF"
-            printf '%s\n' $REPORTS
+            for report in $REPORTS; do
+              printf '%s\n' "$report"
+              case "$report" in
+                *.xml) if [ -f "${report%.xml}.durations.json" ]; then printf '%s\n' "${report%.xml}.durations.json"; fi ;;
+              esac
+            done
             echo "PATHS_EOF"
           } >> "$GITHUB_OUTPUT"
 

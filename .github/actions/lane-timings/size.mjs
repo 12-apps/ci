@@ -75,6 +75,7 @@ function main() {
     ledger: ledgerPath,
     ledgerItems: ledger.files.size,
     concurrency: sized.concurrency,
+    fixedSeconds: sized.fixedSeconds,
     targetSeconds: sized.targetSeconds,
     estimateSeconds: sized.estimateSeconds,
     legSeconds: sized.legSeconds,
@@ -91,7 +92,8 @@ function main() {
   const legs = sized.legSeconds.map((s, i) => `leg ${i + 1} ~${minutes(s)}`).join(", ");
   console.log(
     `[lane-timings] ${lane}: ${items.length} item(s), ~${minutes(sized.estimateSeconds)} of tests by the ledger ` +
-      `(${ledger.files.size} item(s) known, concurrency ${sized.concurrency}) → ${sized.shardTotal} leg(s): ${legs || "none"}.`,
+      `(${ledger.files.size} item(s) known, concurrency ${sized.concurrency}` +
+      `${sized.fixedSeconds > 0 ? `, ${Math.round(sized.fixedSeconds)}s fixed a leg` : ""}) → ${sized.shardTotal} leg(s): ${legs || "none"}.`,
   );
   if (sized.unknown.length) {
     console.log(`[lane-timings] ${lane}: ${sized.unknown.length} item(s) not in the ledger, costed at its mean.`);

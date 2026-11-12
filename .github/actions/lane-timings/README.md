@@ -15,8 +15,12 @@ A leg runs about `target-seconds` of **test step** time: 600 s, the top of the
 owner's 8–10 minute target.
 
 ```
-legs = clamp(ceil(Σ ledger seconds of the selection / concurrency / target), min-shards, max-shards)
+legs = clamp(ceil(Σ ledger seconds of the selection / concurrency / (target − fixed)), min-shards, max-shards)
 ```
+
+`fixed` is the ledger's `fixedSeconds`: what each leg pays before its first item
+(booting the app, the browser, the stack). It is 0 unless the lane opts in with
+`"fixedCost": true`, and the items always get at least a quarter of the target.
 
 - An item the ledger does not know costs the ledger's mean, never zero, so a
   new file never piles onto one leg. An empty or corrupt ledger is an even split.
@@ -142,6 +146,7 @@ Every run writes, to the job summary and as annotations:
 | `rewrite` | regex rewrites from a report's key to the plan's item; parts of one item are summed |
 | `job`, `step` | the legs' job names (`· shard <n>/<m>`) and their test step, for concurrency and slow legs |
 | `maxShards` | the lane's cap, for the cap warning |
+| `fixedCost` | `true` for a lane whose items run one at a time (Playwright on one worker). The refresh stores `fixedSeconds`, the median over the run's legs of test step minus the leg's summed items, and concurrency becomes items over what is left. Leave it off for a pooled (vitest) lane: there step minus items is the pool, not a boot, and one run's legs are too alike to separate the two (E-013) |
 
 A new lane (load tests, say) is a new entry here plus a `size` step in its
 plan job: nothing in this action changes.
@@ -149,7 +154,7 @@ plan job: nothing in this action changes.
 ## The ledger — `.lane-timings/<lane>.json`
 
 ```json
-{ "version": "lane-timings-v1", "lane": "gherkin", "unit": "seconds", "concurrency": 0.93,
+{ "version": "lane-timings-v1", "lane": "gherkin", "unit": "seconds", "concurrency": 1.0, "fixedSeconds": 68.5,
   "measured": { "run": "<url>", "sha": "<sha>", "at": "<iso>" },
   "files": { "tests/e2e/features/admin/cozinha-fluxos-expedicao.feature": 144.2 } }
 ```
