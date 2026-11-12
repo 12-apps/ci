@@ -118,7 +118,7 @@ Every run writes, to the job summary and as annotations:
   "lanes": {
     "unit": {
       "ledger": ".lane-timings/unit.json", "maxShards": 6,
-      "artifacts": "^unit-junit-a\\d+-s\\d+$", "files": "\\.xml$",
+      "artifacts": "^unit-junit-a\\d+-s\\d+$", "files": "\\.(xml|durations\\.json)$",
       "format": "junit", "junitRoot": "reports/",
       "job": "^Tests / Unit Tests", "step": "Run unit tests"
     },
@@ -137,7 +137,7 @@ Every run writes, to the job summary and as annotations:
 |---|---|
 | `artifacts` | regex over this run's artifact names; a trailing `-s<n>` names the leg |
 | `files` | regex over paths inside each artifact |
-| `format` | `junit` (vitest: one `<testsuite>` per file) or `durations-json` (`{ item: seconds }`) |
+| `format` | `junit` (vitest: one `<testsuite>` per file) or `durations-json` (`{ item: seconds }`). In a `junit` lane, a matched `.json` file is read as `durations-json`, and an item both name costs the larger: vitest's `<testsuite time>` is the test phase only, so a lane whose files spend their time importing ships a per-file durations JSON beside the XML (E-012) |
 | `junitRoot` | a junit report under `<pkg>/<junitRoot>…` names files relative to `<pkg>`; empty for root-relative reports |
 | `rewrite` | regex rewrites from a report's key to the plan's item; parts of one item are summed |
 | `job`, `step` | the legs' job names (`· shard <n>/<m>`) and their test step, for concurrency and slow legs |

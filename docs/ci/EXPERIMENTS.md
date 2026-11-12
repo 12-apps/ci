@@ -778,3 +778,31 @@ legs than the lane needs ("wants 10 leg(s) … cap is 8").
 
 **Not affected:** the ledger's per-file costs, which come from the reports, not the jobs. The next
 daily refresh rewrites the SPA E2E concurrency.
+
+## E-012 — A vitest file costs its imports, not just its tests (FUT-4409)
+
+**Date:** 2026-11-12 · **Status:** Open; hosted proof is the first daily refresh after the consumer ships its durations JSON
+
+**Evidence:** future-pay's leg-time watch (its E-144 addendum, "a leg may run up to 12 minutes")
+flagged the Unit lane. Over the 24 h to 2026-11-12 12:36 UTC, 5 of 105 passing Unit legs ran past
+12 minutes (4.8%) and one past 14, on three unrelated branches. Run 43162573785 shows why:
+- The plan priced 1,301 files at 1m56s and gave them one leg; the leg's test step took 14.4 min.
+- Its apps/web log reads `tests 118s, collect 2678s` (summed over workers).
+- Vitest's JUnit `<testsuite time>` is `file.result.duration`, the test phase only. Import, setup and
+  environment time are not in it.
+- So the unit ledger's median file was 0 s. The full run's concurrency (1) only rescaled the
+  daily run's mix, and a selection heavy in import-bound files was priced near zero.
+
+**Change:** in a `junit` lane, a `.json` file the lane's `files` pattern matches is read as a
+durations map. Where it and the XML name the same item, the larger wins (`mergeReports`, as for a
+re-run). A leg's measured seconds now count each item once (`legSeconds`), so shipping both
+reports does not double the lane's concurrency. A lane that ships only XML reads exactly as before.
+`refresh-durations.test.mjs` pins all three; its import fails on main.
+
+**Consumer side:** future-pay adds a vitest reporter that writes `<junit>.durations.json` with each
+file's environment + prepare + collect + setup + test time, and widens the unit lane's `files`.
+
+**Revert if:** the Unit lane's legs, sized on the refreshed ledger, still run past 12 minutes as
+often, or the refresh's Unit concurrency comes out implausible (below 1 or above the pool size).
+Rollback: revert this PR; `v2` moves on the merge. The reverted engine parses the consumer's JSON as
+JUnit, finds no `<testsuite>` in it and reads nothing from it, so no consumer change is needed.
