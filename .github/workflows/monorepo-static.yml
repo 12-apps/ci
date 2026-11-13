@@ -51,7 +51,8 @@ on:
           a consumer with a fleet can send them to a pool of 2-vCPU slots
           (scripts/runner-host, a medium pool). Empty (the
           default) runs them where every other job of this workflow runs, so
-          a caller that passes nothing sees no change.
+          a caller that passes nothing sees no change. When set, it wins over
+          `runner` for these two jobs only.
         type: string
         required: false
         default: ''
