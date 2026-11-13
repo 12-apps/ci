@@ -177,7 +177,10 @@ ExecStart=${prefix}/supervisor.sh %i
 # fresh runner in the moment before the SIGTERM arrived.
 KillMode=mixed
 TimeoutStopSec=60
-SuccessExitStatus=143
+# 66: a slot above CI_RUNNER_SLOTS (a medium pool's host, deploy.sh HOST_SLOTS)
+# exits at start and stays down.
+SuccessExitStatus=143 66
+RestartPreventExitStatus=66
 Restart=always
 RestartSec=30
 

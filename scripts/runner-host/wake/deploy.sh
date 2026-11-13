@@ -62,6 +62,12 @@
 # at boot. It must include RUNNER_LABEL. A second fleet from the SAME image (a
 # light pool, README "A light pool") sets it to its own label; unset, the user
 # data is what it was before this setting existed.
+# HOST_SLOTS (unset: the slot count the image was built with): the runner slots
+# each host runs, written over the image's CI_RUNNER_SLOTS at boot, so the
+# memory cap and the pinned cores follow it; a slot unit above it exits at
+# start (supervisor.sh). It must equal SLOTS_PER_HOST, the scaler's count. A
+# medium pool (README "A medium pool") sets it when its slots per host differ
+# from the image's; unset, the user data is what it was before this setting.
 # WEBHOOK_SECRET_PARAMETER (unset): an SSM SecureString in AWS_REGION that holds
 # the webhook's secret, created by hand with the webhook itself. The scaler
 # reads it at run time and the function's configuration never holds it; the
@@ -107,6 +113,11 @@ settle_seconds="${SETTLE_SECONDS:-30}"
 # The scaler sleeps the settle inside an invocation with a 120 s timeout (below):
 # a settle near that never launches, so a value over 90 stops the deploy.
 [[ "$settle_seconds" =~ ^[0-9]{1,3}$ ]] && (( 10#$settle_seconds <= 90 )) || { echo "deploy: SETTLE_SECONDS must be a whole number from 0 to 90, got '${settle_seconds}'" >&2; exit 1; }
+host_slots="${HOST_SLOTS:-}"
+if [[ -n "$host_slots" ]]; then
+  [[ "$host_slots" =~ ^[1-9][0-9]?$ ]] || { echo "deploy: HOST_SLOTS must be a slot count from 1 to 99, got '${host_slots}'" >&2; exit 1; }
+  [[ "$host_slots" == "$slots" ]] || { echo "deploy: HOST_SLOTS '${host_slots}' must equal SLOTS_PER_HOST '${slots}', or the scaler would launch for slots the hosts do not run" >&2; exit 1; }
+fi
 host_labels="${HOST_LABELS:-}"
 if [[ -n "$host_labels" ]]; then
   [[ "$host_labels" =~ ^[A-Za-z0-9._-]+(,[A-Za-z0-9._-]+)*$ ]] || { echo "deploy: HOST_LABELS must be comma-separated runner labels, got '${host_labels}'" >&2; exit 1; }
@@ -136,10 +147,15 @@ store_cmd=""
 #    launched it. Without it no line is written, so the image's labels stand.
 labels_cmd=""
 [[ -n "$host_labels" ]] && labels_cmd="  - [sh, -c, \"sed -i 's/^CI_RUNNER_LABELS=.*/CI_RUNNER_LABELS=${host_labels}/' /etc/ci-runner/env\"]"
-# On the store's line, so the user data of a fleet without HOST_LABELS is byte
-# for byte what it was.
+#  - the slot count, only with HOST_SLOTS: a medium pool may run another slot
+#    count than the image was built with. Without it the image's count stands.
+slots_cmd=""
+[[ -n "${host_slots:-}" ]] && slots_cmd="  - [sh, -c, \"sed -i 's/^CI_RUNNER_SLOTS=.*/CI_RUNNER_SLOTS=${host_slots}/' /etc/ci-runner/env\"]"
+# On the store's line, so the user data of a fleet without HOST_LABELS or
+# HOST_SLOTS is byte for byte what it was.
 nl=$'\n'
 [[ -z "$labels_cmd" ]] || store_cmd+="${store_cmd:+$nl}${labels_cmd}"
+[[ -z "$slots_cmd" ]] || store_cmd+="${store_cmd:+$nl}${slots_cmd}"
 user_data=$(base64 -w0 <<UD
 #cloud-config
 bootcmd:

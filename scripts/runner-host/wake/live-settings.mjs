@@ -11,8 +11,8 @@
 //     including WEBHOOK_SECRET, which is written to a file and never printed,
 //     or the name of the SSM parameter that holds it (WEBHOOK_SECRET_PARAMETER,
 //     a light pool's: then there is no secret to carry);
-//   - the launch template (idle minutes, the pnpm store switch and HOST_LABELS
-//     in its user data, the root volume's IOPS and throughput in its block devices);
+//   - the launch template (idle minutes, the pnpm store switch, HOST_LABELS and
+//     HOST_SLOTS in its user data, the root volume's IOPS and throughput in its block devices);
 //   - the warm pool, which only exists as hosts: the caller counts them.
 //
 // REGIONS is the list the last deploy left LIVE, so a region that dropped out
@@ -69,6 +69,10 @@ export function liveSettings(lambdaEnv, template, poolSize = 0) {
   // refresh without it would put the pool's hosts on the image's own label.
   const labels = /s\/\^CI_RUNNER_LABELS=\.\*\/CI_RUNNER_LABELS=([A-Za-z0-9._,-]+)\//.exec(userData);
   if (labels) env.HOST_LABELS = labels[1];
+  // Likewise the slot count, written only with HOST_SLOTS (a medium pool): a
+  // refresh without it would put two half-size slots on each of its hosts.
+  const hostSlots = /s\/\^CI_RUNNER_SLOTS=\.\*\/CI_RUNNER_SLOTS=(\d+)\//.exec(userData);
+  if (hostSlots) env.HOST_SLOTS = hostSlots[1];
   const ebs = template.BlockDeviceMappings?.[0]?.Ebs ?? {};
   if (ebs.Iops) env.ROOT_IOPS = String(ebs.Iops);
   if (ebs.Throughput) env.ROOT_THROUGHPUT = String(ebs.Throughput);

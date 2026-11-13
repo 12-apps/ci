@@ -27,10 +27,11 @@
 #      webhook secret, so a
 #      refresh never rotates it), which copies the image to every region,
 #      points the templates at it and prunes the old images;
-#   4. with LIGHT_FUNCTION_NAME, the same image deployed again to that second
-#      scaler's fleet (a light pool, README "A light pool"), with ITS live
-#      settings, read in step 0 with the first fleet's so a light scaler that
-#      cannot be read stops the run before any host starts. Unset, nothing.
+#   4. with LIGHT_FUNCTION_NAME and/or MEDIUM_FUNCTION_NAME, the same image
+#      deployed again to each of those scalers' fleets (README "A light pool",
+#      "A medium pool"), with ITS live settings, read in step 0 with the first
+#      fleet's so a pool scaler that cannot be read stops the run before any
+#      host starts. Unset, nothing.
 #
 # GOLDEN_BASE picks what the golden host starts from:
 #   fleet  (default) the image the fleet launches now, updated in place;
@@ -211,38 +212,46 @@ if [[ -n "${SETTLE_SECONDS:-}" ]] && ! { [[ "$SETTLE_SECONDS" =~ ^[0-9]{1,3}$ ]]
   exit 64
 fi
 
-# A light pool: a second scaler that launches this fleet's image under its own
-# label (README, "A light pool"). Its settings are read now, so a light scaler
-# that is missing, unreadable or names this very fleet stops the run before any
-# host is paid for; it is deployed last, with the image step 3 shipped.
-light_fn="${LIGHT_FUNCTION_NAME:-}"
-light_settings=""
-if [[ -n "$light_fn" ]]; then
-  [[ "$light_fn" != "$fn" ]] || { log "LIGHT_FUNCTION_NAME is ${fn} itself: nothing launched"; exit 64; }
-  aws lambda get-function-configuration --function-name "$light_fn" \
-    --query 'Environment.Variables' --output json > "$work/light-env.json"
-  light_label=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).RUNNER_LABEL ?? "")' "$work/light-env.json")
-  [[ -n "$light_label" && "$light_label" != "$label" ]] \
-    || { log "${light_fn} scales '${light_label}', not a fleet of its own beside ${label}: nothing launched"; exit 64; }
-  aws ec2 describe-launch-template-versions --launch-template-name "ci-runner-fleet-${light_label}" --versions '$Default' \
-    --query 'LaunchTemplateVersions[0].LaunchTemplateData' --output json > "$work/light-template.json"
-  light_pool=$(aws ec2 describe-instances --filters "Name=tag:ci-runner-pool,Values=${light_label}" \
+# A light pool, and a medium pool: further scalers that launch this fleet's
+# image under labels of their own (README, "A light pool", "A medium pool").
+# Their settings are read now, so a pool scaler that is missing, unreadable or
+# names this very fleet (or another pool's) stops the run before any host is
+# paid for; each is deployed last, with the image step 3 shipped.
+pools=()
+[[ -z "${LIGHT_FUNCTION_NAME:-}" ]] || pools+=("light:${LIGHT_FUNCTION_NAME}")
+[[ -z "${MEDIUM_FUNCTION_NAME:-}" ]] || pools+=("medium:${MEDIUM_FUNCTION_NAME}")
+declare -A pool_settings=()
+seen_fns=" ${fn} " seen_labels=" ${label} "
+for pool in "${pools[@]}"; do
+  kind="${pool%%:*}" pool_fn="${pool#*:}"
+  var="${kind^^}_FUNCTION_NAME"
+  [[ "$pool_fn" != "$fn" ]] || { log "${var} is ${fn} itself: nothing launched"; exit 64; }
+  [[ "$seen_fns" != *" ${pool_fn} "* ]] || { log "${var} is ${pool_fn}, which this run already deploys: nothing launched"; exit 64; }
+  aws lambda get-function-configuration --function-name "$pool_fn" \
+    --query 'Environment.Variables' --output json > "$work/${kind}-env.json"
+  pool_label=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).RUNNER_LABEL ?? "")' "$work/${kind}-env.json")
+  [[ -n "$pool_label" && "$seen_labels" != *" ${pool_label} "* ]] \
+    || { log "${pool_fn} scales '${pool_label}', not a fleet of its own beside ${label} and any other pool: nothing launched"; exit 64; }
+  aws ec2 describe-launch-template-versions --launch-template-name "ci-runner-fleet-${pool_label}" --versions '$Default' \
+    --query 'LaunchTemplateVersions[0].LaunchTemplateData' --output json > "$work/${kind}-template.json"
+  pool_hosts=$(aws ec2 describe-instances --filters "Name=tag:ci-runner-pool,Values=${pool_label}" \
     "Name=instance-state-name,Values=pending,running,stopping,stopped" --no-paginate --query 'length(Reservations[].Instances[])')
-  light_settings=$(node "$here/live-settings.mjs" "$work/light-env.json" "$work/light-template.json" "$light_pool" "$work/light-secret")
-  light_settle=$(unset SETTLE_SECONDS; eval "$light_settings"; printf '%s' "${SETTLE_SECONDS:-}")
-  # A light pool deployed without HOST_LABELS registers its hosts under the
-  # image's own (main) label: redeploying it would keep feeding the main queue.
-  light_hosts=$(unset HOST_LABELS; eval "$light_settings"; printf '%s' "${HOST_LABELS:-}")
-  if [[ ",${light_hosts}," != *",${light_label},"* ]]; then
-    log "${light_fn}'s hosts register as '${light_hosts:-the image labels, no HOST_LABELS}', not ${light_label}; redeploy it with HOST_LABELS=${light_label}: nothing launched"
+  pool_settings[$kind]=$(node "$here/live-settings.mjs" "$work/${kind}-env.json" "$work/${kind}-template.json" "$pool_hosts" "$work/${kind}-secret")
+  pool_settle=$(unset SETTLE_SECONDS; eval "${pool_settings[$kind]}"; printf '%s' "${SETTLE_SECONDS:-}")
+  # A pool deployed without HOST_LABELS registers its hosts under the image's
+  # own (main) label: redeploying it would keep feeding the main queue.
+  pool_labels=$(unset HOST_LABELS; eval "${pool_settings[$kind]}"; printf '%s' "${HOST_LABELS:-}")
+  if [[ ",${pool_labels}," != *",${pool_label},"* ]]; then
+    log "${pool_fn}'s hosts register as '${pool_labels:-the image labels, no HOST_LABELS}', not ${pool_label}; redeploy it with HOST_LABELS=${pool_label}: nothing launched"
     exit 64
   fi
-  if [[ -n "$light_settle" ]] && ! { [[ "$light_settle" =~ ^[0-9]{1,3}$ ]] && (( 10#$light_settle <= 90 )); }; then
-    log "${light_fn}'s live SETTLE_SECONDS '${light_settle}' is outside 0 to 90: nothing launched"
+  if [[ -n "$pool_settle" ]] && ! { [[ "$pool_settle" =~ ^[0-9]{1,3}$ ]] && (( 10#$pool_settle <= 90 )); }; then
+    log "${pool_fn}'s live SETTLE_SECONDS '${pool_settle}' is outside 0 to 90: nothing launched"
     exit 64
   fi
-  log "light pool: ${light_fn} scales ${light_label}; it gets the new image after ${fn}"
-fi
+  seen_fns+="${pool_fn} " seen_labels+="${pool_label} "
+  log "${kind} pool: ${pool_fn} scales ${pool_label}; it gets the new image after ${fn}"
+done
 
 # ── 1. golden ────────────────────────────────────────────────────────────────
 if [[ "$golden_base" == ubuntu ]]; then
@@ -326,17 +335,18 @@ ssm "$fresh" "$work/smoke.sh" 900 || { log "the fresh host failed its checks —
 log "deploying ${ami} with the live settings: regions ${REGIONS}, budget ${DAILY_BUDGET}, idle ${IDLE_MINUTES:-default}, pnpm store ${PNPM_STORE}, spot ${SPOT_STRATEGY:-default}${TYPE_PRIORITY:+ (first: ${TYPE_PRIORITY})}, settle ${SETTLE_SECONDS:-default}"
 AMI_ID="$ami" WAKE_SECRET_FILE="$work/wake-secret" AWS_REGION="$region" bash "$here/deploy.sh"
 
-# ── 4. the light pool, on the same image ───────────────────────────────────
-if [[ -n "$light_settings" ]]; then
-  log "deploying ${ami} to the light pool ${light_fn} with its own live settings"
+# ── 4. the light and medium pools, on the same image ──────────────────────
+for pool in "${pools[@]}"; do
+  kind="${pool%%:*}" pool_fn="${pool#*:}"
+  log "deploying ${ami} to the ${kind} pool ${pool_fn} with its own live settings"
   (
-    # Nothing of the first fleet's may leak in: every setting the light scaler
+    # Nothing of the first fleet's may leak in: every setting the pool's scaler
     # does not state falls back to deploy.sh's default, as a hand deploy would.
     while read -r name; do unset "$name"; done < <(printf '%s\n' "$settings" | sed -n 's/^export \([A-Z_]*\)=.*/\1/p')
-    unset SETTLE_SECONDS HOST_LABELS WEBHOOK_SECRET_PARAMETER
-    eval "$light_settings"
-    # The light pool's webhook is the one its owner made by hand: never touched here.
-    AMI_ID="$ami" WAKE_SECRET_FILE="$work/light-secret" AWS_REGION="$region" FUNCTION_NAME="$light_fn" CREATE_WEBHOOK=0 \
+    unset SETTLE_SECONDS HOST_LABELS HOST_SLOTS WEBHOOK_SECRET_PARAMETER
+    eval "${pool_settings[$kind]}"
+    # The pool's webhook is the one its owner made by hand: never touched here.
+    AMI_ID="$ami" WAKE_SECRET_FILE="$work/${kind}-secret" AWS_REGION="$region" FUNCTION_NAME="$pool_fn" CREATE_WEBHOOK=0 \
       bash "$here/deploy.sh"
   )
-fi
+done

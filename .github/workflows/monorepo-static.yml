@@ -43,6 +43,18 @@ on:
           .npmrc reads ${NODE_AUTH_TOKEN}.
         required: false
     inputs:
+      medium-runner:
+        description: >-
+          Runner label for this workflow's medium jobs only: the Lint and Retry
+          Gate jobs. They peak at up to 4 cores and ~4.4 GiB but average about
+          two (FUT-4944's M class, read from their ci-runner-usage lines), so
+          a consumer with a fleet can send them to a pool of 2-vCPU slots
+          (scripts/runner-host, a medium pool). Empty (the
+          default) runs them where every other job of this workflow runs, so
+          a caller that passes nothing sees no change.
+        type: string
+        required: false
+        default: ''
       light-runner:
         description: >-
           Runner label for this workflow's short jobs only: Detect Changes and Actionlint.
@@ -711,7 +723,7 @@ jobs:
   # a lane that front-runs it with a subset has nothing to add there.
   retry-gate:
     name: Retry Gate
-    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.medium-runner || inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     # Deliberately tighter than the lanes downstream — see the input's docs.
@@ -775,7 +787,7 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.medium-runner || inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: ${{ inputs.lint-timeout-minutes }}
