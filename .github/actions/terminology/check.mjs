@@ -31,7 +31,7 @@ import { relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { listTerms, loadConfig } from "./lib/config.mjs";
-import { fixFile } from "./lib/fixer.mjs";
+import { fixFile, shiftColumns } from "./lib/fixer.mjs";
 import { repoPrefix, UsageError } from "./lib/git.mjs";
 import { judgeFile } from "./lib/judge.mjs";
 import { buildMatcher } from "./lib/matcher.mjs";
@@ -103,6 +103,7 @@ function fixAll({ root, findings, bytes, staged }) {
     if (verdict === "fixed") {
       console.log(`fixed: ${file}`);
       for (const finding of list) outcome.fixed.add(finding);
+      shiftColumns(findings.filter((each) => each.file === file && !each.fixable), list);
     } else outcome[verdict].push(file);
   }
   return outcome;

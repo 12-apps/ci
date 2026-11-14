@@ -27,8 +27,11 @@ export function cleanEnv(extra = {}) {
   return { ...env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", ...extra };
 }
 
-export const git = (root, ...args) =>
-  execFileSync("git", args, { cwd: root, encoding: "utf8", env: cleanEnv(), stdio: ["ignore", "pipe", "pipe"] });
+/** Git in `root`, with `extra` added to the clean environment (a temporary index, say). */
+export const gitWith = (extra, root, ...args) =>
+  execFileSync("git", args, { cwd: root, encoding: "utf8", env: cleanEnv(extra), stdio: ["ignore", "pipe", "pipe"] });
+
+export const git = (root, ...args) => gitWith({}, root, ...args);
 
 /** Write `files` (path → content) under `root`, creating directories. */
 export function write(root, files) {

@@ -22,6 +22,18 @@ export function applyFixes(text, findings) {
 }
 
 /**
+ * Move the columns of the findings left in a rewritten file to where they now
+ * stand: each shifts by what was rewritten before it on its line. A form never
+ * holds a line break, so the line numbers are already right.
+ */
+export function shiftColumns(left, rewritten) {
+  for (const finding of left) {
+    for (const done of rewritten)
+      if (done.line === finding.line && done.start < finding.start) finding.col += done.use.length - done.found.length;
+  }
+}
+
+/**
  * @param {object} input
  * @param {string} input.root
  * @param {string} input.file
