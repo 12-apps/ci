@@ -2013,6 +2013,96 @@ outputs are empty only when the histories are unrelated — precisely the case
 where narrowing would be a silent skip. Needs `node` on the runner (every
 GitHub-hosted runner has it).
 
+# Consuming the Terminology check
+
+One word per concept. The repo keeps a glossary (the word to use, the words not
+to), and a pull request that adds a forbidden word fails with the substitute on
+the finding: `"entregador" → use "motoboy"`. The mechanism is the
+[`terminology`](./.github/actions/terminology/README.md) action; the glossary
+is the consumer's, one JSON file, and nothing here knows its words.
+
+## A. Caller job
+
+```yaml
+on:
+  pull_request:
+
+jobs:
+  terminology:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - id: base
+        uses: 12-apps/ci/.github/actions/fetch-base@v2
+      - uses: 12-apps/ci/.github/actions/terminology@v2
+        with:
+          config: docs/glossary.json
+          base-ref: ${{ steps.base.outputs.base-sha }}
+```
+
+No install and no build: one Node process that reads files and git. The action
+does not check out or fetch, so the job provides the base itself (`fetch-base`
+as above, or `fetch-depth: 0` with `base-ref: origin/<base branch>`).
+
+**Run it on pull requests only when a term is enforced on `new` lines.** Such a
+term is judged on the lines added since the merge base, and a push to the
+default branch has none to count from. With no `base-ref` the step fails
+(exit 2) rather than skip those terms. A glossary whose every term is enforced
+on `all` lines needs no base and can run on any event.
+
+## B. Required in the consumer repo
+
+The glossary, at the path given as `config`:
+
+```json
+{
+  "include": ["apps/*/src/**/*pt-BR*.ts", "docs/help/**"],
+  "exclude": ["**/__tests__/**"],
+  "skipLines": ["keywords:"],
+  "terms": [
+    { "use": "motoboy", "avoid": ["entregador", { "word": "entregadores", "use": "motoboys" }],
+      "autofix": true, "enforce": "new", "reason": "A pessoa que entrega é sempre \"motoboy\"." },
+    { "use": "ficha técnica", "definition": "A composição de um produto." }
+  ]
+}
+```
+
+Every key, the strict validation, and what is read in a code file (the text of
+string and template literals only, never a comment, a key, an import path or a
+slug) are in the action's README. Three things decide whether adoption is calm:
+
+- **Start a term on `"enforce": "new"`.** Existing copy passes, new lines fail,
+  and the sweep that rewrites the old lines is a pull request of its own. Move
+  the term to `all` when the sweep has merged.
+- **Turn `autofix` on only for a swap that is always right.** A plural, a
+  feminine or a phrase with a different article gets its own entry
+  (`{ "word": "entregadora", "autofix": false }`).
+- **A moved line is a new line.** Renames are not followed, so a file moved in
+  the same pull request is judged whole for `new` terms.
+
+## C. The same check on a laptop, and before the commit
+
+The CLI is the action's script, run from a checkout of this repository
+(`<ci>`), with nothing to install:
+
+```bash
+node <ci>/.github/actions/terminology/check.mjs --config docs/glossary.json --base origin/main
+node <ci>/.github/actions/terminology/check.mjs --config docs/glossary.json --base origin/main --fix
+```
+
+`--fix` rewrites what the glossary marks as safe and reports the rest. In a
+pre-commit hook, `--staged --fix` reads the index, rewrites the working tree and
+prints `fixed: <path>` for each file to stage again; a file with unstaged
+changes is left alone and stays a finding. The hook snippet is in the README.
+
+## D. What it will not do
+
+It judges literals, not JSX text, and it fails (exit 2) on a code file it cannot
+scan rather than judge half of it. It never passes having read nothing: a scope
+that matches no tracked file, a glossary that forbids nothing and a base that
+does not resolve are all exit 2.
+
 # Consuming the Commit-message gate
 
 Enforces [Conventional Commits](https://www.conventionalcommits.org/) on a pull

@@ -18,6 +18,7 @@ engine lives in one place and improvements ship to every consumer at once.
 | `.github/actions/discover` | Composite action wrapping the discovery engine (ships `discover.sh` to consumers). |
 | `.github/actions/select-images` | Composite action wrapping the image-reuse planner (ships `select-images.sh`). |
 | `.github/actions/do-provision` | Composite action wrapping the droplet cloud-init bootstrap. |
+| `.github/actions/terminology` | Composite action and builtins-only CLI: fails a run over a word the consumer's glossary forbids, names the substitute, and rewrites the safe ones with `--fix`. |
 | `scripts/deploy/` | Discovery engine (`discover.sh`), image-reuse planner (`select-images.sh`), `lib/common.sh`. |
 | `scripts/ephemeral/` | DigitalOcean droplet tooling (cloud-init, create/destroy helpers). |
 | `.github/deploy/` | Descriptor + vendor-manifest JSON schemas and the contract README. |
