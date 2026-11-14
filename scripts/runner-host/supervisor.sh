@@ -373,6 +373,14 @@ if [[ "${CI_RUNNER_CHECK_ONLY:-}" == 1 || "${CI_RUNNER_DEREGISTER_ONLY:-}" == 1 
 fi
 
 # ── the loop ─────────────────────────────────────────────────────────────────
+# A slot above this host's count runs nothing: a medium pool's host runs one
+# slot from an image built with two (deploy.sh HOST_SLOTS rewrites the count at
+# boot). 66 is in the unit's RestartPreventExitStatus, so systemd leaves it.
+if [[ -n "${CI_RUNNER_SLOTS:-}" ]] && (( slot > CI_RUNNER_SLOTS )); then
+  trap - EXIT
+  log "slot ${slot} is above this host's ${CI_RUNNER_SLOTS} slot(s): not started"
+  exit 66
+fi
 cleanup
 failures=0
 while true; do

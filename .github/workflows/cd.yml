@@ -33,6 +33,16 @@ on:
           SENTRY_AUTH_TOKEN below.
         required: false
     inputs:
+      medium-runner:
+        description: >-
+          Runner label for this workflow's medium jobs only: the Build image jobs.
+          They average about two cores (FUT-4944's M class, read from their
+          ci-runner-usage lines), so a consumer with a fleet can send them to
+          a pool of 2-vCPU slots (scripts/runner-host, a medium pool). Empty (the default) runs them where every other job of
+          this workflow runs, so a caller that passes nothing sees no change.
+        type: string
+        required: false
+        default: ''
       target:
         description: 'all | digitalocean | cloudflare (aws: call deploy-aws.yml directly)'
         type: string
@@ -238,7 +248,7 @@ jobs:
     name: Build image · ${{ matrix.image }}
     needs: discover
     if: needs.discover.outputs.has_build_images == 'true'
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.medium-runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 60

@@ -399,6 +399,71 @@ mint their runners with the image's credential.
 the light pool's own numbers. `cost-report.yml` prices every self-hosted job
 at one rate, so its PR comment overstates a light job's cost.
 
+## A medium pool
+
+Between the light jobs and the heavy ones is a middle class (FUT-4944, the
+"M" class, measured on future-pay on 2026-11-10/11): Gherkin, the RSC smoke,
+Static Gates, Lint, Retry Gate, E2E Reliability, Page Load, the storefront
+bundle budget, Request Waves, the image build. They average about two cores,
+yet each holds a 4-core, 14 GB slot of the main fleet. A **medium pool** is a
+third fleet for them, made the same way as the light pool: the same image and
+the same scaler, deployed again under its own label, with **2 vCPU per slot**.
+
+**The memory per slot is not set yet.** It is to be set from a memory-capped
+measurement of the class (FUT-4944). The peaks read so far (Gherkin shards at
+9.3 GiB of working set, Lint's p95 at 4.0 cores and 4.4 GiB) were taken in
+slots capped at ~28,000 MiB, so they show what a job takes when memory is
+effectively unlimited, not what it needs. The host type and the slots per host
+follow from that number, so both stay parameters of the deploy
+(`INSTANCE_TYPES`, `SLOTS_PER_HOST` and `HOST_SLOTS`): one slot on a 2-vCPU host
+gives the slot 90% of the host's RAM, two slots on a 4-vCPU host give each 45%.
+
+**How it is made.** Everything the light pool uses, plus one setting:
+
+- `deploy.sh` with `HOST_LABELS=<medium label>`, its own `FUNCTION_NAME`
+  (`ci-runner-scale-medium`), `WEBHOOK_SECRET_PARAMETER` and
+  `CREATE_WEBHOOK=0`, exactly as in the light pool's steps.
+- **`HOST_SLOTS=<n>`**, with `SLOTS_PER_HOST=<n>`, when the pool's slots per
+  host differ from the image's. The image is built with the main fleet's two
+  slot units; `HOST_SLOTS` writes the host's `CI_RUNNER_SLOTS` at
+  boot, so the memory cap (`auto`, 90% of RAM / slots) and the pinned cores
+  follow it, and `supervisor.sh` leaves a slot above the count down (it exits
+  66, which the slot unit does not restart). `deploy.sh` refuses a
+  `HOST_SLOTS` that differs from `SLOTS_PER_HOST`, the scaler's count. Unset,
+  the user data is byte for byte what it was (`deploy-medium.test.mjs`).
+  The unit's `RestartPreventExitStatus=66` arrives with the next image built
+  from this checkout; on an older image the slot above the count retries
+  every 30 seconds and still runs nothing.
+- `refresh-image.sh` with `MEDIUM_FUNCTION_NAME` (the workflow's
+  `medium_function_name`) deploys the new image to the medium pool too, after
+  the main fleet and the light pool, with its own live settings, `HOST_SLOTS`
+  included (`refresh-medium.test.mjs`).
+- The reusable workflows take `medium-runner` and send only their M jobs to it
+  (`.github/workflows/__tests__/medium-runner.test.mjs` lists them: Lint and
+  Retry Gate, Static Gates and E2E Reliability, the Next.js prod smoke, Build
+  image). The other M jobs are the consumer's own and are routed in its
+  workflow. Empty, every job runs where it runs today.
+
+**Turning it on** follows the light pool's steps 1 to 7 with `medium` for
+`light` in every name (`future-pay-ci-medium`, `ci-runner-scale-medium`,
+`/ci-runner/webhook-secret-future-pay-ci-medium`,
+`ci-runner-fleet-future-pay-ci-medium`, `CI_MEDIUM_RUNNER_FUNCTION`,
+`CI_MEDIUM_RUNNER`), and step 4's deploy with these settings:
+
+```bash
+RUNNER_LABEL=future-pay-ci-medium FUNCTION_NAME=ci-runner-scale-medium HOST_LABELS=future-pay-ci-medium \
+WEBHOOK_SECRET_PARAMETER=/ci-runner/webhook-secret-future-pay-ci-medium CREATE_WEBHOOK=0 \
+INSTANCE_TYPES=<from the capped measurement> SLOTS_PER_HOST=<n> HOST_SLOTS=<n> \
+  ./deploy.sh   # with AWS_REGION, REPOSITORY, AMI_ID, REGIONS, the network and the caps as in the light pool's step 4
+```
+
+Pick `INSTANCE_TYPES` and `<n>` so that each slot gets 2 vCPU and at least the
+memory the capped measurement sets: vCPU = 2 × n.
+
+Measure it apart from the light pool: FUT-4944 waits for the light pool's
+verdict (E-153) before the medium pool's first day, so the two are never
+measured on the same day.
+
 ## What stays on GitHub's runners
 
 (`expo-apk.yml`'s `apk` job moved to the fleet: the image carries the Android

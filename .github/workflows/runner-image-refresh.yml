@@ -89,6 +89,14 @@ on:
           main fleet. Empty (the default) redeploys the main fleet only.
         type: string
         default: ''
+      medium_function_name:
+        description: >-
+          Like light_function_name, for a medium pool
+          (scripts/runner-host/README.md "A medium pool"): redeployed with the
+          new image and its own live settings after the main fleet and the
+          light pool. Empty (the default) redeploys no medium pool.
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -155,6 +163,7 @@ jobs:
           ROOT_GB: ${{ inputs.root_gb }}
           SETTLE_OVERRIDE: ${{ inputs.settle_seconds }}
           LIGHT_FUNCTION_NAME: ${{ inputs.light_function_name }}
+          MEDIUM_FUNCTION_NAME: ${{ inputs.medium_function_name }}
         run: exec bash .ci-engine/scripts/runner-host/wake/refresh-image.sh
       # A cancelled or timed-out step is SIGKILLed with its process tree, so
       # the script's exit trap may never run: terminate what this run tagged.

@@ -36,6 +36,17 @@ on:
           .npmrc reads ${NODE_AUTH_TOKEN}.
         required: false
     inputs:
+      medium-runner:
+        description: >-
+          Runner label for this workflow's medium jobs only: the Static Gates and
+          E2E Reliability jobs.
+          They average about two cores (FUT-4944's M class, read from their
+          ci-runner-usage lines), so a consumer with a fleet can send them to
+          a pool of 2-vCPU slots (scripts/runner-host, a medium pool). Empty (the default) runs them where every other job of
+          this workflow runs, so a caller that passes nothing sees no change.
+        type: string
+        required: false
+        default: ''
       node-version:
         description: 'Node version for all jobs.'
         type: string
@@ -275,7 +286,7 @@ jobs:
   # reusable workflow's overall result.
   static-gates:
     name: Static Gates
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.medium-runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: ${{ inputs.static-gates-timeout-minutes }}
@@ -1215,7 +1226,7 @@ jobs:
       build-artifact-ready: ${{ steps.build-artifact.outputs.published || 'false' }}
     name: E2E Reliability
     if: ${{ inputs.run-e2e-reliability }}
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.medium-runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: ${{ inputs.e2e-timeout-minutes }}

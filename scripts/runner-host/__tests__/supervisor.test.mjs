@@ -180,6 +180,27 @@ test("each slot owns its own cores, so the tools inside size themselves to what 
   assert.equal(cpuset("2", { CI_RUNNER_SLOTS: "3" }), "2-3", "8 cores / 3 slots = 2 each; the spare core is left over");
 });
 
+test("a one-slot host's slot owns both of its cores and 90% of its RAM (README, A medium pool)", () => {
+  // FUT-4944: HOST_SLOTS=1 on a 2-vCPU host, one shape the medium pool may take.
+  const run = dockerRun(runOnce({ CI_RUNNER_SLOTS: "1", CI_RUNNER_NPROC: "2", CI_RUNNER_MEMORY: "auto", CI_RUNNER_MEM_MB: "15800" }).calls);
+  assert.equal(argAfter(run.argv, "--cpuset-cpus"), "0-1");
+  assert.equal(argAfter(run.argv, "--memory"), "14220m");
+});
+
+test("a slot above CI_RUNNER_SLOTS runs nothing and exits 66, which its unit does not restart", () => {
+  // A medium host: one slot (deploy.sh HOST_SLOTS) on an image whose units start two.
+  const above = runOnce({ CI_RUNNER_SLOTS: "1" }, { slot: "2" });
+  assert.equal(above.status, 66, above.stderr);
+  assert.match(above.stderr, /slot 2 is above this host's 1 slot\(s\): not started/);
+  assert.equal(dockerRun(above.calls), undefined, "no runner container started");
+  // The slots within the count, and a host whose env names no count, run as before.
+  assert.ok(dockerRun(runOnce({ CI_RUNNER_SLOTS: "2" }, { slot: "2" }).calls));
+  assert.ok(dockerRun(runOnce({}, { slot: "2" }).calls));
+  const unit = readFileSync(new URL("../install.sh", import.meta.url), "utf8");
+  assert.match(unit, /^SuccessExitStatus=143 66$/m);
+  assert.match(unit, /^RestartPreventExitStatus=66$/m);
+});
+
 test("pinning is off on request, and when there are fewer cores than slots", () => {
   const argv = (env) => dockerRun(runOnce({ CI_RUNNER_SLOTS: "2", CI_RUNNER_NPROC: "8", ...env }).calls).argv;
   assert.ok(!argv({ CI_RUNNER_PIN_CPUS: "0" }).includes("--cpuset-cpus"));

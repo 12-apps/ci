@@ -4,6 +4,7 @@ import { test } from "node:test";
 
 import { jobsOf } from "./job-timeouts.test.mjs";
 import { declaredInputs } from "./declared-inputs.test.mjs";
+import { mediumOperand } from "./medium-runner.test.mjs";
 
 // FUT-4536: the short jobs a fleet runs (a plan, a verdict, Detect Changes, the
 // upkeep probes) last seconds and install nothing, yet each one held a 4-core,
@@ -37,7 +38,8 @@ export function expectedRunner(source, job, file) {
   const fallback = declaredInputs(source)?.includes("runner")
     ? "inputs.runner || vars.CI_RUNNER || 'ubuntu-latest'"
     : "vars.CI_RUNNER || 'ubuntu-latest'";
-  return `\${{ ${LIGHT_JOBS.get(file)?.includes(job) ? "inputs.light-runner || " : ""}${fallback} }}`;
+  // A job medium-runner.test.mjs lists reads `inputs.medium-runner` first instead.
+  return `\${{ ${LIGHT_JOBS.get(file)?.includes(job) ? "inputs.light-runner || " : ""}${mediumOperand(job, file)}${fallback} }}`;
 }
 
 /** Evaluates a runs-on expression as GitHub does: the first nonempty operand. */
@@ -83,9 +85,9 @@ for (const [file, light] of LIGHT_JOBS) {
   });
 
   test(`${file}: a caller that passes no light-runner runs every job where it runs today`, () => {
-    const fleet = { "inputs.light-runner": "", "inputs.runner": "", "vars.CI_RUNNER": "future-pay-ci" };
-    const hosted = { "inputs.light-runner": "", "inputs.runner": "", "vars.CI_RUNNER": "" };
-    const pinned = { "inputs.light-runner": "", "inputs.runner": "ubuntu-latest", "vars.CI_RUNNER": "future-pay-ci" };
+    const fleet = { "inputs.light-runner": "", "inputs.medium-runner": "", "inputs.runner": "", "vars.CI_RUNNER": "future-pay-ci" };
+    const hosted = { "inputs.light-runner": "", "inputs.medium-runner": "", "inputs.runner": "", "vars.CI_RUNNER": "" };
+    const pinned = { "inputs.light-runner": "", "inputs.medium-runner": "", "inputs.runner": "ubuntu-latest", "vars.CI_RUNNER": "future-pay-ci" };
     const hasRunner = declaredInputs(source).includes("runner");
     for (const j of jobs) {
       const runsOn = runnerOf(source, j.name);
@@ -96,7 +98,7 @@ for (const [file, light] of LIGHT_JOBS) {
   });
 
   test(`${file}: a light label moves the listed jobs and no other`, () => {
-    const values = { "inputs.light-runner": "future-pay-ci-light", "inputs.runner": "", "vars.CI_RUNNER": "future-pay-ci" };
+    const values = { "inputs.light-runner": "future-pay-ci-light", "inputs.medium-runner": "", "inputs.runner": "", "vars.CI_RUNNER": "future-pay-ci" };
     const moved = jobs.filter((j) => choose(runnerOf(source, j.name), values) === "future-pay-ci-light").map((j) => j.name);
     assert.deepEqual(moved.sort(), [...light].sort());
   });
