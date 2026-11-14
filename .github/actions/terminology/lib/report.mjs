@@ -48,7 +48,8 @@ export function summaryLine({ files, lines, findings, fixed, annotated = finding
 /** The table for `$GITHUB_STEP_SUMMARY`: one row per enforced term. */
 export function stepSummary({ terms, left, fixed, summary }) {
   const count = (list, term) => list.filter((finding) => finding.term === term).length;
-  const cell = (text) => text.replace(/\|/g, "\\|");
+  // The backslash first, or a term ending in one would un-escape the pipe after it.
+  const cell = (text) => text.replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
   return [
     "### Terminology",
     "",

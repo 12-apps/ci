@@ -163,3 +163,9 @@ test("a byte order mark: the file scans, the column ignores it, and --fix keeps 
   assert.equal(read(root, "src/a.md"), `${BOM}motoboy aqui\n`);
   assert.equal(read(root, "src/b.ts"), `${BOM}export const a = "Motoboy";\n`);
 });
+
+test("the job summary escapes a backslash before a pipe, so a term cannot break out of its cell", async () => {
+  const { stepSummary } = await import("../lib/report.mjs");
+  const table = stepSummary({ terms: [{ use: "a\\|b" }], left: [], fixed: [], summary: "done" });
+  assert.ok(table.includes("| a\\\\\\|b | 0 | 0 |"), table);
+});
