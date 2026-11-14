@@ -125,6 +125,17 @@ jobs:
         shell: bash
         run: node --test .github/actions/migration-domains/__tests__/*.test.mjs
 
+      # terminology fails a consumer's pull request over a forbidden word and
+      # rewrites the consumer's files with --fix. Its silent directions are a
+      # scanner that lost its place (a file judged in part passes), a rewrite
+      # that reached a property key or an import path (the build breaks later,
+      # somewhere else), and a diff mode that read no line. The scanner is
+      # tested on its own, and --base, --staged and --fix run against
+      # repositories git builds at test time.
+      - name: terminology
+        shell: bash
+        run: node --test .github/actions/terminology/__tests__/*.test.mjs
+
       - name: package-gates
         shell: bash
         run: node --test .github/actions/package-gates/__tests__/package-gates.test.mjs

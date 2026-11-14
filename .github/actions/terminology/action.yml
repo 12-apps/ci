@@ -1,0 +1,50 @@
+name: 'Terminology'
+description: >-
+  One word per concept. Fail the run when a file holds a word the consumer's
+  glossary forbids, and name the substitute on every finding: `"entregador" →
+  use "motoboy"`. The words, the scope and the exceptions come from one JSON
+  file the consumer owns; nothing here knows a consumer. In code files only the
+  text of string and template literals is judged, never a comment, an
+  identifier, an import path, a property key or a slug. Reads files and git
+  only (no install), and never passes having read nothing: a scope that matches
+  no file, or a base it cannot diff against, fails the step.
+
+inputs:
+  config:
+    description: >-
+      Path to the glossary JSON, relative to `working-directory`: `include` /
+      `exclude` globs, `skipLines`, and the `terms` with their forbidden words
+      and substitutes. See the README beside this file for the format.
+    required: true
+  base-ref:
+    description: >-
+      The commit, branch or ref the pull request is based on (`FETCH_HEAD`
+      after the `fetch-base` action, or `origin/<base branch>`). A term
+      enforced on `new` lines is judged only on the lines added since the merge
+      base with it. Required when the glossary holds such a term; without it
+      the step fails rather than skip those terms. The action neither checks
+      out nor fetches: the checkout must already hold the base commit and the
+      history down to the merge base.
+    required: false
+    default: ''
+  working-directory:
+    description: 'Consumer checkout root the paths are relative to.'
+    required: false
+    default: '.'
+
+runs:
+  using: composite
+  steps:
+    - name: Forbidden words name their substitute
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CONFIG: ${{ inputs.config }}
+        BASE_REF: ${{ inputs.base-ref }}
+      run: |
+        set -euo pipefail
+        args=(--config "$CONFIG")
+        if [ -n "$BASE_REF" ]; then
+          args+=(--base "$BASE_REF")
+        fi
+        node "$GITHUB_ACTION_PATH/check.mjs" "${args[@]}"
