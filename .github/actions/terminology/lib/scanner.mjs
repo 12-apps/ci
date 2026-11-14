@@ -170,9 +170,12 @@ function templateChunkEnd(source, from) {
  * value, a closing bracket or `++`/`--` it divides. `)` and `}` are ambiguous
  * (`if (x) /re/.test(y)`) and read as division: a quote inside such a regex
  * then fails the file as an unclosed string, which is the safe direction.
+ * After `<` it is a JSX closing tag (`</b>`): read as a regex it would run to
+ * the next closing tag on the line and swallow the literals in between.
  */
 function regexMayFollow(prev) {
   if (prev === null) return true;
+  if (prev.kind === "punct" && prev.text === "<") return false;
   if (prev.kind === "word") return REGEX_AFTER.has(prev.text);
   return prev.kind === "punct" && !")]}".includes(prev.text) && prev.text !== "++" && prev.text !== "--";
 }

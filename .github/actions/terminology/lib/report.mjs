@@ -10,11 +10,14 @@ export const ANNOTATION_LIMIT = 30;
 const escapeData = (text) => text.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
 const escapeProperty = (text) => escapeData(text).replace(/:/g, "%3A").replace(/,/g, "%2C");
 
+/** A path at the start of a log line must never read as a workflow command (`::notice::…`). */
+export const printable = (file) => (file.startsWith("::") ? `./${file}` : file);
+
 const verdict = (finding) => `"${finding.found}" → use "${finding.use}"`;
 
 /** `apps/x/copy.pt-BR.ts:12:18  "entregador" → use "motoboy"  (reason)` */
 export const findingLine = (finding) =>
-  `${finding.file}:${finding.line}:${finding.col}  ${verdict(finding)}${finding.term.reason ? `  (${finding.term.reason})` : ""}`;
+  `${printable(finding.file)}:${finding.line}:${finding.col}  ${verdict(finding)}${finding.term.reason ? `  (${finding.term.reason})` : ""}`;
 
 /**
  * The workflow command that puts a finding on the pull request's diff.

@@ -20,6 +20,7 @@
 import { readFileSync } from "node:fs";
 
 import { globMatcher } from "./globs.mjs";
+import { buildMatcher } from "./matcher.mjs";
 
 const TOP_KEYS = ["include", "exclude", "skipLines", "terms"];
 const TERM_KEYS = ["use", "definition", "search", "avoid", "autofix", "enforce", "allow", "paths", "reason"];
@@ -60,6 +61,7 @@ export function parseConfig(raw) {
   if (!Array.isArray(raw.terms) || raw.terms.length === 0) at("terms", "is required: a non-empty list of terms");
   else raw.terms.forEach((term, index) => terms.push(parseTerm(term, `terms[${index}]`, at)));
   forbiddenOnce(terms, at);
+  if (problems.length === 0) substitutesAreClean(terms, at);
 
   if (problems.length > 0) return { config: null, problems };
   return {
@@ -169,6 +171,22 @@ function parseAvoid(raw, term, where, at) {
   if (entry.word.toLowerCase() === entry.use.toLowerCase())
     at(where, `"${entry.word}" is its own substitute: a rule that replaces a word with itself never clears`);
   return entry;
+}
+
+/**
+ * No substitute may hold a forbidden form, its own or another term's: `extra`
+ * → `item extra` would be rewritten again on the next run, and again.
+ */
+function substitutesAreClean(terms, at) {
+  const judged = terms.filter((term) => term.avoid.length > 0);
+  if (judged.length === 0) return;
+  const matcher = buildMatcher(judged);
+  for (const term of judged) {
+    for (const entry of term.avoid) {
+      const [inside] = matcher.find(entry.use);
+      if (inside) at(entry.where, `the substitute "${entry.use}" holds the forbidden "${inside.found}" (${inside.form.where}): a fix would never settle`);
+    }
+  }
 }
 
 /** A forbidden word belongs to one rule: two would give a finding two substitutes. */

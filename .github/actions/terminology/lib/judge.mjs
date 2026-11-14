@@ -7,11 +7,14 @@
  *
  *   - `skipLines`: a line whose trimmed text starts with one of the prefixes is
  *     never judged (a help article's `keywords: […]` line holds the synonyms on
- *     purpose);
+ *     purpose), and neither are the lines directly below it that are indented
+ *     deeper: a formatter wraps the value onto them;
  *   - a term enforced on `new` lines is judged only on the lines `added` names;
  *   - `terminology-allow: a, b` keeps those words on its own line and the next
  *     one, `terminology-allow-file: a, b` in the whole file. In code both are
- *     read from comments only; in plain text from the line itself;
+ *     read from comments only; in plain text from the line itself. The list
+ *     ends at the first character that cannot continue it, so a reason may
+ *     follow in parentheses: `terminology-allow: entregador (iFood's word)`;
  *   - a match inside one of its term's `allow` phrases on that line stands.
  */
 import { judgedRegions } from "./literals.mjs";
@@ -19,7 +22,11 @@ import { substituteFor } from "./matcher.mjs";
 import { scan } from "./scanner.mjs";
 
 const CODE_FILE = /\.(?:ts|tsx|js|jsx|mjs|cjs)$/;
-const PRAGMA = /terminology-allow(-file)?:([^\r\n]*)/g;
+const WORD = "[\\p{L}\\p{M}\\p{N}_]+(?:[ -][\\p{L}\\p{M}\\p{N}_]+)*";
+/** The pragma and its list: words or phrases separated by commas, and nothing after the last one. */
+const PRAGMA = new RegExp(`terminology-allow(-file)?:[ \\t]*(${WORD}(?:[ \\t]*,[ \\t]*${WORD})*)`, "gu");
+/** A substitute holding one of these cannot be pasted into a literal without changing the code around it. */
+const BREAKS_A_LITERAL = /['"`\\]|\$\{/;
 
 export const isCodeFile = (file) => CODE_FILE.test(file);
 
@@ -46,9 +53,10 @@ export function judgeFile({ file, text, matcher, skipLines, added }) {
     return low + 1;
   };
   const lineText = (line) => text.slice(lineStarts[line - 1], lineStarts[line] ?? text.length).replace(/\r?\n$/, "");
-  const skipped = (line) => skipLines.some((prefix) => lineText(line).trimStart().startsWith(prefix));
-
   const lineCount = lineStarts.length - (text.length === lineStarts.at(-1) ? 1 : 0);
+  const skippedLines = skipLines.length === 0 ? new Set() : skippedBlocks(lineCount, lineText, skipLines);
+  const skipped = (line) => skippedLines.has(line);
+
   const wholeFile = added === null || matcher.terms.some((term) => term.enforce === "all");
   let lines = 0;
   for (const line of wholeFile ? Array.from({ length: lineCount }, (_, i) => i + 1) : added)
@@ -60,10 +68,10 @@ export function judgeFile({ file, text, matcher, skipLines, added }) {
   if (isCodeFile(file)) {
     const scanned = scan(text);
     if (scanned.error) return { findings: [], lines, error: { line: lineOf(scanned.error.offset), message: scanned.error.message } };
-    regions = judgedRegions(text, scanned.literals);
+    regions = judgedRegions(text, scanned.literals).map((region) => ({ ...region, code: true }));
     for (const comment of scanned.comments) readPragmas(text.slice(comment.start, comment.end), comment.start, lineOf, pragmas);
   } else {
-    regions = [{ start: 0, text, fixable: true, afterExpr: false, beforeExpr: false }];
+    regions = [{ start: 0, text, fixable: true, afterExpr: false, beforeExpr: false, code: false }];
     readPragmas(text, 0, lineOf, pragmas);
   }
 
@@ -83,13 +91,14 @@ export function judgeFile({ file, text, matcher, skipLines, added }) {
       findings.push({
         file,
         line,
-        col: column + 1,
+        // A byte order mark is not a column anybody sees.
+        col: column + 1 - (line === 1 && text.charCodeAt(0) === 0xfeff ? 1 : 0),
         start,
         end: start + found.length,
         found,
         use,
         term: form.term,
-        fixable: form.autofix && region.fixable && !touchesExpression,
+        fixable: form.autofix && region.fixable && !touchesExpression && !(region.code && BREAKS_A_LITERAL.test(use)),
       });
     }
   }
@@ -97,11 +106,29 @@ export function judgeFile({ file, text, matcher, skipLines, added }) {
   return { findings, lines, error: null };
 }
 
+/**
+ * The skipped lines: each line that starts with a prefix, and the lines
+ * directly below it that are indented deeper (blank lines included).
+ */
+function skippedBlocks(lineCount, lineText, prefixes) {
+  const skipped = new Set();
+  const indentOf = (text) => text.length - text.trimStart().length;
+  let under = -1;
+  for (let line = 1; line <= lineCount; line += 1) {
+    const text = lineText(line);
+    if (prefixes.some((prefix) => text.trimStart().startsWith(prefix))) {
+      under = indentOf(text);
+      skipped.add(line);
+    } else if (under !== -1 && (text.trim() === "" || indentOf(text) > under)) skipped.add(line);
+    else under = -1;
+  }
+  return skipped;
+}
+
 /** Collect the pragmas of one comment (or of a whole plain-text file) that starts at `offset`. */
 function readPragmas(text, offset, lineOf, pragmas) {
   for (const match of text.matchAll(PRAGMA)) {
     const words = match[2]
-      .split(/\*\/|-->/)[0]
       .split(",")
       .map((word) => word.trim().toLowerCase())
       .filter(Boolean);

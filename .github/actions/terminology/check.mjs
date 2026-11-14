@@ -36,7 +36,7 @@ import { repoPrefix, UsageError } from "./lib/git.mjs";
 import { judgeFile } from "./lib/judge.mjs";
 import { buildMatcher } from "./lib/matcher.mjs";
 import { planWork } from "./lib/plan.mjs";
-import { ANNOTATION_LIMIT, errorAnnotation, findingAnnotation, findingLine, fixCommand, stepSummary, summaryLine } from "./lib/report.mjs";
+import { ANNOTATION_LIMIT, errorAnnotation, findingAnnotation, findingLine, fixCommand, printable, stepSummary, summaryLine } from "./lib/report.mjs";
 
 const USAGE = "usage: node check.mjs --config <glossary.json> [--base <ref> | --staged [files…]] [--fix] [--list] [--root <dir>]";
 const onActions = process.env.GITHUB_ACTIONS === "true";
@@ -101,7 +101,7 @@ function fixAll({ root, findings, bytes, staged }) {
   for (const [file, list] of byFile) {
     const verdict = fixFile({ root, file, bytes: bytes.get(file), findings: list, staged });
     if (verdict === "fixed") {
-      console.log(`fixed: ${file}`);
+      console.log(`fixed: ${printable(file)}`);
       for (const finding of list) outcome.fixed.add(finding);
       shiftColumns(findings.filter((each) => each.file === file && !each.fixable), list);
     } else outcome[verdict].push(file);
@@ -139,6 +139,13 @@ function main(argv) {
     );
 
   const tasks = planWork({ root, config, base: options.base, staged: options.staged, files: options.files });
+  // Outside --staged the tasks are the whole scope: a term whose paths reach none of it is switched off.
+  const unreachable = options.staged ? [] : terms.filter((term) => !tasks.some((task) => term.inPaths(task.file)));
+  if (unreachable.length > 0)
+    throw new UsageError(
+      `the paths of ${unreachable.length} term(s) match no file in scope (${unreachable.map((term) => `${term.use}: ${term.paths.join(", ")}`).join("; ")}): ` +
+        "they would never be judged",
+    );
   const judged = judgeAll({ tasks, terms, skipLines: config.skipLines });
   if (judged.errors.length > 0) {
     for (const { file, line, message } of judged.errors)
