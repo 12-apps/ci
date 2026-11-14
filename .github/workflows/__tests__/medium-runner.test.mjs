@@ -15,7 +15,7 @@ import { declaredInputs } from "./declared-inputs.test.mjs";
 // sees no change.
 //
 // The rest (Gherkin Journeys, Page Load Budget, Storefront Bundle Budget,
-// Request Waves, Realtime Socket Smoke, seed-order, CI Draft / CI Ready, the
+// Request Waves, Realtime Socket Smoke, CI Draft / CI Ready, the
 // post-merge complexity job, the tap count) are jobs of the consumer's own
 // workflows, so the consumer routes them itself.
 //
@@ -30,6 +30,9 @@ export const MEDIUM_JOBS = new Map([
   ["quality.yml", ["static-gates", "e2e-reliability"]],
   ["nextjs-prod-smoke.yml", ["smoke"]],
   ["cd.yml", ["build-images"]],
+  // A consumer's seed-order / Repository gates caller: p95 3.5 cores and
+  // 3.4 GiB, about one core on average, so M rather than P (FUT-4944).
+  ["package-gates.yml", ["gates"]],
 ]);
 
 /** The operand a job of this workflow puts first, or "" when it has none. */

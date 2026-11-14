@@ -56,6 +56,17 @@ on:
           consumer's committed .npmrc reads ${NODE_AUTH_TOKEN}.
         required: false
     inputs:
+      medium-runner:
+        description: >-
+          Runner label for the gates job (FUT-4944). A consumer's seed-order /
+          Repository gates caller measured p95 3.5 cores and 3.4 GiB but
+          averages about one core, so it is FUT-4944's M class rather than P,
+          and a consumer with a fleet can send it to a pool of 2-vCPU slots
+          (scripts/runner-host, a medium pool). Empty (the default) runs it
+          where it runs today, so a caller that passes nothing sees no change.
+        type: string
+        required: false
+        default: ''
       gates:
         description: >-
           The gates to run, one per line, as `LABEL|COMMAND`. LABEL is what a
@@ -168,7 +179,7 @@ env:
 jobs:
   gates:
     name: ${{ inputs.name }}
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.medium-runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     steps:
       - uses: actions/checkout@v4
