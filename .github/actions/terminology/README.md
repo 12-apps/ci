@@ -51,7 +51,7 @@ build. So in a code file this reads only the text a person will read.
 | key | meaning |
 |---|---|
 | `include`, `exclude` | Path globs: `**` any depth, `*` one segment, every other character literal. Only tracked files are read. |
-| `skipLines` | Literal prefixes. A line whose trimmed text starts with one is never judged and never rewritten: a help article's `keywords: […]` line is where the synonyms belong. |
+| `skipLines` | Literal prefixes. A line whose trimmed text starts with one is never judged and never rewritten: a help article's `keywords: […]` line is where the synonyms belong. The lines directly below it that are indented deeper are skipped with it, since a formatter wraps a long value onto them. |
 | `terms[].use` | The canonical word. Required. |
 | `terms[].avoid` | The forbidden forms: a string, or `{ "word", "use"?, "autofix"? }` so a plural or a feminine names its own substitute. A form may hold spaces or a hyphen (`frente de caixa`). |
 | `terms[].autofix` | Whether `--fix` may rewrite this term's forms. Default `false`. |
@@ -64,7 +64,9 @@ build. So in a code file this reads only the text a person will read.
 The file is validated strictly. Any other key, at any level, is an error (a
 typo such as `autofx` must not switch a rule off in silence), and so are: an
 empty `avoid`, a term with neither `avoid` nor `definition`, a forbidden word
-listed twice (whatever the case), a forbidden word equal to its own substitute.
+listed twice (whatever the case), a forbidden word equal to its own substitute,
+and a substitute that holds a forbidden form, its own or another term's (a fix
+has to settle in one run).
 
 `--list` prints the terms as JSON with every default filled in, so a consumer
 can render its glossary page from the same file.
@@ -127,6 +129,10 @@ a file only when its working-tree copy has the same bytes as its index copy; a
 file with unstaged changes is left alone, its findings stay findings, and the
 report names the command to run by hand.
 
+In a code file a substitute that holds a quote, a backtick, a backslash or `${`
+is reported and never rewritten: pasted into a literal it would change the code
+around it.
+
 ## Exceptions in the file
 
 ```ts
@@ -142,6 +148,10 @@ article's body is one template literal, where a comment on the line above
 would become article text. In code both are read from comments only; in plain
 text from the line itself.
 
+The list is words or phrases separated by commas, and it ends at the first
+character that cannot continue it. So a reason may follow in parentheses, or
+after any other punctuation: `// terminology-allow: entregador (iFood's word)`.
+
 ## Exit status
 
 | status | meaning |
@@ -151,7 +161,8 @@ text from the line itself.
 | `2` | the glossary or the call is wrong, a base does not resolve, or a file could not be scanned |
 
 It never passes having read nothing. `include` globs that together match no
-tracked file are a `2`, as is a glossary that forbids nothing. A diff that
+tracked file are a `2`, as is a glossary that forbids nothing, and a term whose
+`paths` match no file in scope (checked on a whole-tree and a `--base` run). A diff that
 touches no file in scope is a normal pass, and says so. The last line states
 files read, lines judged, findings and fixed.
 
@@ -240,9 +251,6 @@ refusal only appears with a word to judge. `exclude` the file if neither fits.
 - A form is matched on one line: `frente de` at the end of a line and `caixa`
   on the next is not a match.
 - JSX text is not judged, only literals.
-- A `skipLines` prefix has to start the line that holds the word. A value a
-  formatter wrapped onto the line after `keywords:` is judged; keep it on the
-  key's line, or allow the word in the file.
 - An enum value written as one lower-case word is reported like copy
   (`icon: "delivery"`). It is never rewritten; allow it on its line.
 - A file that is not valid UTF-8 is judged but never rewritten.
