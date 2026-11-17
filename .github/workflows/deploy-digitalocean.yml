@@ -302,7 +302,27 @@ jobs:
           # Pull prebuilt images from GHCR (private) and run — no on-box build.
           # Secrets are injected into each invocation by `doppler run`.
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
-          doppler run -- docker compose --profile tools pull
+          # The pull is retried, in THIS run (FUT-4848). A connection reset
+          # mid-layer (`failed to copy: … connection reset by peer`) used to
+          # fail the whole deploy on the first one, and a new deploy cannot
+          # build on the old attempt: the prune at the top of this script
+          # deletes every image a running container does not use, so each
+          # deploy starts every new layer from zero. Inside the loop, every
+          # layer an attempt finished stays in the local store, so the next
+          # attempt fetches only what is missing. Bounded: a registry that is
+          # really down still fails the deploy, after the last attempt.
+          pull_attempts=6
+          for attempt in $(seq 1 "$pull_attempts"); do
+            if doppler run -- docker compose --profile tools pull; then
+              break
+            fi
+            if [ "$attempt" -eq "$pull_attempts" ]; then
+              echo "::error::docker compose pull failed ${pull_attempts} times; nothing was replaced." >&2
+              exit 1
+            fi
+            echo "::warning::docker compose pull failed (attempt ${attempt} of ${pull_attempts}); retrying — the layers already pulled are kept."
+            sleep $((attempt * 5))
+          done
           # `< /dev/null` + `-T`: this whole script IS the stdin of `bash -s` over
           # ssh. Without its own stdin, `docker compose run` READS the rest of that
           # stdin — swallowing the `up`/`ps` lines below, so bash hits EOF and the
