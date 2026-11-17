@@ -214,6 +214,11 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/deploy-environment.test.mjs
 
+      # A reset mid-pull is retried inside the deploy, which keeps what it pulled (FUT-4848).
+      - name: Deploy pull retry
+        shell: bash
+        run: node --test .github/workflows/__tests__/deploy-pull-retry.test.mjs
+
       # The pin a reader copies, against the major this repo actually supports.
       #
       # These drifted apart and nothing compared them: README.md said `@v2` in
