@@ -41,7 +41,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFi
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 
-import { junitPrefix, mergeReports, parseDurationsJson, parseJunit, reportItems } from "./lib/reports.mjs";
+import { durationsRun, junitPrefix, mergeReports, parseDurationsJson, parseJunit, reportItems } from "./lib/reports.mjs";
 import { annotations, mergeLedger, slowReport, summaryMarkdown } from "./lib/refresh.mjs";
 import { DEFAULT_SLOW_FILE_SECONDS, DEFAULT_TARGET_SECONDS, readLedger, serialiseLedger } from "./lib/timings.mjs";
 
@@ -120,24 +120,54 @@ const seconds = (step) =>
  * (future-pay's unit ledger had a median of 0 s and sized a 14-minute leg as
  * 2 minutes, FUT-4409). Where both name an item, the larger wins.
  */
-export function readReports(dir, lane) {
+export function readReports(dir, lane, { expectRun = null } = {}) {
   const filesRe = new RegExp(lane.files);
-  const reports = [];
+  const files = [];
   for (const file of walk(dir)) {
     const rel = relative(dir, file).replace(/\\/g, "/");
-    if (!filesRe.test(rel)) continue;
-    const text = readFileSync(file, "utf8");
+    if (filesRe.test(rel)) files.push({ rel, text: readFileSync(file, "utf8") });
+  }
+  // A durations map stamped by ANOTHER run was restored from a cache (turbo
+  // replays a package whose inputs did not change), so its file and the JUnit
+  // beside it describe work this leg's step never did (FUT-4409: a re-run's
+  // replayed legs took unit concurrency from 2.95 to 4.9). Unstamped maps are
+  // trusted, as before.
+  const stem = (rel) => rel.replace(/\.durations\.json$|\.xml$/, "");
+  const replayed = new Set(
+    files
+      .filter((f) => f.rel.endsWith(".json") && expectRun)
+      .filter((f) => {
+        const run = durationsRun(f.text);
+        return run !== null && run !== expectRun;
+      })
+      .map((f) => stem(f.rel)),
+  );
+  const reports = [];
+  for (const { rel, text } of files) {
     const rows =
       lane.format === "junit" && !rel.endsWith(".json")
         ? parseJunit(text, junitPrefix(rel, lane.junitRoot ?? "reports/"))
         : parseDurationsJson(text);
-    reports.push(reportItems(rows, lane.rewrite ?? []));
+    const report = reportItems(rows, lane.rewrite ?? []);
+    if (replayed.has(stem(rel))) report.replayed = true;
+    reports.push(report);
   }
   return reports;
 }
 
-/** A leg's measured seconds: each item once, at its largest report. */
-export const legSeconds = (reports) => [...mergeReports(reports).values()].reduce((a, row) => a + row.seconds, 0);
+/**
+ * A leg's measured seconds: each item once, at its largest report, over the
+ * reports this leg actually produced. A replayed report still prices its items
+ * in the ledger; it only stays out of the leg's share of the concurrency.
+ */
+export const legSeconds = (reports) =>
+  [...mergeReports(reports.filter((r) => !r.replayed)).values()].reduce((a, row) => a + row.seconds, 0);
+
+/** The attempt an artifact belongs to (`…-a2-s3`), or null when its name carries none. */
+export const attemptOfArtifact = (name) => {
+  const m = /-a(\d+)-/.exec(name);
+  return m ? Number(m[1]) : null;
+};
 
 /**
  * Leg n of an artifact (`…-s3`) or a job: `… · shard 3/6`, or a matrix job
@@ -163,14 +193,17 @@ export async function measuredSha(run, { ownRunId, ownSha, readRun }) {
   }
 }
 
-async function measureLane(name, lane, { artifacts, jobs, scratch }) {
+async function measureLane(name, lane, { artifacts, jobs, scratch, run = null }) {
   const re = new RegExp(lane.artifacts);
   const mine = artifacts.filter((a) => re.test(a.name) && !a.expired);
   const reports = [];
   const measuredByLeg = new Map(); // leg -> seconds summed over that leg's reports
   for (const artifact of mine) {
     try {
-      const legReports = readReports(await download(artifact, scratch), lane);
+      const attempt = attemptOfArtifact(artifact.name);
+      const legReports = readReports(await download(artifact, scratch), lane, {
+        expectRun: run && attempt ? `${run}.${attempt}` : null,
+      });
       reports.push(...legReports);
       const leg = legOfArtifact(artifact.name);
       // Per item, not per report: an item in both the XML and the durations
@@ -250,7 +283,7 @@ async function main() {
   for (const [name, lane] of Object.entries(config.lanes ?? {})) {
     const ledgerPath = join(root, lane.ledger);
     const ledger = readLedger(ledgerPath);
-    const { measured, stepSeconds, paired, pairs, missing, artifactCount } = await measureLane(name, lane, { artifacts, jobs, scratch });
+    const { measured, stepSeconds, paired, pairs, missing, artifactCount } = await measureLane(name, lane, { artifacts, jobs, scratch, run: RUN });
     let next = ledger;
     if (measured.size > 0) {
       const merged = mergeLedger(ledger, measured, {

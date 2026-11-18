@@ -57,6 +57,21 @@ export function parseJunit(xml, prefix = "") {
 }
 
 /** `[{ key, seconds, tests: null }]` out of a `{ key: seconds }` document. */
+/**
+ * The run that wrote a durations map, from its `"$run"` key (`<run id>.<attempt>`),
+ * or null when it carries none. A turbo cache hit restores the file a previous
+ * run wrote, so a map whose `$run` is not the run being measured was REPLAYED:
+ * its seconds are real, but they were not spent in this leg's test step.
+ */
+export function durationsRun(text) {
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" && typeof parsed.$run === "string" ? parsed.$run : null;
+  } catch {
+    return null;
+  }
+}
+
 export function parseDurationsJson(text) {
   let parsed;
   try {
