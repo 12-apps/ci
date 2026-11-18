@@ -843,3 +843,37 @@ a pool.
 **Revert if:** an opted-in lane's `fixedSeconds` exceeds a third of the target, or its legs run
 past 12 minutes as often as before. Rollback: revert this PR. A ledger's `fixedSeconds` is ignored
 by the reverted engine.
+
+## E-014 — A replayed report prices its files, not its leg (FUT-4409)
+
+**Date:** 2026-11-18 · **Status:** Open; hosted proof is the first re-run of a daily full suite after the consumer stamps its durations
+
+**Evidence:** future-pay's unit ledger concurrency went 2.95 → 4.06 → 4.83 → 4.9 in three
+refreshes on 2026-11-17 22:30–23:03 UTC. A unit leg runs at most 4 forks, so 4.9 cannot be true.
+The last refresh measured a hand-dispatched daily run's attempt 2 (44188546201):
+- shard 2/6 replayed 29 of 29 turbo tasks from cache, with a 0.0-min test step;
+- shards 4/6 and 5/6 replayed 27 of 29, at about 2.4 min each;
+- the other three shards executed all 29 tasks, at 10–12 min.
+
+A replay restores the JUnit and the durations JSON that attempt 1 wrote, so the refresh paired
+about 10 minutes of file costs with steps that barely ran. The baseline run 44171842656 (attempt
+3, 0 cache hits) had measured 2.95. The inflated number then underpriced PRs: run 44202075991
+planned 3 legs at ~9m27s, and they ran 12.6, 12.8 and 13.4 min.
+
+**Change:**
+- **Detection.** A durations map may carry `"$run": "<run id>.<attempt>"`. When the refresh
+  measures run R, it reads the attempt from the artifact name (`-a<n>-`). A map stamped with
+  anything other than `R.<n>` was replayed, and so is the JUnit beside it (same stem).
+- **Costs.** A replayed report still prices its items in the ledger, because those seconds were
+  measured once.
+- **Concurrency.** A replayed report stays out of the leg's measured seconds (`legSeconds`), so
+  it adds nothing to the concurrency pairing.
+- **Compatibility.** Unstamped maps, and runs with no attempt in the artifact name, read as before.
+- **Tests.** `refresh-replayed.test.mjs` models the attempt-2 leg; its import fails on main.
+
+**Consumer side:** future-pay's durations reporter stamps `$run` from `GITHUB_RUN_ID` and
+`GITHUB_RUN_ATTEMPT`. They are passed through turbo without entering the cache hash, so a cached
+task replays the OLD stamp.
+
+**Revert if:** the unit concurrency still exceeds the leg's fork count after a re-run, or a leg
+that executed is marked replayed. Rollback: revert this PR. A stamped map is then read as before.
