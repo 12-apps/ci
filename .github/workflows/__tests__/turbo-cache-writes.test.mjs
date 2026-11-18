@@ -143,6 +143,7 @@ function ifExpression(block) {
 function evaluate(expr, { event, input, hit }) {
   const values = {
     "steps.lane-verdict.outputs.hit": JSON.stringify(hit),
+    "steps.green.outputs.empty": JSON.stringify(""),
     "github.event_name": JSON.stringify(event),
     "inputs.build-turbo-restore": JSON.stringify(input),
   };

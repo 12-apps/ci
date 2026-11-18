@@ -1659,6 +1659,14 @@ jobs:
             echo "::notice::This head was already green, but this run is not a ready run: the merge-base range stands."
             exit 0
           fi
+          # A ready run on that same head has nothing to check: say so, and every
+          # step gated on `empty` (setup, install, the lane, the records) is
+          # skipped, as on a verdict hit. The job is green on the draft run's
+          # proof of this exact head (FUT-5279).
+          if [ "$green" = "$PR_HEAD_SHA" ]; then
+            echo "empty=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::This lane already passed on this exact head: nothing to check, the install and the lane are skipped."
+          fi
           if ! git cat-file -e "$green^{commit}" 2>/dev/null || ! git merge-base --is-ancestor "$green" "$PR_HEAD_SHA"; then
             echo "::notice::Last green head $green is not an ancestor of $PR_HEAD_SHA: the merge-base range stands."
             exit 0
@@ -1697,25 +1705,25 @@ jobs:
             pre=${{ inputs.pre-build-command }}
             pnpm turbo run build --affected
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
-        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' && steps.green.outputs.empty != 'true' }}
         with:
           run_install: false
 
       - uses: actions/setup-node@v4
-        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' && steps.green.outputs.empty != 'true' }}
         with:
           node-version: ${{ steps.verdict-node.outputs.node-version || inputs.node-version }}
           cache: ${{ !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
 
       - name: Install dependencies
-        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' && steps.green.outputs.empty != 'true' }}
         shell: bash
         run: |
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
 
       - name: Pre-build setup
-        if: ${{ (inputs.pre-build-command != '') && steps.lane-verdict.outputs.hit != 'true' }}
+        if: ${{ (inputs.pre-build-command != '') && steps.lane-verdict.outputs.hit != 'true' && steps.green.outputs.empty != 'true' }}
         shell: bash
         env:
           PRE_CMD: ${{ inputs.pre-build-command }}
@@ -1749,7 +1757,7 @@ jobs:
       # pull-request restore is skippable; the default branch always restores,
       # and the save below never reads this input.
       - name: Restore turbo cache
-        if: ${{ steps.lane-verdict.outputs.hit != 'true' && (github.event_name != 'pull_request' || inputs.build-turbo-restore) }}
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' && steps.green.outputs.empty != 'true' && (github.event_name != 'pull_request' || inputs.build-turbo-restore) }}
         uses: actions/cache/restore@v4
         with:
           path: .turbo
@@ -1758,7 +1766,7 @@ jobs:
             turbo-build-
 
       - name: Build
-        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' && steps.green.outputs.empty != 'true' }}
         shell: bash
         env:
           SELECTION_BASE: ${{ steps.selection.outputs.base-sha }}
@@ -1781,7 +1789,7 @@ jobs:
       # No status function: a lane that failed has nothing worth publishing as
       # the branch's warm state.
       - name: Save turbo cache
-        if: ${{ (github.event_name != 'pull_request') && steps.lane-verdict.outputs.hit != 'true' }}
+        if: ${{ (github.event_name != 'pull_request') && steps.lane-verdict.outputs.hit != 'true' && steps.green.outputs.empty != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: .turbo
@@ -1796,7 +1804,7 @@ jobs:
       # The green head is claimed LAST, by a job that passed: the next push to
       # this pull request selects only what changed since (FUT-4557).
       - name: Remember this head as the lane's last green
-        if: ${{ success() && inputs.affected-since-green && github.event_name == 'pull_request' && steps.lane-verdict.outputs.hit != 'true' }}
+        if: ${{ success() && inputs.affected-since-green && github.event_name == 'pull_request' && steps.lane-verdict.outputs.hit != 'true' && steps.green.outputs.empty != 'true' }}
         shell: bash
         env:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -1805,7 +1813,7 @@ jobs:
           printf '%s\n' "$PR_HEAD_SHA" > .last-green-build/sha
 
       - name: Save the lane's last green head
-        if: ${{ success() && inputs.affected-since-green && github.event_name == 'pull_request' && steps.lane-verdict.outputs.hit != 'true' }}
+        if: ${{ success() && inputs.affected-since-green && github.event_name == 'pull_request' && steps.lane-verdict.outputs.hit != 'true' && steps.green.outputs.empty != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: .last-green-build
@@ -1816,7 +1824,7 @@ jobs:
       # tree, under this exact command, may skip them all. A job that failed
       # records nothing; one whose lookup hit has nothing new to say.
       - name: Record the lane verdict
-        if: ${{ success() && steps.lane-verdict.outputs.key != '' && steps.lane-verdict.outputs.hit != 'true' }}
+        if: ${{ success() && steps.lane-verdict.outputs.key != '' && steps.lane-verdict.outputs.hit != 'true' && steps.green.outputs.empty != 'true' }}
         uses: 12-apps/ci/.github/actions/lane-verdict@v2
         with:
           mode: record

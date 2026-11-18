@@ -188,7 +188,8 @@ for (const { file, job, lane } of JOBS) {
     const { dir, b } = repo();
     const block = all[find(/id: green\n/)].block;
     const r = narrow(block, dir, { green: b, head: b, draft: "false" });
-    assert.deepEqual(r.outputs, { base: b });
+    // FUT-5279: and it says so, so the install and the lane are skipped too.
+    assert.deepEqual(r.outputs, { empty: "true", base: b });
     assert.deepEqual(r.env, { TURBO_SCM_BASE: b, TURBO_SCM_HEAD: b, AFFECTED_BASE: b });
   });
 
@@ -200,7 +201,7 @@ for (const { file, job, lane } of JOBS) {
     const remember = all.find((s) => /name: Remember this head as the lane's last green/.test(s.block));
     const save = all.find((s) => /name: Save the lane's last green head/.test(s.block));
     assert.ok(remember && save, "no record steps");
-    const cond = "if: ${{ success() && inputs.affected-since-green && github.event_name == 'pull_request' && steps.lane-verdict.outputs.hit != 'true' }}";
+    const cond = "if: ${{ success() && inputs.affected-since-green && github.event_name == 'pull_request' && steps.lane-verdict.outputs.hit != 'true' && steps.green.outputs.empty != 'true' }}";
     assert.ok(remember.block.includes(cond), remember.block);
     assert.ok(save.block.includes(cond), save.block);
     assert.match(save.block, new RegExp(`key: last-green-${lane}-pr\\$\\{\\{ github\\.event\\.pull_request\\.number \\}\\}-\\$\\{\\{ github\\.event\\.pull_request\\.head\\.sha \\}\\}`));
