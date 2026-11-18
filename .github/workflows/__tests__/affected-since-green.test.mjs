@@ -11,8 +11,11 @@
  *   - the input is declared, a boolean, default false (today's behaviour);
  *   - the head is restored and resolved before the verdict lookup, and keyed;
  *   - an ancestor head narrows TURBO_SCM_BASE/HEAD to green..PR head and
- *     exports AFFECTED_BASE; no head, garbage, the same head, an unknown or a
- *     non-ancestor head (force-push) keep the merge-base range;
+ *     exports AFFECTED_BASE; no head, garbage, an unknown or a non-ancestor
+ *     head (force-push) keep the merge-base range;
+ *   - the same head keeps the merge-base range on a draft run (owner,
+ *     2026-11-18: a draft always runs) and narrows to the empty head..head
+ *     range only on a ready run, the draft->ready flip of an unchanged head;
  *   - the head is remembered only by a job that passed, never after a verdict
  *     hit, never off a pull request.
  *
@@ -90,7 +93,7 @@ function repo() {
   return { dir, base, a, b, x };
 }
 
-function narrow(block, dir, { green, head }) {
+function narrow(block, dir, { green, head, draft = "true" }) {
   const out = join(dir, "out");
   const envFile = join(dir, "env");
   writeFileSync(out, "");
@@ -100,7 +103,14 @@ function narrow(block, dir, { green, head }) {
   const r = spawnSync("bash", ["-e", "-o", "pipefail", "-c", runScript(block)], {
     cwd: dir,
     encoding: "utf8",
-    env: { PATH: process.env.PATH, PR_HEAD_SHA: head, GREEN_FILE: join(dir, "g", green === undefined ? "missing" : "sha"), GITHUB_OUTPUT: out, GITHUB_ENV: envFile },
+    env: {
+      PATH: process.env.PATH,
+      PR_HEAD_SHA: head,
+      ...(draft === undefined ? {} : { PR_DRAFT: draft }),
+      GREEN_FILE: join(dir, "g", green === undefined ? "missing" : "sha"),
+      GITHUB_OUTPUT: out,
+      GITHUB_ENV: envFile,
+    },
   });
   assert.equal(r.status, 0, r.stderr);
   const pairs = (f) => Object.fromEntries(readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => l.split("=")));
@@ -150,14 +160,40 @@ for (const { file, job, lane } of JOBS) {
     assert.deepEqual(r.env, { TURBO_SCM_BASE: a, TURBO_SCM_HEAD: b, AFFECTED_BASE: a });
   });
 
-  test(`${job}: no head, garbage, the same head, an unknown or a non-ancestor head keep the merge-base range`, () => {
+  test(`${job}: no head, garbage, an unknown or a non-ancestor head keep the merge-base range, draft or ready`, () => {
     const { dir, b, x } = repo();
     const block = all[find(/id: green\n/)].block;
-    for (const [label, green] of [["none", undefined], ["garbage", "not-a-sha"], ["same head", b], ["unknown", "f".repeat(40)], ["force-pushed away", x]]) {
-      const r = narrow(block, dir, { green, head: b });
-      assert.deepEqual(r.outputs, {}, label);
-      assert.deepEqual(r.env, {}, label);
+    for (const draft of ["true", "false"]) {
+      for (const [label, green] of [["none", undefined], ["garbage", "not-a-sha"], ["unknown", "f".repeat(40)], ["force-pushed away", x]]) {
+        const r = narrow(block, dir, { green, head: b, draft });
+        assert.deepEqual(r.outputs, {}, `${label}, draft=${draft}`);
+        assert.deepEqual(r.env, {}, `${label}, draft=${draft}`);
+      }
     }
+  });
+
+  // Owner, 2026-11-18: a draft always runs; a new commit always runs; only the
+  // draft->ready flip of a head this lane already passed may skip the work.
+  test(`${job}: the same head keeps the merge-base range on a draft, and on an unknown draft state`, () => {
+    const { dir, b } = repo();
+    const block = all[find(/id: green\n/)].block;
+    for (const draft of ["true", "", undefined]) {
+      const r = narrow(block, dir, { green: b, head: b, draft });
+      assert.deepEqual(r.outputs, {}, `draft=${JSON.stringify(draft)}`);
+      assert.deepEqual(r.env, {}, `draft=${JSON.stringify(draft)}`);
+    }
+  });
+
+  test(`${job}: the same head on a ready run narrows to the empty head..head range`, () => {
+    const { dir, b } = repo();
+    const block = all[find(/id: green\n/)].block;
+    const r = narrow(block, dir, { green: b, head: b, draft: "false" });
+    assert.deepEqual(r.outputs, { base: b });
+    assert.deepEqual(r.env, { TURBO_SCM_BASE: b, TURBO_SCM_HEAD: b, AFFECTED_BASE: b });
+  });
+
+  test(`${job}: the draft state is the event's own, never a live lookup`, () => {
+    assert.match(all[find(/id: green\n/)].block, /\n\s+PR_DRAFT: \$\{\{ github\.event\.pull_request\.draft \}\}\n/);
   });
 
   test(`${job}: the head is remembered only by a passing job, never after a hit, never off a pull request`, () => {
