@@ -107,19 +107,23 @@ for (const { file, job, lane, input } of JOBS) {
     const record = after.at(-1);
     assert.match(record.block, /name: Record the lane verdict/, "the record must be the LAST step of the job");
     assert.match(record.block, /mode: record/);
-    assert.match(record.block, /if: \$\{\{ success\(\) && steps\.lane-verdict\.outputs\.key != '' && steps\.lane-verdict\.outputs\.hit != 'true' \}\}/, "record only from a job whose every step passed, only when a key exists, never after a hit");
+    // FUT-5279: a job with the since-green narrowing step skips on its empty range too.
+    const narrows = all.some((s) => /\n\s+id: green\n/.test(s.block));
+    const gate = narrows ? String.raw` && steps\.green\.outputs\.empty != 'true'` : "";
+    assert.match(record.block, new RegExp(String.raw`if: \$\{\{ success\(\) && steps\.lane-verdict\.outputs\.key != '' && steps\.lane-verdict\.outputs\.hit != 'true'${gate} \}\}`), "record only from a job whose every step passed, only when a key exists, never after a hit or an empty range");
     assert.match(record.block, /key: \$\{\{ steps\.lane-verdict\.outputs\.key \}\}/);
-    const ungated = after.slice(0, -1).filter((s) => !/^        if: .*steps\.lane-verdict\.outputs\.hit != 'true'/m.test(s.block));
-    assert.deepEqual(ungated.map((s) => s.head.trim()), [], `${job}: a step that runs on a hit makes the skip a fiction`);
+    const ungated = after.slice(0, -1).filter((s) => !new RegExp(String.raw`^        if: .*steps\.lane-verdict\.outputs\.hit != 'true'${gate}`, "m").test(s.block));
+    assert.deepEqual(ungated.map((s) => s.head.trim()), [], `${job}: a step that runs on a hit or on an empty range makes the skip a fiction (FUT-5279)`);
   });
 
   test(`${job}: a step that already had a condition keeps it`, () => {
     // The gate is ADDED to a condition, never substituted for it: a turbo cache
     // save gated off pull requests must stay gated off pull requests.
     const all = steps(body);
+    const gate = all.some((s) => /\n\s+id: green\n/.test(s.block)) ? String.raw` && steps\.green\.outputs\.empty != 'true'` : "";
     for (const s of all) {
       if (/actions\/cache\/save@/.test(s.block) && /turbo-/.test(s.block)) {
-        assert.match(s.block, /if: \$\{\{ \(github\.event_name != 'pull_request'\) && steps\.lane-verdict\.outputs\.hit != 'true' \}\}/);
+        assert.match(s.block, new RegExp(String.raw`if: \$\{\{ \(github\.event_name != 'pull_request'\) && steps\.lane-verdict\.outputs\.hit != 'true'${gate} \}\}`));
       }
     }
   });
