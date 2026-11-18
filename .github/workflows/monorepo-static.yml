@@ -884,6 +884,8 @@ jobs:
         shell: bash
         env:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # The draft state of THIS event: only a ready run may reuse its own head.
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
           GREEN_FILE: .last-green-lint/sha
         run: |
           set -euo pipefail
@@ -892,8 +894,13 @@ jobs:
             echo "No green head recorded for this pull request: the merge-base range stands."
             exit 0
           fi
-          if [ "$green" = "$PR_HEAD_SHA" ]; then
-            echo "::notice::This head was already green: the merge-base range stands."
+          # Same head: this lane already passed on exactly this commit of this PR.
+          # A draft run checks it again over the merge-base range (owner,
+          # 2026-11-18: a draft always runs). A ready run on that head, the
+          # draft->ready flip, has nothing new to prove: the range is empty
+          # (head..head). A new commit is never this case, its head differs.
+          if [ "$green" = "$PR_HEAD_SHA" ] && [ "${PR_DRAFT:-}" != "false" ]; then
+            echo "::notice::This head was already green, but this run is not a ready run: the merge-base range stands."
             exit 0
           fi
           if ! git cat-file -e "$green^{commit}" 2>/dev/null || ! git merge-base --is-ancestor "$green" "$PR_HEAD_SHA"; then
@@ -1132,6 +1139,8 @@ jobs:
         shell: bash
         env:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # The draft state of THIS event: only a ready run may reuse its own head.
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
           GREEN_FILE: .last-green-type-check/sha
         run: |
           set -euo pipefail
@@ -1140,8 +1149,13 @@ jobs:
             echo "No green head recorded for this pull request: the merge-base range stands."
             exit 0
           fi
-          if [ "$green" = "$PR_HEAD_SHA" ]; then
-            echo "::notice::This head was already green: the merge-base range stands."
+          # Same head: this lane already passed on exactly this commit of this PR.
+          # A draft run checks it again over the merge-base range (owner,
+          # 2026-11-18: a draft always runs). A ready run on that head, the
+          # draft->ready flip, has nothing new to prove: the range is empty
+          # (head..head). A new commit is never this case, its head differs.
+          if [ "$green" = "$PR_HEAD_SHA" ] && [ "${PR_DRAFT:-}" != "false" ]; then
+            echo "::notice::This head was already green, but this run is not a ready run: the merge-base range stands."
             exit 0
           fi
           if ! git cat-file -e "$green^{commit}" 2>/dev/null || ! git merge-base --is-ancestor "$green" "$PR_HEAD_SHA"; then
