@@ -604,7 +604,9 @@ jobs:
   # clamp is what keeps an accidental zero from ever reaching it.
   unit-plan:
     name: Unit Plan
-    runs-on: ${{ inputs.light-runner || inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Not on the light pool (E-153 verdict, FUT-4536): on a 1-vCPU slot this plan ran
+    # CPU-bound (cpuWaitPct 71-86%) and its median rose ~15-20 s on 2026-11-18.
+    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 15
@@ -1834,7 +1836,9 @@ jobs:
 
   integration-plan:
     name: Integration Plan
-    runs-on: ${{ inputs.light-runner || inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Not on the light pool (E-153 verdict, FUT-4536): on a 1-vCPU slot this plan ran
+    # CPU-bound (cpuWaitPct 71-86%) and its median rose ~15-20 s on 2026-11-18.
+    runs-on: ${{ inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: 15

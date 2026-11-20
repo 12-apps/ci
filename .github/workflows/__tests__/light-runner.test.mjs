@@ -25,7 +25,9 @@ import { mediumOperand } from "./medium-runner.test.mjs";
 /** `<file>` → the jobs that read `light-runner`, and nothing else in the file. */
 export const LIGHT_JOBS = new Map([
   ["monorepo-static.yml", ["changes", "actionlint"]],
-  ["monorepo-tests.yml", ["unit-plan", "unit-signal", "unit-verdict", "unit-green-shards", "integration-plan", "integration-signal", "integration-verdict", "integration-green-shards"]],
+  // The two plans left the list after the E-153 verdict (2026-11-18): on a 1-vCPU
+  // slot they ran CPU-bound and ~15-20 s slower. The rest of the class stayed.
+  ["monorepo-tests.yml", ["unit-signal", "unit-verdict", "unit-green-shards", "integration-signal", "integration-verdict", "integration-green-shards"]],
   ["cost-report.yml", ["report"]],
   ["conflict-overlap.yml", ["overlap"]],
   ["conflict-probe.yml", ["probe"]],
