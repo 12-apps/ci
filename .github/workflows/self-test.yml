@@ -94,6 +94,10 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/medium-runner.test.mjs
 
+      - name: Static Gates background gates keep their exit codes
+        shell: bash
+        run: node --test .github/workflows/__tests__/static-gates-background.test.mjs
+
       - name: Full-suite signal wiring
         shell: bash
         run: node --test .github/workflows/__tests__/full-suite-signal.test.mjs
