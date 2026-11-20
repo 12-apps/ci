@@ -332,7 +332,11 @@ jobs:
             local gate="$1"; shift
             rm -f "$gate.exit" "$gate.exit.tmp"
             # Its own stdio is detached so the step can end while it runs.
-            ( "$@" > "$gate.log" 2>&1; echo $? > "$gate.exit.tmp"; mv "$gate.exit.tmp" "$gate.exit" ) \
+            # `shell: bash` runs with -e, which a subshell inherits: without the
+            # `|| rc=$?` a failing gate would end the subshell before it writes
+            # its exit code (seen on future-pay#5407, job 136070789963).
+            ( rc=0; "$@" > "$gate.log" 2>&1 || rc=$?
+              echo "$rc" > "$gate.exit.tmp"; mv "$gate.exit.tmp" "$gate.exit" ) \
               < /dev/null > /dev/null 2>&1 &
             echo $! > "$gate.pid"
             echo "started $gate (pid $!): $*"
@@ -394,7 +398,7 @@ jobs:
           while [ ! -f "$gate.exit" ] && kill -0 "$pid" 2>/dev/null; do sleep 1; done
           cat "$gate.log"
           if [ ! -f "$gate.exit" ]; then
-            echo "::error::$gate stopped without an exit code (pid $pid was killed)"
+            echo "::error::$gate ended without writing its exit code (pid $pid)"
             exit 1
           fi
           exit "$(cat "$gate.exit")"
@@ -415,7 +419,7 @@ jobs:
           while [ ! -f "$gate.exit" ] && kill -0 "$pid" 2>/dev/null; do sleep 1; done
           cat "$gate.log"
           if [ ! -f "$gate.exit" ]; then
-            echo "::error::$gate stopped without an exit code (pid $pid was killed)"
+            echo "::error::$gate ended without writing its exit code (pid $pid)"
             exit 1
           fi
           exit "$(cat "$gate.exit")"
