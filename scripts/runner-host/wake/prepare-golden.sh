@@ -48,8 +48,10 @@ fi
 # The image is built here and nowhere else: the kit's weekly rebuild timer
 # (install.sh, for a long-lived host) never runs on a fleet host, which would
 # otherwise rebuild the runner image at boot (Persistent=true) under its jobs.
-systemctl disable --now ci-runner-image.timer >/dev/null 2>&1 || true
-systemctl mask ci-runner-image.timer >/dev/null
+# Disabled, not masked: install.sh writes the timer as a regular file in
+# /etc/systemd/system, which `systemctl mask` refuses, and next week's golden
+# host (launched from this image) re-runs install.sh, which enables it.
+systemctl disable --now ci-runner-image.timer >/dev/null
 
 # The image carries no token and no identity of this host.
 sed -i 's/^CI_RUNNER_TOKEN=.*/CI_RUNNER_TOKEN=/' /etc/ci-runner/env

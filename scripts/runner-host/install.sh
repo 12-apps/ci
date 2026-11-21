@@ -90,9 +90,13 @@ command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
 install -d /etc/docker
 daemon_json=/etc/docker/daemon.json
 [[ -s "$daemon_json" ]] || echo '{}' > "$daemon_json"
-jq '. + {"live-restore": true}' "$daemon_json" > "${daemon_json}.new" && mv "${daemon_json}.new" "$daemon_json"
-systemctl enable docker
-systemctl restart docker
+jq '. + {"live-restore": true}' "$daemon_json" > "${daemon_json}.new"
+mv "${daemon_json}.new" "$daemon_json"
+# Reloaded, never restarted: live-restore is a reloadable setting, and a
+# restart on a host re-running this kit would stop the running jobs (before
+# live-restore is on, and through the old unit's Requires=docker.service).
+systemctl enable --now docker
+[[ "$(docker info -f '{{.LiveRestoreEnabled}}' 2>/dev/null)" == true ]] || systemctl reload docker
 
 # Kernel limits are the HOST's, shared by every job container: vite and vitest
 # watchers exhaust the stock inotify limits long before CPU or memory run out.

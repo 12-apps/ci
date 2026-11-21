@@ -276,12 +276,12 @@ trap 'exit 143' TERM INT
 container_running() {
   local out down_since=""
   while true; do
-    if out=$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null); then
+    if out=$(timeout 15 docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null); then
       [[ -z "$down_since" ]] || log "docker answers again; still watching job '${job:-?}'"
       [[ "$out" == "true" ]]
       return
     fi
-    if docker info >/dev/null 2>&1; then
+    if timeout 15 docker info >/dev/null 2>&1; then
       return 1   # the daemon answers and the container is gone
     fi
     if [[ -z "$down_since" ]]; then
@@ -421,6 +421,15 @@ cleanup
 failures=0
 while true; do
   phase=registering; runner_name="${prefix}-$(date +%s)"; job=""; job_started=""; save_state
+  # With Wants=docker.service a stopped daemon no longer stops the slot, so a
+  # registration is only attempted once docker answers: otherwise each pass
+  # would spend the App's shared rate limit on a runner that cannot start.
+  if ! timeout 15 docker info >/dev/null 2>&1; then
+    phase=backoff; save_state
+    fail "docker does not answer; not registering"
+    sleep 15
+    continue
+  fi
   if auth && remove_stale && jit=$(jit_config); then
     failures=0
     run_one "$jit" || true

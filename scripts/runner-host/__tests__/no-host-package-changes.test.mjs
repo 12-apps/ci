@@ -29,10 +29,13 @@ test("the image takes every pending upgrade, then removes what would upgrade or 
   assert.match(golden, /APT::Periodic::Unattended-Upgrade "0"/);
 });
 
-test("nothing else refreshes or rebuilds on a fleet host: snaps are held, the kit's image-rebuild timer is masked", () => {
+test("nothing else refreshes or rebuilds on a fleet host: snaps are held, the kit's image-rebuild timer is disabled", () => {
   const hold = golden.search(/snap refresh --hold/);
   assert.ok(hold !== -1 && golden.indexOf("snap refresh >/dev/null") < hold, "snaps are refreshed in the image, then held");
-  assert.match(golden, /systemctl mask ci-runner-image\.timer/);
+  const disable = golden.search(/^systemctl disable --now ci-runner-image\.timer >\/dev\/null$/m);
+  assert.ok(disable > golden.indexOf('"$here/../install.sh"'), "disabled after install.sh wrote it, and a failure fails the build");
+  // install.sh writes the timer as a regular file, which `systemctl mask` refuses.
+  assert.doesNotMatch(golden, /mask[^\n]*ci-runner-image\.timer/);
 });
 
 test("a docker restart does not stop a runner slot: the unit wants docker, it does not require it", () => {
@@ -45,6 +48,9 @@ test("a docker restart does not stop a runner slot: the unit wants docker, it do
 test("a dockerd or containerd restart does not stop a container: live-restore is merged into daemon.json", () => {
   assert.match(install, /jq '\. \+ \{"live-restore": true\}' "\$daemon_json"/);
   const merge = install.indexOf("live-restore\": true}");
-  const restart = install.indexOf("systemctl restart docker");
-  assert.ok(merge !== -1 && restart > merge, "docker is restarted after the setting is written, so it takes effect");
+  const reload = install.indexOf("systemctl reload docker");
+  assert.ok(merge !== -1 && reload > merge, "docker is reloaded after the setting is written, so it takes effect");
+  // A restart on a host re-running the kit would stop its running jobs.
+  assert.doesNotMatch(install, /systemctl restart docker/);
+  assert.match(install, /^mv "\$\{daemon_json\}\.new" "\$daemon_json"$/m, "a jq failure is not hidden in an && list");
 });
