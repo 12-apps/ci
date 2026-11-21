@@ -45,6 +45,11 @@
 #                     formatted fresh for every job. Unset: an anonymous volume.
 #   CI_RUNNER_JOB_TIMEOUT_MINUTES  wall-clock cap on one job once it has
 #                     STARTED (default 360). Waiting for a job is not capped.
+#   CI_RUNNER_DOCKER_GRACE_SECONDS  how long a Docker daemon that stops
+#                     answering mid-job is waited for before the job is given
+#                     up (default 180). With live-restore (install.sh) the job's
+#                     container keeps running through a dockerd or containerd
+#                     restart, so ending the watch then would remove a live job.
 #
 # Operations: the slot's state is written to $CI_RUNNER_STATE_DIR/slot-<n>.json
 # (default /run/ci-runner) for `ci-runner-status`. It holds names, times and
@@ -76,6 +81,7 @@ state="${state_dir}/slot-${slot}.json"
 data_dir="${CI_RUNNER_DATA_DIR:-/var/lib/ci-runner}"
 poll="${CI_RUNNER_POLL_SECONDS:-5}"
 job_timeout=$(( ${CI_RUNNER_JOB_TIMEOUT_MINUTES:-360} * 60 ))
+docker_grace="${CI_RUNNER_DOCKER_GRACE_SECONDS:-180}"
 max_failures=8
 
 mkdir -p "$state_dir"
@@ -260,12 +266,42 @@ trap on_exit EXIT
 trap 'exit 143' TERM INT
 
 # ── one job ──────────────────────────────────────────────────────────────────
+# Whether the job's container is still running. A Docker daemon that does not
+# answer is not a finished job: a dockerd or containerd restart (a package
+# upgrade's service restart, FUT-5281) used to end this watch at once, and the
+# cleanup then removed a container that live-restore had kept alive. So an
+# unanswered inspect is retried until the daemon answers again or
+# docker_grace seconds pass; only a daemon that answers and says the container
+# is not running ends the job.
+container_running() {
+  local out down_since=""
+  while true; do
+    if out=$(timeout 15 docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null); then
+      [[ -z "$down_since" ]] || log "docker answers again; still watching job '${job:-?}'"
+      [[ "$out" == "true" ]]
+      return
+    fi
+    if timeout 15 docker info >/dev/null 2>&1; then
+      return 1   # the daemon answers and the container is gone
+    fi
+    if [[ -z "$down_since" ]]; then
+      down_since=$(date +%s)
+      log "docker does not answer; waiting up to ${docker_grace}s before giving up the job"
+    elif (( $(date +%s) - down_since >= docker_grace )); then
+      log "docker did not answer for ${docker_grace}s; giving up the job"
+      return 1
+    fi
+    sleep "$poll"
+  done
+}
+
+
 # Watches the container until it exits: records the job it picked up, keeps
 # the heartbeat fresh, and kills it if the job outlives its cap.
 watch_job() {
   local since started_at=0 out result
   since=$(date +%s)
-  while [[ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" == "true" ]]; do
+  while container_running; do
     if [[ -z "$job" ]]; then
       out=$(docker logs --since "$since" "$container" 2>&1 | grep -m1 -o 'Running job: .*' || true)
       if [[ -n "$out" ]]; then
@@ -385,6 +421,15 @@ cleanup
 failures=0
 while true; do
   phase=registering; runner_name="${prefix}-$(date +%s)"; job=""; job_started=""; save_state
+  # With Wants=docker.service a stopped daemon no longer stops the slot, so a
+  # registration is only attempted once docker answers: otherwise each pass
+  # would spend the App's shared rate limit on a runner that cannot start.
+  if ! timeout 15 docker info >/dev/null 2>&1; then
+    phase=backoff; save_state
+    fail "docker does not answer; not registering"
+    sleep 15
+    continue
+  fi
   if auth && remove_stale && jit=$(jit_config); then
     failures=0
     run_one "$jit" || true

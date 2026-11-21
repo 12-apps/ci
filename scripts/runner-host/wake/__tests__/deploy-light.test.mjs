@@ -40,18 +40,31 @@ test("without HOST_LABELS the user data is what it was: no labels line", () => {
   for (const store of ["off", "on"]) {
     const ud = userData({ store });
     assert.doesNotMatch(ud, /CI_RUNNER_LABELS/);
-    // The three lines (two with the store on) every fleet host has booted with.
+    // The lines every fleet host boots with (one fewer with the store on).
     const lines = ud.trimEnd().split("\n");
     assert.equal(lines[0], "#cloud-config");
     assert.equal(lines[1], "bootcmd:");
     assert.match(lines[2], /CI_RUNNER_IDLE_MINUTES=2\//);
     assert.match(lines[3], /CI_RUNNER_NAME=/);
+    assert.match(lines[4], /systemctl mask --now apt-daily\.timer apt-daily-upgrade\.timer/);
     if (store === "off") {
-      assert.equal(lines.length, 5);
-      assert.match(lines[4], /CI_RUNNER_PNPM_STORE=\//);
+      assert.equal(lines.length, 6);
+      assert.match(lines[5], /CI_RUNNER_PNPM_STORE=\//);
     } else {
-      assert.equal(lines.length, 4);
+      assert.equal(lines.length, 5);
     }
+  }
+});
+
+// FUT-5281: a fleet host never changes its own packages. Ubuntu's
+// unattended-upgrades upgraded libc a minute after boot, its service restart
+// took containerd and dockerd down, and both slots lost their jobs.
+test("every fleet host masks the apt timers and unattended-upgrades, and disables the image rebuild apart, before any can fire", () => {
+  for (const opts of [{}, { store: "on" }, { labels: "future-pay-ci-light" }]) {
+    const ud = userData(opts);
+    const line = ud.split("\n").find((l) => l.includes("apt-daily-upgrade.timer"));
+    assert.ok(line, "the freeze line is in the user data");
+    assert.match(line, /^ {2}- \[sh, -c, "systemctl mask --now apt-daily\.timer apt-daily-upgrade\.timer apt-daily\.service apt-daily-upgrade\.service unattended-upgrades\.service \|\| true; systemctl disable --now ci-runner-image\.timer \|\| true"\]$/);
   }
 });
 

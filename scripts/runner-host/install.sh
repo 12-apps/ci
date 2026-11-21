@@ -83,7 +83,20 @@ CI_RUNNER_CPUS="${explicit_cpus:-}"
 apt-get update -q
 apt-get install -y -q ca-certificates curl git jq openssl e2fsprogs
 command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
+# live-restore: a dockerd or containerd restart leaves running containers
+# running, so a daemon restart does not take a job with it (FUT-5281: a package
+# upgrade's service restart did, and both slots of a host lost their jobs).
+# Merged into any daemon.json already there, so its other settings stand.
+install -d /etc/docker
+daemon_json=/etc/docker/daemon.json
+[[ -s "$daemon_json" ]] || echo '{}' > "$daemon_json"
+jq '. + {"live-restore": true}' "$daemon_json" > "${daemon_json}.new"
+mv "${daemon_json}.new" "$daemon_json"
+# Reloaded, never restarted: live-restore is a reloadable setting, and a
+# restart on a host re-running this kit would stop the running jobs (before
+# live-restore is on, and through the old unit's Requires=docker.service).
 systemctl enable --now docker
+[[ "$(docker info -f '{{.LiveRestoreEnabled}}' 2>/dev/null)" == true ]] || systemctl reload docker
 
 # Kernel limits are the HOST's, shared by every job container: vite and vitest
 # watchers exhaust the stock inotify limits long before CPU or memory run out.
@@ -162,7 +175,11 @@ Description=GitHub Actions runner slot %i (one job per container)
 After=docker.service network-online.target
 Wants=network-online.target ci-runner-credential.service
 After=ci-runner-credential.service
-Requires=docker.service
+# Wants, not Requires: with Requires a docker restart STOPPED every slot, and
+# the supervisor's stop removes its container with the job inside (FUT-5281).
+# The supervisor waits out a daemon that does not answer (docker_grace), and
+# live-restore keeps the job's container running meanwhile.
+Wants=docker.service
 # Never give up on a slot: a GitHub outage or a revoked credential shows as a
 # failure in ci-runner-status and recovers by itself once it is fixed.
 StartLimitIntervalSec=0

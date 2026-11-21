@@ -142,6 +142,15 @@ pnpm_store="${PNPM_STORE:-off}"
 #    the job's own store. Node in the tool cache is unaffected.
 store_cmd=""
 [[ "$pnpm_store" == off ]] && store_cmd="  - [sh, -c, \"sed -i 's/^CI_RUNNER_PNPM_STORE=.*/CI_RUNNER_PNPM_STORE=/' /etc/ci-runner/env\"]"
+#  - no package change on a running host (FUT-5281): the apt timers and
+#    unattended-upgrades are masked and the kit's image-rebuild timer is
+#    disabled, before any of them can fire. Two commands, never one: the timer
+#    is a regular file in /etc/systemd/system, which `mask` refuses, and a
+#    failed multi-unit mask skips its reload and its --now stop, so the apt
+#    timers already loaded would still fire. prepare-golden.sh removes all of
+#    it from the image (and holds the snaps there; snapd is not up yet at
+#    bootcmd); this line covers a host booted from an image built before that.
+freeze_cmd='  - [sh, -c, "systemctl mask --now apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service unattended-upgrades.service || true; systemctl disable --now ci-runner-image.timer || true"]'
 #  - the runner labels, only with HOST_LABELS: one image serves two fleets
 #    (a light pool), and a host registers with the labels of the fleet that
 #    launched it. Without it no line is written, so the image's labels stand.
@@ -161,6 +170,7 @@ user_data=$(base64 -w0 <<UD
 bootcmd:
   - [sh, -c, "sed -i 's/^CI_RUNNER_IDLE_MINUTES=.*/CI_RUNNER_IDLE_MINUTES=${idle_minutes}/' /etc/ci-runner/env"]
   - [sh, -c, "t=\$(curl -s -m 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60'); md() { curl -s -m 5 -H \"X-aws-ec2-metadata-token: \$t\" http://169.254.169.254/latest/meta-data/\$1; }; az=\$(md placement/availability-zone); ip=\$(md local-ipv4); [ -n \"\$az\" ] && [ -n \"\$ip\" ] || exit 0; sed -i '/^CI_RUNNER_NAME=/d' /etc/ci-runner/env; echo \"CI_RUNNER_NAME=\$az-ip-\$(echo \$ip | tr . -)\" >> /etc/ci-runner/env"]
+${freeze_cmd}
 ${store_cmd}
 UD
 )

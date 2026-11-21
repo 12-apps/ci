@@ -30,7 +30,7 @@ const INSTALL_TOKEN = "ghs_INSTALLATION_TOKEN_VALUE";
  * docker: `inspect ...Running` answers true for `runPolls` calls, then false;
  * `logs` prints `logs`. That is how a job's life is simulated.
  */
-function stubs({ jitFails = false, runPolls = 0, logs = "", staleImage = false, busy = false, drain = false, state = null } = {}) {
+function stubs({ jitFails = false, runPolls = 0, logs = "", staleImage = false, busy = false, drain = false, state = null, daemonDownPolls = 0 } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), "supervisor-"));
   const log = path.join(dir, "calls.jsonl");
   const record = (bin) => `#!/usr/bin/env bash
@@ -63,6 +63,9 @@ esac
   );
   const counter = path.join(dir, "polls");
   writeFileSync(counter, "0");
+  const downCounter = path.join(dir, "down-polls");
+  writeFileSync(downCounter, "0");
+  const downFlag = path.join(dir, "daemon-down");
   writeFileSync(path.join(dir, "logs.txt"), logs);
   writeFileSync(
     path.join(dir, "docker"),
@@ -72,10 +75,16 @@ case "$1" in
   inspect)
     if [[ "$*" == *'{{.Image}}'* ]]; then echo ${staleImage ? "sha-previous" : "sha-current"}
     elif [[ "$*" == *Running* ]]; then
+      # daemonDownPolls: the first inspects find no daemon (a dockerd or
+      # containerd restart); \`info\` fails too while it is down.
+      d=$(cat "${downCounter}")
+      if (( d < ${daemonDownPolls} )); then echo $((d + 1)) > "${downCounter}"; touch "${downFlag}"; exit 1; fi
+      rm -f "${downFlag}"
       n=$(cat "${counter}"); echo $((n + 1)) > "${counter}"
       if (( n < ${runPolls} )); then echo true; else echo false; fi
     else echo 4242; fi ;;
   logs) cat "${path.join(dir, "logs.txt")}" ;;
+  info) [[ -e "${downFlag}" ]] && exit 1 ;;
   run) echo cid ;;
 esac
 exit 0
@@ -229,6 +238,40 @@ test("the container is removed after the job, whatever it did", () => {
   const runAt = calls.findIndex((c) => c.bin === "docker" && c.argv[0] === "run");
   const rmAfter = calls.slice(runAt + 1).some((c) => c.bin === "docker" && c.argv[0] === "rm" && c.argv.includes("ci-runner-1"));
   assert.ok(runAt >= 0 && rmAfter, "no `docker rm -f ci-runner-1` after the job ended");
+});
+
+// FUT-5281: a package upgrade's service restart took containerd and dockerd
+// down for a few seconds, the watch read "not running", and the cleanup removed
+// a job's container that live-restore had kept alive. A daemon that does not
+// answer is waited for; only a daemon that answers ends the job.
+test("a Docker daemon that stops answering mid-job is waited for, and the job keeps its container", () => {
+  const { status, stderr, calls, state } = runOnce(
+    {},
+    { daemonDownPolls: 3, runPolls: 2, logs: "Running job: integration 3/10\nJob integration 3/10 completed with result: Succeeded\n" },
+  );
+  assert.equal(status, 0, stderr);
+  assert.match(stderr, /docker does not answer; waiting up to 180s/);
+  assert.match(stderr, /docker answers again; still watching job/);
+  const inspects = calls.filter((c) => c.bin === "docker" && c.argv[0] === "inspect" && c.argv.join(" ").includes("Running"));
+  // 3 unanswered, 2 running, 1 finished: the watch outlived the outage.
+  assert.equal(inspects.length, 6);
+  // The only removal while the job ran is the one after its last inspect
+  // (a stale container is also removed before \`docker run\`, which is fine).
+  const runAt = calls.findIndex((c) => c.bin === "docker" && c.argv[0] === "run");
+  const lastInspect = calls.lastIndexOf(inspects.at(-1));
+  const rms = calls.map((c, i) => (c.bin === "docker" && c.argv[0] === "rm" && c.argv.includes("ci-runner-1") ? i : -1)).filter((i) => i > runAt);
+  assert.ok(rms.length > 0 && rms.every((i) => i > lastInspect), "the container was removed before the job finished");
+  assert.equal(state.job, "integration 3/10");
+  assert.doesNotMatch(state.last_failure ?? "", /integration/);
+});
+
+test("a Docker daemon that never comes back is given up after the grace", () => {
+  const { status, stderr } = runOnce(
+    { CI_RUNNER_DOCKER_GRACE_SECONDS: "1" },
+    { daemonDownPolls: 1000, logs: "Running job: e2e 1/3\n" },
+  );
+  assert.equal(status, 0, stderr);
+  assert.match(stderr, /docker did not answer for 1s; giving up the job/);
 });
 
 test("removes only THIS slot's offline runners", () => {

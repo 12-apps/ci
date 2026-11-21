@@ -478,6 +478,36 @@ does; a version missing here is still downloaded by Gradle, only slower.)
   security → (Code Quality | CodeQL) → Runner type: Labeled runner*, or turn
   them off.
 
+## Packages never change on a running host
+
+A fleet host lives minutes, so it never patches itself. The weekly image
+refresh is the patch cadence: `prepare-golden.sh` runs `apt full-upgrade`
+while it builds the image, then removes `unattended-upgrades` and
+`needrestart`, masks the apt timers, refreshes and then holds the snaps, and
+disables the kit's own weekly image-rebuild timer (a fleet host never rebuilds
+the runner image; the golden host did). Every launch template's user data
+also masks the apt units and disables that timer at boot, in two separate
+commands (`deploy.sh`), which covers a host booted from an image built before
+this rule. Nothing on a running host installs, refreshes, rebuilds or restarts
+a daemon; `install.sh` turns live-restore on with a docker reload, never a
+restart.
+
+Why (FUT-5281): from 2026-11-17, with a security release newer than the
+image, every host upgraded libc about a minute after boot. needrestart then
+restarted containerd and dockerd, and `Requires=docker.service` stopped both
+runner slots, which removed their containers with the jobs inside. The host,
+left idle, powered itself off. AWS records nothing for that, so the losses
+looked like spot reclaims: 69 to 160 hosts a day.
+
+Two more guards keep a daemon restart from costing a job, whatever triggers
+it:
+- **docker runs with `live-restore`** (`install.sh`), so a dockerd or
+  containerd restart leaves the containers running;
+- **the slot unit wants docker instead of requiring it**, and the supervisor
+  waits up to `CI_RUNNER_DOCKER_GRACE_SECONDS` (180) for a daemon that does
+  not answer, instead of reading that as a finished job; with docker down it
+  does not register a runner at all, it waits.
+
 ## Operating it
 
 ```bash
