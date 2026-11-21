@@ -29,6 +29,12 @@ test("the image takes every pending upgrade, then removes what would upgrade or 
   assert.match(golden, /APT::Periodic::Unattended-Upgrade "0"/);
 });
 
+test("nothing else refreshes or rebuilds on a fleet host: snaps are held, the kit's image-rebuild timer is masked", () => {
+  const hold = golden.search(/snap refresh --hold/);
+  assert.ok(hold !== -1 && golden.indexOf("snap refresh >/dev/null") < hold, "snaps are refreshed in the image, then held");
+  assert.match(golden, /systemctl mask ci-runner-image\.timer/);
+});
+
 test("a docker restart does not stop a runner slot: the unit wants docker, it does not require it", () => {
   const unit = install.slice(install.indexOf("/etc/systemd/system/ci-runner@.service"), install.indexOf("\nUNIT\n", install.indexOf("/etc/systemd/system/ci-runner@.service")));
   assert.match(unit, /^After=docker\.service/m, "slots still start after docker");

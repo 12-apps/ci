@@ -142,11 +142,12 @@ pnpm_store="${PNPM_STORE:-off}"
 #    the job's own store. Node in the tool cache is unaffected.
 store_cmd=""
 [[ "$pnpm_store" == off ]] && store_cmd="  - [sh, -c, \"sed -i 's/^CI_RUNNER_PNPM_STORE=.*/CI_RUNNER_PNPM_STORE=/' /etc/ci-runner/env\"]"
-#  - no package change on a running host (FUT-5281): the apt timers and
-#    unattended-upgrades are masked before they can fire. prepare-golden.sh
+#  - no package change on a running host (FUT-5281): the apt timers,
+#    unattended-upgrades and the kit's image-rebuild timer are masked, and snap
+#    refreshes held, before any of them can fire. prepare-golden.sh
 #    removes them from the image; this line covers a host booted from an image
 #    built before that, and is a no-op on one built after.
-freeze_cmd='  - [sh, -c, "systemctl mask --now apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service unattended-upgrades.service || true"]'
+freeze_cmd='  - [sh, -c, "systemctl mask --now apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service unattended-upgrades.service ci-runner-image.timer || true; snap refresh --hold >/dev/null 2>&1 || true"]'
 #  - the runner labels, only with HOST_LABELS: one image serves two fleets
 #    (a light pool), and a host registers with the labels of the fleet that
 #    launched it. Without it no line is written, so the image's labels stand.

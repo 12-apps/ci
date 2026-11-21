@@ -29,6 +29,9 @@ apt-get -yq purge unattended-upgrades needrestart || true
 systemctl disable --now apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
 systemctl mask apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service unattended-upgrades.service >/dev/null
 printf 'APT::Periodic::Update-Package-Lists "0";\nAPT::Periodic::Unattended-Upgrade "0";\n' > /etc/apt/apt.conf.d/20auto-upgrades
+# Snaps refresh themselves too (snapd, the SSM agent): held for good. The
+# refresh updates them here, before the hold.
+if command -v snap >/dev/null; then snap refresh >/dev/null 2>&1 || true; snap refresh --hold >/dev/null; fi
 
 CI_RUNNER_TOKEN="" CI_RUNNER_TOKEN_PARAMETER="${CI_RUNNER_TOKEN_PARAMETER:-/ci-runner/github-app-key}" \
 CI_RUNNER_IDLE_MINUTES="${CI_RUNNER_IDLE_MINUTES:-5}" \
@@ -41,6 +44,12 @@ if [[ -n "${PNPM_STORE_PACKAGES:-}" ]]; then
   sed -i '/^CI_RUNNER_PNPM_STORE=/d' /etc/ci-runner/env
   echo "CI_RUNNER_PNPM_STORE=/var/lib/ci-runner/pnpm-store" >> /etc/ci-runner/env
 fi
+
+# The image is built here and nowhere else: the kit's weekly rebuild timer
+# (install.sh, for a long-lived host) never runs on a fleet host, which would
+# otherwise rebuild the runner image at boot (Persistent=true) under its jobs.
+systemctl disable --now ci-runner-image.timer >/dev/null 2>&1 || true
+systemctl mask ci-runner-image.timer >/dev/null
 
 # The image carries no token and no identity of this host.
 sed -i 's/^CI_RUNNER_TOKEN=.*/CI_RUNNER_TOKEN=/' /etc/ci-runner/env

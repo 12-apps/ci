@@ -483,9 +483,12 @@ does; a version missing here is still downloaded by Gradle, only slower.)
 A fleet host lives minutes, so it never patches itself. The weekly image
 refresh is the patch cadence: `prepare-golden.sh` runs `apt full-upgrade`
 while it builds the image, then removes `unattended-upgrades` and
-`needrestart` and masks the apt timers. Every launch template's user data
-also masks them at boot (`deploy.sh`), which covers a host booted from an
-image built before this rule.
+`needrestart`, masks the apt timers, refreshes and then holds the snaps, and
+masks the kit's own weekly image-rebuild timer (a fleet host never rebuilds
+the runner image; the golden host did). Every launch template's user data
+also masks them and holds the snaps at boot (`deploy.sh`), which covers a host
+booted from an image built before this rule. Nothing on a running host
+installs, refreshes, rebuilds or restarts a daemon.
 
 Why (FUT-5281): from 2026-11-17, with a security release newer than the
 image, every host upgraded libc about a minute after boot. needrestart then

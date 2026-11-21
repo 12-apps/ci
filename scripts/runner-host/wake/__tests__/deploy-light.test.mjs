@@ -59,12 +59,12 @@ test("without HOST_LABELS the user data is what it was: no labels line", () => {
 // FUT-5281: a fleet host never changes its own packages. Ubuntu's
 // unattended-upgrades upgraded libc a minute after boot, its service restart
 // took containerd and dockerd down, and both slots lost their jobs.
-test("every fleet host masks the apt timers and unattended-upgrades before they can fire", () => {
+test("every fleet host masks the apt timers, unattended-upgrades and the image rebuild, and holds snaps, before any can fire", () => {
   for (const opts of [{}, { store: "on" }, { labels: "future-pay-ci-light" }]) {
     const ud = userData(opts);
     const line = ud.split("\n").find((l) => l.includes("apt-daily-upgrade.timer"));
     assert.ok(line, "the freeze line is in the user data");
-    assert.match(line, /^ {2}- \[sh, -c, "systemctl mask --now apt-daily\.timer apt-daily-upgrade\.timer apt-daily\.service apt-daily-upgrade\.service unattended-upgrades\.service \|\| true"\]$/);
+    assert.match(line, /^ {2}- \[sh, -c, "systemctl mask --now apt-daily\.timer apt-daily-upgrade\.timer apt-daily\.service apt-daily-upgrade\.service unattended-upgrades\.service ci-runner-image\.timer \|\| true; snap refresh --hold >\/dev\/null 2>&1 \|\| true"\]$/);
   }
 });
 
