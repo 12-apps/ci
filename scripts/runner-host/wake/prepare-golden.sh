@@ -14,6 +14,22 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 slots="${1:-2}"
 
+# Packages change HERE, once a week, and never on a fleet host (FUT-5281).
+# A host lives minutes, so it has no business patching itself: with Ubuntu's
+# unattended-upgrades on, every host booted after a security release upgraded
+# libc about a minute after boot, needrestart restarted containerd and dockerd,
+# and the runner slots died with their jobs. So the image takes every pending
+# upgrade now, and the host it boots carries nothing that installs or restarts
+# on its own: no apt timers, no unattended-upgrades, no needrestart. The weekly
+# image refresh is the patch cadence.
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -q
+apt-get -yq -o Dpkg::Options::=--force-confold full-upgrade
+apt-get -yq purge unattended-upgrades needrestart || true
+systemctl disable --now apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
+systemctl mask apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service unattended-upgrades.service >/dev/null
+printf 'APT::Periodic::Update-Package-Lists "0";\nAPT::Periodic::Unattended-Upgrade "0";\n' > /etc/apt/apt.conf.d/20auto-upgrades
+
 CI_RUNNER_TOKEN="" CI_RUNNER_TOKEN_PARAMETER="${CI_RUNNER_TOKEN_PARAMETER:-/ci-runner/github-app-key}" \
 CI_RUNNER_IDLE_MINUTES="${CI_RUNNER_IDLE_MINUTES:-5}" \
   "$here/../install.sh" "$slots"
