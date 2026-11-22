@@ -66,7 +66,10 @@ inert unit (a function declaration, or a `const` bound to an arrow). A
 top-level `import()`, one inside an initializer that calls something
 (`defineJob({ handle: async () => import(…) })`), and a function that
 load-time code calls stay load-time edges of the whole module.
-`dynamic-import-scope.test.mjs` pins each of them.
+`dynamic-import-scope.test.mjs` pins each of them. Whatever carries a change
+into a declaration, the file reports it under every name an importer can bind,
+including an alias from a local `export { load as go }` list (one line or
+several), which the walk used to lose for static imports as well.
 
 `export * from "./x"` binds no local name and runs nothing of its own, so the
 barrel forwards exactly the names that changed behind it, and its importers are
@@ -401,8 +404,10 @@ matches one is not consulted. For each path it asks what the change DOES:
    `coalesce`, `format`, …), also in the trigger's `WHEN`. A write, a
    `RAISE`, `INTO STRICT`, a bare `SELECT`, a row lock, a loop, dynamic SQL,
    any other call, a computed channel, a BEFORE or INSTEAD OF trigger, or a
-   body that notifies nothing keeps the whole table. Not covered: a
-   notification that raises at run time (an 8000-byte payload, a column the
+   body that notifies nothing keeps the whole table. Not covered: a listener
+   is found only by the channel's LITERAL name, so one that builds it at run
+   time (`` `store_${kind}_changed` ``, a constant assembled from parts) is
+   not selected; and a notification that raises at run time (an 8000-byte payload, a column the
    function names and the table lacks) aborts the write; the replay suite in
    `always` and the daily full suite are the backstop.
 2. **A schema file** is diffed block by block: changed models, and inside each

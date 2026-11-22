@@ -296,7 +296,14 @@ export function migrationEffects(sql, state = {}) {
   // more. The last definition is the one a trigger runs, so this migration's
   // own definitions are read before its triggers and replace earlier ones.
   const functions = state.functions ?? new Map();
-  for (const { name, notifyOnly } of functionDefinitions(sql)) functions.set(name, notifyOnly);
+  // A name with any definition that is not a parameterless `RETURNS trigger`
+  // (an overload) is unknown for good: the name alone cannot say which one a
+  // trigger runs (FUT-5471 review, N1).
+  const overloaded = state.overloaded ?? new Set();
+  for (const { name, notifyOnly, trigger } of functionDefinitions(sql)) {
+    if (!trigger) overloaded.add(name);
+    functions.set(name, overloaded.has(name) ? null : notifyOnly);
+  }
   const notifies = new Set();
 
   /** Merge an effect into the running answer — `"*"` absorbs everything. */
@@ -574,7 +581,10 @@ export function functionDefinitions(sql) {
     if (!m) continue;
     const language = /\bLANGUAGE\s+([A-Za-z_]+)/i.exec(head)?.[1]?.toLowerCase();
     const readable = bodies.length === 1 && language === "plpgsql";
-    out.push({ name: normalizeIdent(m[1]), notifyOnly: readable ? notifyOnlyBody(bodies[0]) : null });
+    // A trigger function takes no declared parameters (TG_ARGV carries the
+    // trigger's arguments) and returns `trigger`.
+    const trigger = /^\s*\)/.test(head.slice(m.index + m[0].length)) && /\bRETURNS\s+TRIGGER\b/i.test(head);
+    out.push({ name: normalizeIdent(m[1]), trigger, notifyOnly: readable && trigger ? notifyOnlyBody(bodies[0]) : null });
   }
   return out;
 }
@@ -755,6 +765,7 @@ export function walkMigrations(migrations, options = {}) {
     columnsOf: options.columnsOf ?? (() => null),
     tables: new Set(options.tables ?? []),
     functions: new Map(),
+    overloaded: new Set(),
   };
   const out = new Map();
   for (const { name, sql } of migrations) out.set(name, migrationEffects(sql, state));

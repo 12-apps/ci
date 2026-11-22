@@ -262,3 +262,20 @@ test("COUNTEREXAMPLE: every way a function can do more than notify keeps the tab
   // A function no migration defines is unknown, and unknown is the whole table.
   assert.deepEqual(effect(trigger("AFTER INSERT", "nobody_defined_this")), { screen_parts: "*" });
 });
+
+test("COUNTEREXAMPLE: an overload f(int) does not make trigger f() notify-only (FUT-5471 review N1)", () => {
+  const writes = `CREATE FUNCTION f() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO audit (id) VALUES (NEW.id); RETURN NULL; END; $$;`;
+  const overload = `CREATE FUNCTION f(x int) RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_notify('chan', ''); RETURN NULL; END; $$;`;
+  const trig = `CREATE TRIGGER t AFTER UPDATE ON orders FOR EACH ROW EXECUTE FUNCTION f();`;
+  const same = migrationEffects(`${writes}${overload}${trig}`);
+  assert.equal(same.effects.get("orders"), "*");
+  assert.deepEqual([...same.notifies], []);
+  const across = walkMigrations([{ name: "1", sql: writes }, { name: "2", sql: overload }, { name: "3", sql: trig }]);
+  assert.equal(across.get("3").effects.get("orders"), "*");
+  // Once overloaded, a later parameterless notify-only definition does not clear it.
+  const later = walkMigrations([{ name: "1", sql: overload }, { name: "2", sql: NOTIFY.replace(/screen_notify/g, "f") }, { name: "3", sql: trig }]);
+  assert.equal(later.get("3").effects.get("orders"), "*");
+  // A function returning something else is not a trigger function either.
+  const notTrigger = `CREATE FUNCTION g() RETURNS void LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_notify('chan', ''); END; $$;`;
+  assert.equal(migrationEffects(`${notTrigger}CREATE TRIGGER t AFTER UPDATE ON orders FOR EACH ROW EXECUTE FUNCTION g();`).effects.get("orders"), "*");
+});

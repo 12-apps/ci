@@ -121,3 +121,13 @@ test("COUNTEREXAMPLE: a step file (bracketed calls) with a star line stays unbra
   assert.equal(declarationsOf(steps, { calls: ["Given"] }), null);
   assert.deepEqual(declarationsOf('export * from "./model";\nexport const x = 1;\n').map((d) => d.name), ["x"]);
 });
+
+test("COUNTEREXAMPLE: a star line removed or retargeted in an edited barrel reaches its names' importers", () => {
+  // FUT-5471 review N4: the barrel's own re-export context changed.
+  const removed = plan(["src/index.ts"], { head: { "src/index.ts": INDEX.replace('export * from "./model";\n', "") } });
+  assert.ok(removed.tests.includes("src/alpha.test.ts") && removed.tests.includes("src/beta.test.ts"), removed.tests.join(","));
+  const retargeted = plan(["src/index.ts"], {
+    head: { "src/index.ts": INDEX.replace('"./model"', '"./model2"'), "src/model2.ts": MODEL },
+  });
+  assert.ok(retargeted.tests.includes("src/alpha.test.ts") && retargeted.tests.includes("src/beta.test.ts"), retargeted.tests.join(","));
+});
