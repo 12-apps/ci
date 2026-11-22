@@ -54,6 +54,20 @@ behavior-preserving. The cost of that correction needs a new consumer run.
    Computed imports are unbounded. Their owners and dependent tests run, and
    those closures cannot produce reusable per-test hashes.
 
+A literal dynamic `import()` inside a function body runs when the function
+runs, not when its module loads (FUT-5471). The change it can see — a name it
+reads, or the target's own load-time effect — taints that FUNCTION, and the
+rest of the file is reached only through the function's readers. The names are
+read from three shapes, `const { a } = await import("./x");`,
+`(await import("./x")).a` and `import("./x").then(({ a }) => …)`; a call that
+reads only names the change did not reach carries nothing, as `import { a }`
+would, and any other shape may read every export. The function must be an
+inert unit (a function declaration, or a `const` bound to an arrow). A
+top-level `import()`, one inside an initializer that calls something
+(`defineJob({ handle: async () => import(…) })`), and a function that
+load-time code calls stay load-time edges of the whole module.
+`dynamic-import-scope.test.mjs` pins each of them.
+
 Whole-statement `import type` / `export type` declarations are erased and are
 not runtime edges. Inline-only clauses such as `import { type Foo }` can still
 evaluate the target module (including under Node's TypeScript stripping), so

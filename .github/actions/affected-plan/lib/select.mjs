@@ -12,7 +12,7 @@ import { join } from "node:path";
 
 import { changedKeys, keyedUse, passesKeysThrough } from "./catalogs.mjs";
 import { boundOf, changedDeclarations, declarationsOf, reachableExports, spread, withinFile } from "./exports-dataflow.mjs";
-import { inertClass, inertDeclaration, isBuiltin, loadsCleanly, moduleExports, narrowModuleContext, typeOnlyEdit } from "./module-context.mjs";
+import { inertClass, inertDeclaration, isBuiltin, loadsCleanly, moduleExports, narrowModuleContext, topLevelUnits, typeOnlyEdit } from "./module-context.mjs";
 import { buildGraph, EXTENSIONS, listSourceFiles, loadPackages, scan } from "./modules.mjs";
 import { affectedExports, exportedSymbols, importsChanged } from "./symbols.mjs";
 
@@ -587,6 +587,14 @@ export function selectAffected(options) {
         }
         if (ordinary === null) continue;
 
+        const scoped = dynamicHop(file, source, record, ordinary, evaluationEffect);
+        if (scoped === "none") continue;
+        if (scoped !== null) {
+          const effectful = initializationMayObserve(source, scoped, calls);
+          mark(file, effectful ? "*" : reachableExports(source, scoped, { calls }), effectful, current, record);
+          continue;
+        }
+
         // Which of THIS file's exports can see what it just bound? Answering
         // "all of them" is what made hop two lose the precision hop one has, and
         // compounded it over every hop after (see exports-dataflow.mjs). Every
@@ -599,6 +607,48 @@ export function selectAffected(options) {
   };
   const via = new Map(); // file -> {from, line, text, spec}
   const keyed = new Map([...catalogKeys].map(([file, keys]) => [file, { keys, names: "*" }]));
+  const unitsCache = new Map();
+  const scopeCache = new Map();
+  /**
+   * The names of the top-level declaration whose BODY holds line `line` of
+   * `file` — a function, or a `const` bound to an arrow (an INERT unit,
+   * module-context.mjs): nothing inside it runs until it is called. Null when
+   * the line sits anywhere that may run at load (a top-level statement, an
+   * initializer that calls something), when the file cannot be cut into
+   * units, or when declarationsOf does not bracket the same names, since the
+   * walk below follows ITS references.
+   */
+  const deferredScope = (file, source, line) => {
+    const key = `${file}:${line}`;
+    if (scopeCache.has(key)) return scopeCache.get(key);
+    if (!unitsCache.has(file)) unitsCache.set(file, source == null ? null : topLevelUnits(source));
+    const unit = unitsCache.get(file)?.find((u) => u.from <= line - 1 && line - 1 <= u.to);
+    let names = null;
+    if (unit?.kind === "inert") {
+      const own = unit.names.filter((n) => n !== "default");
+      const bound = new Set((declarationsOf(source, { calls }) ?? []).flatMap(boundOf));
+      if (own.length > 0 && own.every((n) => bound.has(n))) names = own;
+    }
+    scopeCache.set(key, names);
+    return names;
+  };
+  /**
+   * What a hop over a literal dynamic `import()` carries (FUT-5471): `null`
+   * for the ordinary wildcard hop, `"none"` when it carries nothing, or the
+   * names of the declaration it belongs to.
+   *
+   * The call runs when its enclosing function runs, so a change it can see —
+   * a changed name it reads, or the target's own load-time effect — taints
+   * that FUNCTION, and reaches the rest of the file only through its readers.
+   * Load-time code that reads the function still widens, as any eager read
+   * does (initializationMayObserve). A call that reads only names the change
+   * did not reach carries nothing, exactly as `import { a }` would.
+   */
+  const dynamicHop = (file, source, record, ordinary, evaluationEffect) => {
+    if (!record.dynamic || record.glob || record.unbounded) return null;
+    if (!evaluationEffect && ordinary !== "*" && record.reads && !record.reads.some((n) => ordinary.has(n))) return "none";
+    return deferredScope(file, source, record.line);
+  };
   walk(affected, moduleEffects, via, [...affected.keys(), ...catalogKeys.keys()], keyed); // includes the blind files seeded above
 
   // ── deferred edges, resolved per test ────────────────────────────────────
