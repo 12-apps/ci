@@ -91,6 +91,10 @@ export function label(status: string) {
   "src/replay.test.ts": `import { replay } from "./template";\n`,
   "src/sql-text.test.ts": `import { readFileSync } from "node:fs";\nconst dir = "db/migrations/";\n`,
   "src/backfill.test.ts": `const file = "20260102000000_backfill";\n`,
+  // A listener of a notification channel (FUT-5471): it hears a write it never makes.
+  "src/order-feed.ts": `export function onOrders(listen: (channel: string) => void) {\n  listen("orders_changed");\n}\nexport const unrelatedFeed = () => 1;\n`,
+  "src/order-feed.test.ts": `import { onOrders } from "./order-feed";\n`,
+  "src/unrelated-feed.test.ts": `import { unrelatedFeed } from "./order-feed";\n`,
   "db/domains.json": JSON.stringify(REGISTRY),
   "db/schema/schema.prisma": SCHEMA,
   "db/migrations/20260101000000_init/migration.sql": `-- @domains: orders, tenancy
@@ -262,4 +266,40 @@ test("a tree whose file list outgrows 1 MiB still plans — git's output is not 
   const { code, doc, err } = plan(root, base);
   assert.equal(code, 0, err);
   assert.ok(doc.tests.includes("src/backfill.test.ts"));
+});
+
+// ── FUT-5471: a notify-only trigger charges no column; its listeners run ──────
+
+const NOTIFY_FN = `CREATE OR REPLACE FUNCTION orders_notify() RETURNS TRIGGER AS $$
+BEGIN
+  PERFORM pg_notify('orders_changed', coalesce(NEW."client_id", OLD."client_id"));
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+`;
+
+test("a notify-only trigger selects the channel's listeners — not every query of its table", () => {
+  const { root, base } = repo({
+    "db/migrations/20260102000000_notify/migration.sql": `-- @domains: orders
+${NOTIFY_FN}CREATE TRIGGER orders_changed AFTER INSERT OR UPDATE OR DELETE ON "orders" FOR EACH ROW EXECUTE FUNCTION orders_notify();
+`,
+  });
+  const { code, doc, err } = plan(root, base);
+  assert.equal(code, 0, err);
+  assert.deepEqual(doc.tests, ["src/order-feed.test.ts", "src/replay.test.ts", "src/sql-text.test.ts"]);
+  assert.equal(doc.tests.includes("src/orders.test.ts"), false, "listOrders reads orders; no row it reads or writes changed");
+  assert.match(err, /notify:orders_changed/);
+});
+
+test("COUNTEREXAMPLE: a trigger whose function writes a row still selects every query of its table", () => {
+  const writes = NOTIFY_FN.replace("RETURN NULL;", `UPDATE "clients" SET "name" = 'x' WHERE "id" = NEW."client_id";\n  RETURN NULL;`);
+  const { root, base } = repo({
+    "db/migrations/20260102000000_notify/migration.sql": `-- @domains: orders, tenancy
+${writes}CREATE TRIGGER orders_changed AFTER INSERT ON "orders" FOR EACH ROW EXECUTE FUNCTION orders_notify();
+`,
+  });
+  const { code, doc, err } = plan(root, base);
+  assert.equal(code, 0, err);
+  assert.ok(doc.tests.includes("src/orders.test.ts"), doc.tests.join(","));
+  assert.ok(doc.tests.includes("src/label.test.ts") === false);
 });

@@ -45,6 +45,12 @@ statement only READS — `REFERENCES clients(id)`, `UPDATE … FROM clients` —
 not changed by it, or every migration in a multi-tenant schema would have to
 declare the tenancy domain and the line would stop saying anything.
 
+A trigger ON a table changes it for the gate, whatever its function does. For
+test selection the effect is narrower when the parse can prove it: an AFTER
+trigger whose PL/pgSQL function only calls `pg_notify` with a literal channel
+(`notifyOnlyBody`) changes no column, and `migrationEffects` reports its
+channels in `notifies` so the selector can route them to their listeners.
+
 ## Registry
 
 ```json

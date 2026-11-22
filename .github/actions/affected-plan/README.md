@@ -389,6 +389,22 @@ matches one is not consulted. For each path it asks what the change DOES:
    `-- @domains:` declaration covers: every declared-domain table the parse did
    not see counts as `*`, table by table. A migration with no valid declaration is left UNROUTED — so it
    is unclassified and the plan stops, the same verdict the gate gives it.
+
+   A trigger is the whole table, except two: `AFTER UPDATE OF cols` is those
+   columns, and an AFTER trigger whose function only NOTIFIES charges no
+   column at all (FUT-5471). Its channels are routed instead: every source
+   file naming one, attributed to the declarations holding the name, since a
+   listener is what hears the write now. "Only notifies" is an allowlist read
+   from the function's PL/pgSQL body, defined in the same migration or an
+   earlier one: locals, branches, `SELECT … INTO` reads, `RETURN`, `PERFORM
+   pg_notify('<literal>', …)`, and calls that only build a value (`to_jsonb`,
+   `coalesce`, `format`, …), also in the trigger's `WHEN`. A write, a
+   `RAISE`, `INTO STRICT`, a bare `SELECT`, a row lock, a loop, dynamic SQL,
+   any other call, a computed channel, a BEFORE or INSTEAD OF trigger, or a
+   body that notifies nothing keeps the whole table. Not covered: a
+   notification that raises at run time (an 8000-byte payload, a column the
+   function names and the table lacks) aborts the write; the replay suite in
+   `always` and the daily full suite are the backstop.
 2. **A schema file** is diffed block by block: changed models, and inside each
    the changed fields (`@@unique`/`@@index` name theirs; `@@map`/`@@id`, or an
    added or removed model, are the whole table). A `generator`/`datasource`

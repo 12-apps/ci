@@ -32,7 +32,9 @@
  *                every INSERT must now supply, anything not parsed precisely
  *   `Set(cols)`  only these columns: values rewritten, a column added with a
  *                default, a constraint over them
- *   `Set()`      nothing observable: a COMMENT, a non-unique index
+ *   `Set()`      nothing observable: a COMMENT, a non-unique index, an AFTER
+ *                trigger whose function only notifies (its channels are in
+ *                `notifies`, for the caller to route to their listeners)
  *
  * Every uncertainty answers `"*"`. The failure this must never produce is a
  * narrow answer the SQL did not earn.
@@ -243,7 +245,9 @@ const COMMENT = RX(String.raw`\bCOMMENT\s+ON\s+(TABLE|COLUMN)\s+(${IDENT})`);
 const CREATE_INDEX = RX(String.raw`\bCREATE\s+(UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(?:(${NAME})\s+)?ON\s+(?:ONLY\s+)?(${IDENT})`);
 const DROP_INDEX = RX(String.raw`\bDROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?(${IDENT}(?:\s*,\s*${IDENT})*)`);
 const ALTER_INDEX = RX(String.raw`\bALTER\s+INDEX\s+(?:IF\s+EXISTS\s+)?(${IDENT})\s+RENAME\s+TO\s+(${NAME})`);
-const CREATE_TRIGGER = RX(String.raw`\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\s+${NAME}\s+(?:BEFORE|AFTER|INSTEAD\s+OF)\s+([\s\S]*?)\bON\s+(${IDENT})`);
+const CREATE_TRIGGER = RX(String.raw`\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\s+${NAME}\s+(BEFORE|AFTER|INSTEAD\s+OF)\s+([\s\S]*?)\bON\s+(${IDENT})`);
+const TRIGGER_FUNCTION = RX(String.raw`\bEXECUTE\s+(?:FUNCTION|PROCEDURE)\s+(${IDENT})\s*\(`);
+const CREATE_FUNCTION = RX(String.raw`^\s*CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(${IDENT})\s*\(`);
 const DROP_TRIGGER = RX(String.raw`\bDROP\s+TRIGGER\s+(?:IF\s+EXISTS\s+)?${NAME}\s+ON\s+(${IDENT})`);
 const INSERT = RX(String.raw`\bINSERT\s+INTO\s+(${IDENT})`);
 const DELETE = RX(String.raw`\bDELETE\s+FROM\s+(?:ONLY\s+)?(${IDENT})`);
@@ -288,6 +292,12 @@ export function migrationEffects(sql, state = {}) {
   const text = stripSql(sql);
   const effects = new Map();
   const unresolved = [];
+  // Trigger functions by name: what each one notifies, or null when it may do
+  // more. The last definition is the one a trigger runs, so this migration's
+  // own definitions are read before its triggers and replace earlier ones.
+  const functions = state.functions ?? new Map();
+  for (const { name, notifyOnly } of functionDefinitions(sql)) functions.set(name, notifyOnly);
+  const notifies = new Set();
 
   /** Merge an effect into the running answer — `"*"` absorbs everything. */
   const mark = (table, effect) => {
@@ -361,10 +371,24 @@ export function migrationEffects(sql, state = {}) {
       continue;
     }
     if ((m = CREATE_TRIGGER.exec(statement))) {
+      const table = normalizeIdent(m[3]);
+      // An AFTER trigger whose function only notifies (FUT-5471) changes no
+      // row and no outcome of the write that fired it: no column, and its
+      // channels go to the caller, whose listeners are what can observe it.
+      // A `WHEN (…)` condition runs as the trigger fires: pure calls only.
+      const tail = statement.slice(m.index + m[0].length);
+      const fn = TRIGGER_FUNCTION.exec(tail);
+      const when = fn ? tail.slice(0, fn.index) : "";
+      const told = /^AFTER$/i.test(m[1]) && fn && onlyPureCalls(when) ? functions.get(normalizeIdent(fn[1])) : null;
+      if (told) {
+        mark(table, new Set());
+        for (const channel of told.channels) notifies.add(channel);
+        continue;
+      }
       // `AFTER UPDATE OF a, b ON t` fires only when code writes a or b; any
       // INSERT or DELETE event, or a bare UPDATE, fires on every write.
-      const only = /^UPDATE\s+OF\s+([\s\S]+?)\s*$/i.exec(m[1].trim());
-      mark(normalizeIdent(m[2]), only ? new Set(topLevel(only[1]).map(normalizeIdent)) : "*");
+      const only = /^UPDATE\s+OF\s+([\s\S]+?)\s*$/i.exec(m[2].trim());
+      mark(table, only ? new Set(topLevel(only[1]).map(normalizeIdent)) : "*");
       continue;
     }
     if ((m = DROP_TRIGGER.exec(statement))) {
@@ -415,7 +439,144 @@ export function migrationEffects(sql, state = {}) {
     }
   }
 
-  return { effects, touched: new Set(effects.keys()), dynamic: DYNAMIC.test(text), unresolved };
+  return { effects, touched: new Set(effects.keys()), dynamic: DYNAMIC.test(text), unresolved, notifies };
+}
+
+/**
+ * The top-level statements of raw SQL, each as its `head` — the text outside
+ * dollar-quoted bodies, comments removed and single-quoted literals emptied —
+ * and its dollar-quoted `bodies`, raw. Separated on `;` outside every quote.
+ */
+function rawStatements(sql) {
+  const out = [];
+  let head = "";
+  let bodies = [];
+  let i = 0;
+  while (i < sql.length) {
+    const c = sql[i];
+    if (c === ";") {
+      out.push({ head, bodies });
+      head = "";
+      bodies = [];
+      i += 1;
+      continue;
+    }
+    const tag = c === "$" ? /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i, i + 64)) : null;
+    if (tag) {
+      const close = sql.indexOf(tag[0], i + tag[0].length);
+      bodies.push(sql.slice(i + tag[0].length, close === -1 ? sql.length : close));
+      head += " $$ ";
+      i = close === -1 ? sql.length : close + tag[0].length;
+      continue;
+    }
+    // Comments and literals, read as stripSql reads them.
+    if ((c === "-" && sql[i + 1] === "-") || (c === "/" && sql[i + 1] === "*")) {
+      const close = c === "-" ? sql.indexOf("\n", i) : sql.indexOf("*/", i + 2);
+      head += " ";
+      i = close === -1 ? sql.length : close + (c === "-" ? 0 : 2);
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      const escaped = c === "'" && i > 0 && /[eE]/.test(sql[i - 1]) && (i < 2 || !/[\w$]/.test(sql[i - 2]));
+      let j = i + 1;
+      while (j < sql.length) {
+        if (escaped && sql[j] === "\\") j += 2;
+        else if (sql[j] === c && sql[j + 1] === c) j += 2;
+        else if (sql[j] === c) break;
+        else j += 1;
+      }
+      head += c === "'" ? "''" : sql.slice(i, j + 1);
+      i = j + 1;
+      continue;
+    }
+    head += c;
+    i += 1;
+  }
+  if (head.trim() || bodies.length) out.push({ head, bodies });
+  return out;
+}
+
+/** Calls a notify-only trigger function may make: they read or build values, never write. */
+const PURE_CALLS = new Set([
+  "pg_notify", "to_json", "to_jsonb", "row_to_json", "json_build_object", "jsonb_build_object",
+  "json_build_array", "jsonb_build_array", "jsonb_strip_nulls", "json_strip_nulls",
+  "coalesce", "nullif", "greatest", "least", "concat", "concat_ws", "format", "lower", "upper",
+  "trim", "btrim", "ltrim", "rtrim", "substring", "substr", "left", "right", "length", "char_length",
+  "replace", "split_part", "strpos", "md5", "now", "clock_timestamp", "statement_timestamp",
+  "transaction_timestamp", "extract", "date_trunc", "array_to_string", "array_length", "cardinality",
+]);
+/** Words a `(` may follow without being a call. */
+const PAREN_WORDS = new Set([
+  "if", "elsif", "and", "or", "not", "in", "any", "all", "some", "exists", "from", "when", "then", "else",
+  "return", "select", "where", "on", "using", "distinct", "case", "is", "like", "ilike", "between",
+  "array", "row", "cast", "values", "join", "by", "having", "as", "with",
+]);
+/**
+ * Statements that write, raise, lock, loop or run SQL this cannot read —
+ * `STRICT` too, since `SELECT … INTO STRICT` raises when no row matches.
+ */
+const NOT_NOTIFY = /\b(?:INSERT|UPDATE|DELETE|TRUNCATE|MERGE|EXECUTE|CALL|RAISE|ASSERT|COPY|LOCK|ALTER|CREATE|DROP|GRANT|REVOKE|COMMIT|ROLLBACK|SAVEPOINT|LOOP|WHILE|FOR|FOREACH|LISTEN|UNLISTEN|NEXTVAL|SETVAL|STRICT)\b/i;
+
+/**
+ * What a PL/pgSQL trigger function body notifies, when telling listeners is
+ * ALL it does (FUT-5471): `{ channels }`, or null.
+ *
+ * An allowlist, never a guess. The body may declare and assign locals,
+ * branch, read with `SELECT … INTO`, return, and `PERFORM pg_notify('<literal>',
+ * …)`. Every call must be a builtin that only builds a value (PURE_CALLS); a
+ * write, a RAISE (it aborts the write that fired the trigger), a row lock,
+ * a loop, dynamic SQL, a `SELECT` with no `INTO` (PL/pgSQL raises on it) or
+ * any other call answers null. So does a channel that is not a literal: its
+ * listeners cannot be found by name.
+ */
+/** Does every call in stripped `code` build a value and nothing else (PURE_CALLS)? */
+function onlyPureCalls(code) {
+  if (/"\s*\(/.test(code)) return false;
+  for (const m of code.matchAll(/([A-Za-z_][A-Za-z0-9_$]*)\s*\(/g)) {
+    const before = code.slice(0, m.index);
+    const qualified = /\.\s*$/.test(before) && !/\bpg_catalog\s*\.\s*$/i.test(before);
+    if (qualified || !(PURE_CALLS.has(m[1].toLowerCase()) || PAREN_WORDS.has(m[1].toLowerCase()))) return false;
+  }
+  return true;
+}
+
+export function notifyOnlyBody(body) {
+  const code = stripSql(body);
+  if (NOT_NOTIFY.test(code) || !onlyPureCalls(code)) return null;
+  // A statement-level SELECT (not a subquery's, which follows a `(`) needs its INTO.
+  for (const m of code.matchAll(/\bSELECT\b/gi)) {
+    if (/\(\s*$/.test(code.slice(0, m.index))) continue;
+    const rest = code.slice(m.index);
+    const end = rest.indexOf(";");
+    if (!/\bINTO\b/i.test(end === -1 ? rest : rest.slice(0, end))) return null;
+  }
+  // PERFORM evaluates a query for its effect: only a notification's.
+  if ([...code.matchAll(/\bPERFORM\b/gi)].some((m) => !/^\s*(?:pg_catalog\s*\.\s*)?pg_notify\s*\(/i.test(code.slice(m.index + m[0].length)))) return null;
+  // Each channel a literal: emptied to '' in `code`, read back from the raw body.
+  // At least one: a body that notifies nothing is not this case (most such
+  // bodies assign `NEW.col` for a BEFORE trigger, which this never narrows).
+  const calls = [...code.matchAll(/\bpg_notify\s*\(/gi)];
+  if (calls.length === 0 || calls.some((m) => !/^\s*''\s*,/.test(code.slice(m.index + m[0].length)))) return null;
+  const channels = new Set([...body.matchAll(/\bpg_notify\s*\(\s*'((?:[^']|'')*)'\s*,/gi)].map((m) => m[1].replace(/''/g, "'")));
+  return channels.size > 0 ? { channels } : null;
+}
+
+/**
+ * Every `CREATE [OR REPLACE] FUNCTION` of a migration, in order, with what it
+ * notifies when it only notifies (`notifyOnly`, else null). Only one body in
+ * dollar quotes, in `plpgsql` (the language a SQL trigger function is written
+ * in), is read; anything else is null.
+ */
+export function functionDefinitions(sql) {
+  const out = [];
+  for (const { head, bodies } of rawStatements(sql)) {
+    const m = CREATE_FUNCTION.exec(head);
+    if (!m) continue;
+    const language = /\bLANGUAGE\s+([A-Za-z_]+)/i.exec(head)?.[1]?.toLowerCase();
+    const readable = bodies.length === 1 && language === "plpgsql";
+    out.push({ name: normalizeIdent(m[1]), notifyOnly: readable ? notifyOnlyBody(bodies[0]) : null });
+  }
+  return out;
 }
 
 /**
@@ -593,6 +754,7 @@ export function walkMigrations(migrations, options = {}) {
     columns: new Map(),
     columnsOf: options.columnsOf ?? (() => null),
     tables: new Set(options.tables ?? []),
+    functions: new Map(),
   };
   const out = new Map();
   for (const { name, sql } of migrations) out.set(name, migrationEffects(sql, state));

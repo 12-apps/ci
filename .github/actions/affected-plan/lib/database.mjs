@@ -309,6 +309,21 @@ export function databaseRoutes(options) {
     return entriesForMatches({ files: sourceFiles, textOf, isTest, specs, cache: scanCache });
   };
 
+  /**
+   * The code that can hear a notification channel: every source file naming
+   * it, attributed to the declarations holding the name (FUT-5471). A
+   * notify-only trigger changes no row, so its table charges nothing; what a
+   * new one changes is that its listeners now hear a write.
+   */
+  const listeners = (channels) => {
+    if (channels.size === 0) return [];
+    const specs = [...channels].map((channel) => ({
+      re: /^[A-Za-z0-9_]+$/.test(channel) ? new RegExp(String.raw`\b${channel}\b`) : new RegExp(`(?<![\\w$])${escape(channel)}(?![\\w$])`),
+      mentionRe: null,
+    }));
+    return entriesForMatches({ files: sourceFiles, textOf, isTest, specs, cache: scanCache });
+  };
+
   /** Merge table effects into model-keyed targets. */
   const addTableEffect = (targets, table, effect) => {
     const model = tableModel.get(table);
@@ -349,6 +364,7 @@ export function databaseRoutes(options) {
         anyChange = true;
         const targets = new Map();
         const seen = new Set();
+        const channels = new Set();
         let blind = false;
         const sides = [];
         if (head !== null) sides.push(headEffects(file) ?? migrationEffects(head, { columnsOf }));
@@ -361,6 +377,8 @@ export function databaseRoutes(options) {
             seen.add(table);
             addTableEffect(targets, table, effect);
           }
+          // A notify-only trigger, added or removed: its listeners, not its table.
+          for (const channel of side.notifies ?? []) channels.add(channel);
         }
         // What the parse could not see, the declaration covers — table by
         // table. Seeing ONE table of a domain says nothing about the others:
@@ -370,9 +388,12 @@ export function databaseRoutes(options) {
           for (const d of declaration.domains)
             for (const t of registry.domains.get(d)?.tables ?? []) if (!seen.has(t)) addTableEffect(targets, t, "*");
         for (const e of scan(targets)) entries.add(e);
+        for (const e of listeners(channels)) entries.add(e);
         why.push(
-          [...targets].map(([k, v]) => `${models.get(k)?.table ?? k.replace(/^table:/, "")}:${v === "*" ? "*" : [...v].join("|")}`).join(" ") ||
-            "no observable effect",
+          [
+            ...[...targets].map(([k, v]) => `${models.get(k)?.table ?? k.replace(/^table:/, "")}:${v === "*" ? "*" : [...v].join("|")}`),
+            ...[...channels].map((c) => `notify:${c}`),
+          ].join(" ") || "no observable effect",
         );
       }
     } else {
