@@ -81,7 +81,8 @@ export function schemaModels(texts) {
  *
  * @returns {"*" | Set<string>}  the changed field names, or `"*"` when a
  *   block-level attribute that reshapes the whole table moved (`@@map`, `@@id`,
- *   `@@schema`) or the model was added or removed.
+ *   `@@schema`) or the model was added or removed. An `@@index` line names no
+ *   field: it changes no read's result and no client surface.
  */
 export function changedFields(baseBody, headBody) {
   if (baseBody == null || headBody == null) return "*";
@@ -102,9 +103,13 @@ export function changedFields(baseBody, headBody) {
       out.add(key);
       continue;
     }
-    // `@@unique([a, b])` / `@@index([a, b])` constrain exactly those fields;
-    // anything else at block level reshapes the table.
-    const listed = /^@@(?:unique|index)\(\s*(?:fields\s*:\s*)?\[([^\]]*)\]/.exec(key);
+    // A non-unique `@@index` changes what a read COSTS, never what it returns,
+    // and is no part of the generated client — exactly what its migration's
+    // `CREATE INDEX` is already judged (sql.mjs): no field (FUT-5471).
+    if (/^@@index\(/.test(key)) continue;
+    // `@@unique([a, b])` constrains exactly those fields (and is client
+    // surface: `where: { a_b }`); anything else at block level reshapes the table.
+    const listed = /^@@unique\(\s*(?:fields\s*:\s*)?\[([^\]]*)\]/.exec(key);
     if (!listed) return "*";
     for (const f of listed[1].split(",")) out.add(f.replace(/\(.*$/, "").trim());
   }

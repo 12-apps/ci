@@ -303,3 +303,33 @@ ${writes}CREATE TRIGGER orders_changed AFTER INSERT ON "orders" FOR EACH ROW EXE
   assert.ok(doc.tests.includes("src/orders.test.ts"), doc.tests.join(","));
   assert.ok(doc.tests.includes("src/label.test.ts") === false);
 });
+
+// ── FUT-5471: an `@@index` line is as inert as the CREATE INDEX it stands for ──
+
+test("an @@index line added or removed selects nothing but the replay", () => {
+  const indexed = SCHEMA.replace('  @@map("orders")', '  @@index([clientId, status])\n  @@map("orders")');
+  const added = repo({ "db/schema/schema.prisma": indexed });
+  assert.deepEqual(plan(added.root, added.base).doc.tests, ["src/replay.test.ts"]);
+  const edited = repo({ "db/schema/schema.prisma": indexed.replace("@@index([clientId, status])", "@@index([clientId, status], map: \"orders_by_status\")") });
+  assert.deepEqual(plan(edited.root, edited.base).doc.tests, ["src/replay.test.ts"]);
+});
+
+test("COUNTEREXAMPLE: an @@unique line still charges its fields, and a column edit beside an index still counts", () => {
+  const unique = repo({ "db/schema/schema.prisma": SCHEMA.replace('  @@map("orders")', '  @@unique([clientId, status])\n  @@map("orders")') });
+  assert.ok(plan(unique.root, unique.base).doc.tests.includes("src/orders.test.ts"), "a compound unique is client surface (`where: { clientId_status }`)");
+  const both = repo({
+    "db/schema/schema.prisma": SCHEMA.replace('  @@map("orders")', '  @@index([status])\n  @@map("orders")')
+      .replace('clientId String @map("client_id")', 'clientId String @map("client_id") @default("")'),
+  });
+  assert.ok(plan(both.root, both.base).doc.tests.includes("src/orders.test.ts"));
+});
+
+test("changedFields: @@index lines name no field; @@unique and table-level attributes still do", async () => {
+  const { changedFields } = await import("../../migration-domains/lib/prisma-schema.mjs");
+  const body = "\n  id String @id\n  a  String\n  b  String\n";
+  assert.deepEqual([...changedFields(body, `${body}  @@index([a, b])\n`)], []);
+  assert.deepEqual([...changedFields(`${body}  @@index([a])\n`, body)], []);
+  assert.deepEqual([...changedFields(body, `${body}  @@unique([a, b])\n`)].sort(), ["a", "b"]);
+  assert.equal(changedFields(body, `${body}  @@id([a, b])\n`), "*");
+  assert.equal(changedFields(body, `${body}  @@fulltext([a])\n`), "*");
+});

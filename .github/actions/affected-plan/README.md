@@ -406,7 +406,8 @@ matches one is not consulted. For each path it asks what the change DOES:
    function names and the table lacks) aborts the write; the replay suite in
    `always` and the daily full suite are the backstop.
 2. **A schema file** is diffed block by block: changed models, and inside each
-   the changed fields (`@@unique`/`@@index` name theirs; `@@map`/`@@id`, or an
+   the changed fields (`@@unique` names its fields; an `@@index`, like the
+   `CREATE INDEX` it stands for, names none, FUT-5471; `@@map`/`@@id`, or an
    added or removed model, are the whole table). A `generator`/`datasource`
    change routes to `global`. Comment-only edits change nothing.
 3. **Where code touches it.** A table is reached through its Prisma delegate
