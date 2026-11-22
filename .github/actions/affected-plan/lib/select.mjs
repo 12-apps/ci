@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { changedKeys, keyedUse, passesKeysThrough } from "./catalogs.mjs";
-import { boundOf, changedDeclarations, declarationsOf, reachableExports, spread, withinFile } from "./exports-dataflow.mjs";
+import { boundOf, changedDeclarations, declarationsOf, exportedNames, reachableExports, spread, withinFile } from "./exports-dataflow.mjs";
 import { inertClass, inertDeclaration, isBuiltin, loadsCleanly, moduleExports, narrowModuleContext, topLevelUnits, typeOnlyEdit } from "./module-context.mjs";
 import { buildGraph, EXTENSIONS, listSourceFiles, loadPackages, scan } from "./modules.mjs";
 import { affectedExports, exportedSymbols, importsChanged } from "./symbols.mjs";
@@ -51,7 +51,7 @@ function keyedExports(source, hot, calls) {
   const decls = declarationsOf(source, { calls });
   if (decls === null || !decls.some((d) => d.exported || d.call)) return "*";
   const reach = spread(decls, hot);
-  return new Set(decls.filter((d) => (d.exported || d.call) && reach.has(d.name)).flatMap(boundOf));
+  return exportedNames(decls, reach);
 }
 
 /**

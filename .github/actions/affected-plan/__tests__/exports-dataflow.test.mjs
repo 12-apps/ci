@@ -178,3 +178,10 @@ test("a declaration continued on the next line is not closed by it", () => {
   const src = ['import { dep } from "./dep";', "export const handler =", "  async function handle(req) { return dep(req); };"].join("\n");
   assert.deepEqual(reach(src, ["dep"]), ["handler"]);
 });
+
+test("a hot local exported under an alias is reported by the alias (FUT-5471 review B1)", () => {
+  const out = reach('function load(){return x}\nexport { load as go };\n', ["x"]);
+  assert.ok(out.includes("go"), JSON.stringify(out));
+  assert.ok(reach('function load(){return x}\nexport {\n  load as go,\n};\n', ["x"]).includes("go"));
+  assert.deepEqual(reach('function load(){return x}\nfunction other(){return 1}\nexport { load as go, other };\n', ["y"]), []);
+});

@@ -143,3 +143,33 @@ test("parseImports records the names a dynamic import reads, and nothing when it
   // Every dynamic record stays a wildcard: callers that know nothing of `reads` keep the old reading.
   assert.equal(parseImports('async function f() {\n  const { a } = await import("./x");\n}\n')[0].wildcard, true);
 });
+
+test("an import() inside a function exported under an alias reaches the importers of the alias", () => {
+  // FUT-5471 review B1: the scoped hop marked the LOCAL name, and no importer binds `load`.
+  const go = { "src/go.test.ts": 'import { go } from "./aliased";\ngo();\n' };
+  const fn = 'async function load(): Promise<number> {\n  const { a } = await import("./target");\n  return a();\n}\nexport { load as go };\n';
+  assert.ok(plan(lazy("  return cache.size;"), TARGET_A, { extra: { "src/aliased.ts": fn, ...go } }).tests.includes("src/go.test.ts"));
+  const arrow = 'const load = async (): Promise<number> => {\n  const { a } = await import("./target");\n  return a();\n};\nexport { load as go };\n';
+  assert.ok(plan(lazy("  return cache.size;"), TARGET_A, { extra: { "src/aliased.ts": arrow, ...go } }).tests.includes("src/go.test.ts"));
+  const multiline = `${fn.replace("export { load as go };\n", "export {\n  load as go,\n};\n")}`;
+  assert.ok(plan(lazy("  return cache.size;"), TARGET_A, { extra: { "src/aliased.ts": multiline, ...go } }).tests.includes("src/go.test.ts"));
+});
+
+test("a STATIC import used in an aliased function reaches the importers of the alias too", () => {
+  // The same defect, older than FUT-5471: the ordinary hop lost the alias as well.
+  const source = 'import { a } from "./target";\nfunction load(): number {\n  return a();\n}\nexport { load as go };\n';
+  const result = plan(lazy("  return cache.size;"), TARGET_A, {
+    extra: { "src/aliased.ts": source, "src/go.test.ts": 'import { go } from "./aliased";\ngo();\n' },
+  });
+  assert.ok(result.tests.includes("src/go.test.ts"), result.tests.join(","));
+  // An imported binding re-exported under another name, with no declaration behind it.
+  const passOn = plan(lazy("  return cache.size;"), TARGET_A, {
+    extra: {
+      "src/pass-on.ts": 'import { a } from "./target";\nexport { a as renamed };\nexport const other = () => 1;\n',
+      "src/renamed.test.ts": 'import { renamed } from "./pass-on";\nrenamed();\n',
+      "src/other.test.ts": 'import { other } from "./pass-on";\nother();\n',
+    },
+  });
+  assert.ok(passOn.tests.includes("src/renamed.test.ts"), passOn.tests.join(","));
+  assert.equal(passOn.tests.includes("src/other.test.ts"), false);
+});
