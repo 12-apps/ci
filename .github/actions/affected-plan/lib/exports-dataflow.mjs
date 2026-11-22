@@ -21,7 +21,9 @@
  *
  *   - a file with a top-level statement that is neither an import nor a
  *     declaration — module side effects can touch anything;
- *   - `export * from` — the names are not in this file to bracket;
+ *   - `export * from` in a step file (bracketed calls). Elsewhere a star line
+ *     is no declaration: the selector carries the target's changed names
+ *     through it itself (select.mjs, FUT-5471);
  *   - a file the graph reached BY NAME in which no export can be found, which
  *     means the bracketing failed rather than that the file exports nothing.
  *
@@ -165,8 +167,17 @@ export function declarationsOf(source, { calls = [] } = {}) {
         }
         continue;
       }
-      // `export * from` — the names are not here to bracket. Widen.
-      if (EXPORT_STAR.test(line)) return null;
+      // `export * from` binds no local name and runs no code here, so it is no
+      // declaration (FUT-5471). The names it forwards are not in this file;
+      // the selector carries a change through a star line by the TARGET's
+      // changed names (select.mjs), never through this bracketing, so a file
+      // holding one still brackets its other declarations. A step file
+      // (bracketed calls) keeps refusing: a star line there loads definitions
+      // that bracketing cannot see.
+      if (EXPORT_STAR.test(line)) {
+        if (callRe) return null;
+        continue;
+      }
 
       if (IMPORT_LINE.test(line)) {
         depth = Math.max(0, depth + opens - closes);

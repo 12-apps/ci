@@ -68,6 +68,17 @@ top-level `import()`, one inside an initializer that calls something
 load-time code calls stay load-time edges of the whole module.
 `dynamic-import-scope.test.mjs` pins each of them.
 
+`export * from "./x"` binds no local name and runs nothing of its own, so the
+barrel forwards exactly the names that changed behind it, and its importers are
+reached by those names (FUT-5471). A file holding a star line still brackets
+its other declarations: a named re-export or a local function beside it
+narrows as anywhere else. Before, one star line made the whole barrel `*` with
+a load-time effect, so a change to any export behind a package entry reached
+every importer of the package. The target's own load-time effect still
+crosses the barrel whole, a namespace import of it is still reached by any
+change, `export * as ns` keeps the wide reading, and a step file (bracketed
+calls) still refuses a star line (`export-star.test.mjs`).
+
 Whole-statement `import type` / `export type` declarations are erased and are
 not runtime edges. Inline-only clauses such as `import { type Foo }` can still
 evaluate the target module (including under Node's TypeScript stripping), so

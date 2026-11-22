@@ -19,6 +19,10 @@ import { affectedExports, exportedSymbols, importsChanged } from "./symbols.mjs"
 /** Everything selected, with the reason chain for each test. */
 export const FULL = "full";
 
+/** `export * from "./x"` — never `export * as ns`, which binds a name. */
+const isStarReexport = (record) =>
+  !record.dynamic && !record.typeOnly && /^export\b/.test(record.statement ?? "") && /^\s*\*\s*$/.test(record.clause ?? "");
+
 /** Does an import record reach any of `symbols`? */
 function importReaches(record, symbols) {
   if (symbols === "*" || record.wildcard) return true;
@@ -586,6 +590,15 @@ export function selectAffected(options) {
           }
         }
         if (ordinary === null) continue;
+
+        // `export * from` binds no local and runs nothing of its own: the
+        // barrel forwards exactly the names that changed behind it (FUT-5471).
+        // The target's load-time effect is `evaluationEffect`, which takes the
+        // ordinary hop below and still crosses the barrel whole.
+        if (!evaluationEffect && isStarReexport(record)) {
+          mark(file, ordinary, false, current, record);
+          continue;
+        }
 
         const scoped = dynamicHop(file, source, record, ordinary, evaluationEffect);
         if (scoped === "none") continue;
