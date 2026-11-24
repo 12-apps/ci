@@ -286,7 +286,10 @@ jobs:
   # reusable workflow's overall result.
   static-gates:
     name: Static Gates
-    runs-on: ${{ inputs.medium-runner || vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Not on the medium pool (owner, 2026-11-24, FUT-5383): with jscpd and knip
+    # in the background this job peaks at ~12 GB total (85% of a 14.1 GB main
+    # slot, future-pay job 138815193842), more than a medium slot is sized for.
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
     # GitHub's six-hour default; see job-timeouts.test.mjs.
     timeout-minutes: ${{ inputs.static-gates-timeout-minutes }}
