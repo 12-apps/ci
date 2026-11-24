@@ -27,7 +27,9 @@ import { declaredInputs } from "./declared-inputs.test.mjs";
 export const MEDIUM_JOBS = new Map([
   // Lint: p95 4.0 cores and 4.4 GiB on 2026-11-10/11, so not the light class.
   ["monorepo-static.yml", ["lint", "retry-gate"]],
-  ["quality.yml", ["static-gates", "e2e-reliability"]],
+  // Static Gates left the class (owner, 2026-11-24, FUT-5383): with its gates in
+  // the background it peaks at ~12 GB total, more than a medium slot holds.
+  ["quality.yml", ["e2e-reliability"]],
   ["nextjs-prod-smoke.yml", ["smoke"]],
   ["cd.yml", ["build-images"]],
   // A consumer's seed-order / Repository gates caller: p95 3.5 cores and
