@@ -308,6 +308,41 @@ jobs:
         run: |
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
+      # The two longest gates run in the BACKGROUND while the gates below run
+      # in the foreground (FUT-5383). They used to run one after another, each
+      # on about one core of a 4-vCPU slot: on future-pay jscpd took 105 s,
+      # knip 66 s and complexity 48 s at the p50, and the job averaged 1.2-1.5
+      # cores. Their own steps further down keep their names: each one waits
+      # for its process, prints its whole log and exits with its exit code, so
+      # a red gate still names itself in the job's step list. The log files
+      # keep their old names (jscpd.log, knip.log).
+      #
+      # A process that dies without writing its exit code (killed from outside)
+      # fails its step with a message rather than hanging: the wait polls the
+      # PID too. The job's own timeout still bounds a real hang.
+      - name: Start jscpd and knip in the background
+        id: background
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        shell: bash
+        env:
+          RUN_KNIP: ${{ inputs.run-knip }}
+        run: |
+          set -o pipefail
+          start() { # start <gate> <command…>: <gate>.log, <gate>.exit, <gate>.pid
+            local gate="$1"; shift
+            rm -f "$gate.exit" "$gate.exit.tmp"
+            # Its own stdio is detached so the step can end while it runs.
+            # `shell: bash` runs with -e, which a subshell inherits: without the
+            # `|| rc=$?` a failing gate would end the subshell before it writes
+            # its exit code (seen on future-pay#5407, job 136070789963).
+            ( rc=0; "$@" > "$gate.log" 2>&1 || rc=$?
+              echo "$rc" > "$gate.exit.tmp"; mv "$gate.exit.tmp" "$gate.exit" ) \
+              < /dev/null > /dev/null 2>&1 &
+            echo $! > "$gate.pid"
+            echo "started $gate (pid $!): $*"
+          }
+          start jscpd pnpm quality:dup
+          if [ "$RUN_KNIP" = "true" ]; then start knip pnpm quality:knip; fi
       - name: Complexity gate (size/complexity on source)
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         shell: bash
@@ -352,24 +387,42 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
           targets: ${{ inputs.flakiness-targets }}
+      # Started in the background above; this step waits for it (FUT-5383).
       - name: Copy-paste detection (jscpd)
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.background.outcome == 'success' }}
         shell: bash
         run: |
           set -o pipefail
-          pnpm quality:dup 2>&1 | tee jscpd.log
+          gate=jscpd
+          pid=$(cat "$gate.pid")
+          while [ ! -f "$gate.exit" ] && kill -0 "$pid" 2>/dev/null; do sleep 1; done
+          cat "$gate.log"
+          if [ ! -f "$gate.exit" ]; then
+            echo "::error::$gate ended without writing its exit code (pid $pid)"
+            exit 1
+          fi
+          exit "$(cat "$gate.exit")"
       - name: Validate flaky-quarantine.json
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         shell: bash
         run: |
           set -o pipefail
           pnpm quality:quarantine 2>&1 | tee quarantine.log
+      # Started in the background above; this step waits for it (FUT-5383).
       - name: Unused files/exports/deps (knip)
-        if: ${{ !cancelled() && steps.install.outcome == 'success' && inputs.run-knip }}
+        if: ${{ !cancelled() && steps.background.outcome == 'success' && inputs.run-knip }}
         shell: bash
         run: |
           set -o pipefail
-          pnpm quality:knip 2>&1 | tee knip.log
+          gate=knip
+          pid=$(cat "$gate.pid")
+          while [ ! -f "$gate.exit" ] && kill -0 "$pid" 2>/dev/null; do sleep 1; done
+          cat "$gate.log"
+          if [ ! -f "$gate.exit" ]; then
+            echo "::error::$gate ended without writing its exit code (pid $pid)"
+            exit 1
+          fi
+          exit "$(cat "$gate.exit")"
       # DataViews backend-only ratchet (opt-in): lists rendered with the shared
       # DataViews panel must be server-driven. Client-mode consumers are
       # grandfathered in the repo's exceptions file and the list can only
