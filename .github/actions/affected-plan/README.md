@@ -54,6 +54,34 @@ behavior-preserving. The cost of that correction needs a new consumer run.
    Computed imports are unbounded. Their owners and dependent tests run, and
    those closures cannot produce reusable per-test hashes.
 
+A literal dynamic `import()` inside a function body runs when the function
+runs, not when its module loads (FUT-5471). The change it can see — a name it
+reads, or the target's own load-time effect — taints that FUNCTION, and the
+rest of the file is reached only through the function's readers. The names are
+read from three shapes, `const { a } = await import("./x");`,
+`(await import("./x")).a` and `import("./x").then(({ a }) => …)`; a call that
+reads only names the change did not reach carries nothing, as `import { a }`
+would, and any other shape may read every export. The function must be an
+inert unit (a function declaration, or a `const` bound to an arrow). A
+top-level `import()`, one inside an initializer that calls something
+(`defineJob({ handle: async () => import(…) })`), and a function that
+load-time code calls stay load-time edges of the whole module.
+`dynamic-import-scope.test.mjs` pins each of them. Whatever carries a change
+into a declaration, the file reports it under every name an importer can bind,
+including an alias from a local `export { load as go }` list (one line or
+several), which the walk used to lose for static imports as well.
+
+`export * from "./x"` binds no local name and runs nothing of its own, so the
+barrel forwards exactly the names that changed behind it, and its importers are
+reached by those names (FUT-5471). A file holding a star line still brackets
+its other declarations: a named re-export or a local function beside it
+narrows as anywhere else. Before, one star line made the whole barrel `*` with
+a load-time effect, so a change to any export behind a package entry reached
+every importer of the package. The target's own load-time effect still
+crosses the barrel whole, a namespace import of it is still reached by any
+change, `export * as ns` keeps the wide reading, and a step file (bracketed
+calls) still refuses a star line (`export-star.test.mjs`).
+
 Whole-statement `import type` / `export type` declarations are erased and are
 not runtime edges. Inline-only clauses such as `import { type Foo }` can still
 evaluate the target module (including under Node's TypeScript stripping), so
@@ -364,8 +392,27 @@ matches one is not consulted. For each path it asks what the change DOES:
    `-- @domains:` declaration covers: every declared-domain table the parse did
    not see counts as `*`, table by table. A migration with no valid declaration is left UNROUTED — so it
    is unclassified and the plan stops, the same verdict the gate gives it.
+
+   A trigger is the whole table, except two: `AFTER UPDATE OF cols` is those
+   columns, and an AFTER trigger whose function only NOTIFIES charges no
+   column at all (FUT-5471). Its channels are routed instead: every source
+   file naming one, attributed to the declarations holding the name, since a
+   listener is what hears the write now. "Only notifies" is an allowlist read
+   from the function's PL/pgSQL body, defined in the same migration or an
+   earlier one: locals, branches, `SELECT … INTO` reads, `RETURN`, `PERFORM
+   pg_notify('<literal>', …)`, and calls that only build a value (`to_jsonb`,
+   `coalesce`, `format`, …), also in the trigger's `WHEN`. A write, a
+   `RAISE`, `INTO STRICT`, a bare `SELECT`, a row lock, a loop, dynamic SQL,
+   any other call, a computed channel, a BEFORE or INSTEAD OF trigger, or a
+   body that notifies nothing keeps the whole table. Not covered: a listener
+   is found only by the channel's LITERAL name, so one that builds it at run
+   time (`` `store_${kind}_changed` ``, a constant assembled from parts) is
+   not selected; and a notification that raises at run time (an 8000-byte payload, a column the
+   function names and the table lacks) aborts the write; the replay suite in
+   `always` and the daily full suite are the backstop.
 2. **A schema file** is diffed block by block: changed models, and inside each
-   the changed fields (`@@unique`/`@@index` name theirs; `@@map`/`@@id`, or an
+   the changed fields (`@@unique` names its fields; an `@@index`, like the
+   `CREATE INDEX` it stands for, names none, FUT-5471; `@@map`/`@@id`, or an
    added or removed model, are the whole table). A `generator`/`datasource`
    change routes to `global`. Comment-only edits change nothing.
 3. **Where code touches it.** A table is reached through its Prisma delegate

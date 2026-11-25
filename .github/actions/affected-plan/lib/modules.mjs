@@ -354,7 +354,11 @@ export function parseImports(rawSource) {
       // `declaredImports` entry must name exactly (FUT-4564).
       out[out.length - 1].expression = callArgument(source, m.index + m[0].length);
     }
-    else if (m[1] === "import") Object.assign(out[out.length - 1], deferringCall(masked, m.index));
+    else if (m[1] === "import") {
+      Object.assign(out[out.length - 1], deferringCall(masked, m.index));
+      const reads = dynamicReads(masked, m.index, m.index + m[0].length + literal[0].length);
+      if (reads) out[out.length - 1].reads = reads;
+    }
   }
   for (const m of inCode(GLOB_ACCESS)) {
     const glob = m[0].endsWith("glob") ? globArguments(source.slice(m.index + m[0].length)) : null;
@@ -407,6 +411,61 @@ function deferringCall(masked, index) {
   if (!wrapper) return {};
   const binding = /(?:const|let|var)\s+([\w$]+)\s*=\s*[\w$]+\s*$/.exec(before)?.[1];
   return { wrapper, ...(binding ? { binding } : {}) };
+}
+
+/** `const { a, b: c } = await import(…)` — the pattern, up to the call. */
+const AWAITED_PATTERN = /(?:^|[^\w$.])(?:const|let|var)\s*\{([^{}]*)\}\s*=\s*await\s*$/;
+/** `.then(({ a }) => …)` straight after the call. */
+const THEN_PATTERN = /^\s*\.\s*then\s*\(\s*(?:async\s*)?\(\s*\{([^{}]*)\}\s*\)\s*=>/;
+
+/**
+ * The names a destructuring pattern takes from an object — `a, b: c, d = 1`
+ * takes a, b and d — or null when it takes anything this cannot name: a rest
+ * element, a computed or quoted key, a nested pattern, `default`.
+ */
+function patternKeys(text) {
+  const names = [];
+  for (const part of text.split(",")) {
+    const entry = part.trim();
+    if (!entry) continue;
+    const m = /^([A-Za-z_$][\w$]*)\s*(?::\s*[A-Za-z_$][\w$]*\s*)?(?:=[^=>][^]*)?$/.exec(entry);
+    if (!m || m[1] === "default") return null;
+    names.push(m[1]);
+  }
+  return names.length > 0 ? names : null;
+}
+
+/**
+ * The names a literal dynamic `import()` reads from the module it loads, when
+ * the call is written as one of three plain shapes (FUT-5471):
+ *
+ *   const { a, b: c } = await import("./x");
+ *   (await import("./x")).a
+ *   import("./x").then(({ a }) => …)
+ *
+ * Anything else — the namespace kept in a binding, a rest element, `default`,
+ * a statement with no `;` after the call (ASI may join the next line to it) —
+ * answers null: the call may read any export. Read from `masked`, so a quoted
+ * key is blank and refused. The record stays a wildcard either way; only the
+ * selector, which knows what `reads` means, narrows with it.
+ */
+function dynamicReads(masked, start, end) {
+  const before = masked.slice(Math.max(0, start - 400), start);
+  const after = masked.slice(end, end + 400);
+  let m = AWAITED_PATTERN.exec(before);
+  if (m && /^\s*;/.test(after)) return patternKeys(m[1]);
+  const group = /\(\s*await\s*$/.exec(before);
+  if (group) {
+    // A grouping paren, never a call's: `f(await import("./x")).a` reads what
+    // f returned, and f was handed the whole module.
+    const lead = before.slice(0, group.index).trimEnd();
+    const word = /[\w$]+$/.exec(lead)?.[0];
+    const call = word ? !REGEX_AFTER.has(word) : /[)\]`.]$/.test(lead);
+    m = call ? null : /^\s*\)\s*\??\.\s*([A-Za-z_$][\w$]*)/.exec(after);
+    return m && m[1] !== "default" ? [m[1]] : null;
+  }
+  m = THEN_PATTERN.exec(after);
+  return m ? patternKeys(m[1]) : null;
 }
 
 /** Resolve a repo-relative path that may omit its extension or name a folder. */

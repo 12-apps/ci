@@ -91,6 +91,10 @@ export function label(status: string) {
   "src/replay.test.ts": `import { replay } from "./template";\n`,
   "src/sql-text.test.ts": `import { readFileSync } from "node:fs";\nconst dir = "db/migrations/";\n`,
   "src/backfill.test.ts": `const file = "20260102000000_backfill";\n`,
+  // A listener of a notification channel (FUT-5471): it hears a write it never makes.
+  "src/order-feed.ts": `export function onOrders(listen: (channel: string) => void) {\n  listen("orders_changed");\n}\nexport const unrelatedFeed = () => 1;\n`,
+  "src/order-feed.test.ts": `import { onOrders } from "./order-feed";\n`,
+  "src/unrelated-feed.test.ts": `import { unrelatedFeed } from "./order-feed";\n`,
   "db/domains.json": JSON.stringify(REGISTRY),
   "db/schema/schema.prisma": SCHEMA,
   "db/migrations/20260101000000_init/migration.sql": `-- @domains: orders, tenancy
@@ -262,4 +266,70 @@ test("a tree whose file list outgrows 1 MiB still plans — git's output is not 
   const { code, doc, err } = plan(root, base);
   assert.equal(code, 0, err);
   assert.ok(doc.tests.includes("src/backfill.test.ts"));
+});
+
+// ── FUT-5471: a notify-only trigger charges no column; its listeners run ──────
+
+const NOTIFY_FN = `CREATE OR REPLACE FUNCTION orders_notify() RETURNS TRIGGER AS $$
+BEGIN
+  PERFORM pg_notify('orders_changed', coalesce(NEW."client_id", OLD."client_id"));
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+`;
+
+test("a notify-only trigger selects the channel's listeners — not every query of its table", () => {
+  const { root, base } = repo({
+    "db/migrations/20260102000000_notify/migration.sql": `-- @domains: orders
+${NOTIFY_FN}CREATE TRIGGER orders_changed AFTER INSERT OR UPDATE OR DELETE ON "orders" FOR EACH ROW EXECUTE FUNCTION orders_notify();
+`,
+  });
+  const { code, doc, err } = plan(root, base);
+  assert.equal(code, 0, err);
+  assert.deepEqual(doc.tests, ["src/order-feed.test.ts", "src/replay.test.ts", "src/sql-text.test.ts"]);
+  assert.equal(doc.tests.includes("src/orders.test.ts"), false, "listOrders reads orders; no row it reads or writes changed");
+  assert.match(err, /notify:orders_changed/);
+});
+
+test("COUNTEREXAMPLE: a trigger whose function writes a row still selects every query of its table", () => {
+  const writes = NOTIFY_FN.replace("RETURN NULL;", `UPDATE "clients" SET "name" = 'x' WHERE "id" = NEW."client_id";\n  RETURN NULL;`);
+  const { root, base } = repo({
+    "db/migrations/20260102000000_notify/migration.sql": `-- @domains: orders, tenancy
+${writes}CREATE TRIGGER orders_changed AFTER INSERT ON "orders" FOR EACH ROW EXECUTE FUNCTION orders_notify();
+`,
+  });
+  const { code, doc, err } = plan(root, base);
+  assert.equal(code, 0, err);
+  assert.ok(doc.tests.includes("src/orders.test.ts"), doc.tests.join(","));
+  assert.ok(doc.tests.includes("src/label.test.ts") === false);
+});
+
+// ── FUT-5471: an `@@index` line is as inert as the CREATE INDEX it stands for ──
+
+test("an @@index line added or removed selects nothing but the replay", () => {
+  const indexed = SCHEMA.replace('  @@map("orders")', '  @@index([clientId, status])\n  @@map("orders")');
+  const added = repo({ "db/schema/schema.prisma": indexed });
+  assert.deepEqual(plan(added.root, added.base).doc.tests, ["src/replay.test.ts"]);
+  const edited = repo({ "db/schema/schema.prisma": indexed.replace("@@index([clientId, status])", "@@index([clientId, status], map: \"orders_by_status\")") });
+  assert.deepEqual(plan(edited.root, edited.base).doc.tests, ["src/replay.test.ts"]);
+});
+
+test("COUNTEREXAMPLE: an @@unique line still charges its fields, and a column edit beside an index still counts", () => {
+  const unique = repo({ "db/schema/schema.prisma": SCHEMA.replace('  @@map("orders")', '  @@unique([clientId, status])\n  @@map("orders")') });
+  assert.ok(plan(unique.root, unique.base).doc.tests.includes("src/orders.test.ts"), "a compound unique is client surface (`where: { clientId_status }`)");
+  const both = repo({
+    "db/schema/schema.prisma": SCHEMA.replace('  @@map("orders")', '  @@index([status])\n  @@map("orders")')
+      .replace('clientId String @map("client_id")', 'clientId String @map("client_id") @default("")'),
+  });
+  assert.ok(plan(both.root, both.base).doc.tests.includes("src/orders.test.ts"));
+});
+
+test("changedFields: @@index lines name no field; @@unique and table-level attributes still do", async () => {
+  const { changedFields } = await import("../../migration-domains/lib/prisma-schema.mjs");
+  const body = "\n  id String @id\n  a  String\n  b  String\n";
+  assert.deepEqual([...changedFields(body, `${body}  @@index([a, b])\n`)], []);
+  assert.deepEqual([...changedFields(`${body}  @@index([a])\n`, body)], []);
+  assert.deepEqual([...changedFields(body, `${body}  @@unique([a, b])\n`)].sort(), ["a", "b"]);
+  assert.equal(changedFields(body, `${body}  @@id([a, b])\n`), "*");
+  assert.equal(changedFields(body, `${body}  @@fulltext([a])\n`), "*");
 });

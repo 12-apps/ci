@@ -183,3 +183,99 @@ test("a dollar-quote tag with digits is still a tag", () => {
     clients: ["v"],
   });
 });
+
+// ── FUT-5471: a notify-only trigger charges no column ───────────────────────
+
+/** A trigger function that only tells listeners: no row is written. */
+const NOTIFY = `CREATE OR REPLACE FUNCTION screen_notify() RETURNS TRIGGER AS $$
+DECLARE
+  store text;
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    store := OLD.client_id;
+  ELSE
+    store := NEW.client_id;
+  END IF;
+  -- A read is not a write: the screen's store, by its id.
+  SELECT s.client_id INTO store FROM "screens" s WHERE s.id = NEW.screen_id;
+  IF (to_jsonb(OLD) - 'updated_at') IS DISTINCT FROM (to_jsonb(NEW) - 'updated_at') THEN
+    PERFORM pg_notify('screen_changed', coalesce(store, '*'));
+  END IF;
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+`;
+const trigger = (timing, fn = "screen_notify") =>
+  `CREATE TRIGGER screen_parts_changed ${timing} ON "screen_parts" FOR EACH ROW EXECUTE FUNCTION ${fn}();`;
+
+test("an AFTER trigger whose function only notifies charges no column, and names its channel", () => {
+  const out = migrationEffects(`${NOTIFY}${trigger("AFTER INSERT OR UPDATE OR DELETE")}`);
+  assert.deepEqual([...out.effects.get("screen_parts")], [], "touched (the gate still sees it), but nothing observable");
+  assert.deepEqual([...out.notifies], ["screen_changed"]);
+  assert.deepEqual(effect(`${NOTIFY}${trigger("AFTER TRUNCATE")}`), { screen_parts: [] });
+  assert.deepEqual(effect(`${NOTIFY}${trigger("AFTER UPDATE OF status")}`), { screen_parts: [] });
+});
+
+test("a notify-only function defined by an EARLIER migration narrows its later trigger", () => {
+  const out = walkMigrations([
+    { name: "1", sql: NOTIFY },
+    { name: "2", sql: trigger("AFTER INSERT OR DELETE") },
+  ]);
+  assert.deepEqual([...out.get("2").effects.get("screen_parts")], []);
+  assert.deepEqual([...out.get("2").notifies], ["screen_changed"]);
+});
+
+test("COUNTEREXAMPLE: a trigger whose function writes a row still charges its whole table", () => {
+  const writes = NOTIFY.replace("RETURN NULL;", `UPDATE "clients" SET "catalog_version" = "catalog_version" + 1 WHERE "id" = store;\n  RETURN NULL;`);
+  assert.deepEqual(effect(`${writes}${trigger("AFTER INSERT OR UPDATE OR DELETE")}`), { clients: ["catalog_version"], screen_parts: "*" });
+  const inserts = NOTIFY.replace("RETURN NULL;", `INSERT INTO "audit" ("id") VALUES (NEW.id);\n  RETURN NULL;`);
+  assert.equal(migrationEffects(`${inserts}${trigger("AFTER INSERT")}`).effects.get("screen_parts"), "*");
+});
+
+test("COUNTEREXAMPLE: every way a function can do more than notify keeps the table whole", () => {
+  const cases = {
+    "BEFORE: its return value decides the row": [NOTIFY, "BEFORE INSERT OR UPDATE"],
+    "RAISE aborts the write": [NOTIFY.replace("RETURN NULL;", "RAISE EXCEPTION 'no';\n  RETURN NULL;"), "AFTER INSERT"],
+    "an unknown call may write": [NOTIFY.replace("RETURN NULL;", "PERFORM audit_row(NEW.id);\n  RETURN NULL;"), "AFTER INSERT"],
+    "an unknown call inside a read may write": [NOTIFY.replace("s.client_id INTO", "bump(s.client_id) INTO"), "AFTER INSERT"],
+    "a computed channel names no listener": [NOTIFY.replace("pg_notify('screen_changed',", "pg_notify(TG_ARGV[0],"), "AFTER INSERT"],
+    "a row lock is not a read": [NOTIFY.replace("WHERE s.id = NEW.screen_id;", "WHERE s.id = NEW.screen_id FOR UPDATE;"), "AFTER INSERT"],
+    "INTO STRICT raises when no row matches": [NOTIFY.replace("INTO store", "INTO STRICT store"), "AFTER INSERT"],
+    "a SELECT with no INTO raises in PL/pgSQL": [NOTIFY.replace("s.client_id INTO store FROM", "s.client_id FROM"), "AFTER INSERT"],
+    "dynamic SQL": [NOTIFY.replace("RETURN NULL;", "EXECUTE 'SELECT 1';\n  RETURN NULL;"), "AFTER INSERT"],
+    "another language": [NOTIFY.replace("LANGUAGE plpgsql", "LANGUAGE plv8"), "AFTER INSERT"],
+    "a body that notifies nothing (a BEFORE-style NEW bump)": [
+      `CREATE FUNCTION screen_notify() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.version := OLD.version + 1; RETURN NEW; END; $$;`,
+      "AFTER UPDATE",
+    ],
+  };
+  for (const [why, [fn, timing]] of Object.entries(cases)) {
+    const out = migrationEffects(`${fn}${trigger(timing)}`);
+    assert.equal(out.effects.get("screen_parts"), "*", why);
+    assert.deepEqual([...out.notifies], [], why);
+  }
+  // A WHEN condition runs as the trigger fires: an unknown call there may write.
+  const guarded = `${NOTIFY}CREATE TRIGGER g AFTER INSERT ON "screen_parts" FOR EACH ROW WHEN (audit(NEW.id)) EXECUTE FUNCTION screen_notify();`;
+  assert.deepEqual(effect(guarded), { screen_parts: "*" });
+  const plain = `${NOTIFY}CREATE TRIGGER g AFTER INSERT ON "screen_parts" FOR EACH ROW WHEN (NEW.id IS NOT NULL) EXECUTE FUNCTION screen_notify();`;
+  assert.deepEqual(effect(plain), { screen_parts: [] });
+  // A function no migration defines is unknown, and unknown is the whole table.
+  assert.deepEqual(effect(trigger("AFTER INSERT", "nobody_defined_this")), { screen_parts: "*" });
+});
+
+test("COUNTEREXAMPLE: an overload f(int) does not make trigger f() notify-only (FUT-5471 review N1)", () => {
+  const writes = `CREATE FUNCTION f() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO audit (id) VALUES (NEW.id); RETURN NULL; END; $$;`;
+  const overload = `CREATE FUNCTION f(x int) RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_notify('chan', ''); RETURN NULL; END; $$;`;
+  const trig = `CREATE TRIGGER t AFTER UPDATE ON orders FOR EACH ROW EXECUTE FUNCTION f();`;
+  const same = migrationEffects(`${writes}${overload}${trig}`);
+  assert.equal(same.effects.get("orders"), "*");
+  assert.deepEqual([...same.notifies], []);
+  const across = walkMigrations([{ name: "1", sql: writes }, { name: "2", sql: overload }, { name: "3", sql: trig }]);
+  assert.equal(across.get("3").effects.get("orders"), "*");
+  // Once overloaded, a later parameterless notify-only definition does not clear it.
+  const later = walkMigrations([{ name: "1", sql: overload }, { name: "2", sql: NOTIFY.replace(/screen_notify/g, "f") }, { name: "3", sql: trig }]);
+  assert.equal(later.get("3").effects.get("orders"), "*");
+  // A function returning something else is not a trigger function either.
+  const notTrigger = `CREATE FUNCTION g() RETURNS void LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_notify('chan', ''); END; $$;`;
+  assert.equal(migrationEffects(`${notTrigger}CREATE TRIGGER t AFTER UPDATE ON orders FOR EACH ROW EXECUTE FUNCTION g();`).effects.get("orders"), "*");
+});

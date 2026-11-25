@@ -68,8 +68,17 @@ test("a local `export { … }` list marks the declarations above it exported", (
 
 // --- everything that must widen --------------------------------------------
 
-test("`export * from` widens — the names are not here to bracket", () => {
-  assert.equal(reach('export * from "./a";\nexport const b = 1;\n', ["x"]), "*");
+test("`export * from` is no declaration — a change behind it travels by the walk, not here", () => {
+  // FUT-5471: the star line binds no local, so a name this file bound
+  // elsewhere reaches only the declarations that read it. What the star
+  // FORWARDS never comes through this function: select.mjs carries the
+  // target's changed names across a star record itself (export-star.test.mjs).
+  const src = 'export * from "./a";\nimport { x } from "./x";\nexport const b = 1;\nexport const c = () => x;\n';
+  assert.deepEqual(reach(src, ["x"]), ["c"]);
+  // A file of star lines alone exports nothing this bracketing can find: widen.
+  assert.equal(reach('export * from "./a";\nexport * from "./b";\n', ["x"]), "*");
+  // A step file keeps refusing (bracketed calls; see declarationsOf).
+  assert.equal(reachableExports('export * from "./a";\nGiven("x", () => {});\n', ["x"], { calls: ["Given"] }), "*");
 });
 
 test("a top-level side effect widens — it can touch anything", () => {
@@ -127,7 +136,8 @@ test("a comment cannot introduce a declaration or a side effect", () => {
 // --- the bracketer, directly ------------------------------------------------
 
 test("declarationsOf reports null for what it cannot bracket", () => {
-  assert.equal(declarationsOf('export * from "./a";\n'), null);
+  assert.equal(declarationsOf('export * from "./a";\n', { calls: ["Given"] }), null);
+  assert.deepEqual(declarationsOf('export * from "./a";\n'), [], "a star line is no declaration, and no side effect");
   assert.equal(declarationsOf("sideEffect();\n"), null);
   assert.notEqual(declarationsOf("export const a = 1;\n"), null);
 });
@@ -167,4 +177,11 @@ test("a declaration continued on the next line is not closed by it", () => {
   // line starts with `async function`.
   const src = ['import { dep } from "./dep";', "export const handler =", "  async function handle(req) { return dep(req); };"].join("\n");
   assert.deepEqual(reach(src, ["dep"]), ["handler"]);
+});
+
+test("a hot local exported under an alias is reported by the alias (FUT-5471 review B1)", () => {
+  const out = reach('function load(){return x}\nexport { load as go };\n', ["x"]);
+  assert.ok(out.includes("go"), JSON.stringify(out));
+  assert.ok(reach('function load(){return x}\nexport {\n  load as go,\n};\n', ["x"]).includes("go"));
+  assert.deepEqual(reach('function load(){return x}\nfunction other(){return 1}\nexport { load as go, other };\n', ["y"]), []);
 });

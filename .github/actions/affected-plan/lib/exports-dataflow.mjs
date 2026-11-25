@@ -21,7 +21,9 @@
  *
  *   - a file with a top-level statement that is neither an import nor a
  *     declaration — module side effects can touch anything;
- *   - `export * from` — the names are not in this file to bracket;
+ *   - `export * from` in a step file (bracketed calls). Elsewhere a star line
+ *     is no declaration: the selector carries the target's changed names
+ *     through it itself (select.mjs, FUT-5471);
  *   - a file the graph reached BY NAME in which no export can be found, which
  *     means the bracketing failed rather than that the file exports nothing.
  *
@@ -78,6 +80,19 @@ const continues = (line) => /(=>|[=(,[{:?&|+\-*%<!])$/.test(line);
 /** Every name a declaration binds: one, or a destructuring pattern's list. */
 export const boundOf = (d) => d.names ?? [d.name];
 
+/**
+ * The names an importer can bind for the hot declarations of `decls`: each
+ * hot export's own names, plus every alias a local `export { a as b }` gives a
+ * hot name (a declaration or an imported binding). Without the alias, a
+ * change reaching `a` stopped at this file while importers bound `b`.
+ */
+export function exportedNames(decls, hot) {
+  const out = new Set();
+  for (const d of decls) if ((d.exported || d.call) && hot.has(d.name)) boundOf(d).forEach((n) => out.add(n));
+  for (const [orig, alias] of decls.exportList ?? []) if (hot.has(orig)) out.add(alias);
+  return out;
+}
+
 /** `export default <expression>` — an anonymous export named `default`. */
 const EXPORT_DEFAULT = /^export\s+default\b/;
 
@@ -105,7 +120,17 @@ export function declarationsOf(source, { calls = [] } = {}) {
   let callCount = 0;
   const lines = stripComments(source).split(/\r?\n/);
   const decls = [];
-  const alsoExported = new Set();
+  // `export { a, b as c }` with no `from`: each local name and the name it is
+  // exported AS. An alias is the only name an importer can bind, so every
+  // answer below reports it beside the local (FUT-5471 review, B1).
+  const exportList = [];
+  const listExport = (inner) => {
+    for (const spec of inner.split(",").map((x) => x.trim()).filter(Boolean)) {
+      const [orig, alias = orig] = spec.replace(/^type\s+/, "").split(/\s+as\s+/).map((x) => x.trim());
+      exportList.push([orig, alias]);
+    }
+  };
+  let pendingText = "";
   let current = null;
   let depth = 0;
   let pendingImport = false;
@@ -121,7 +146,13 @@ export function declarationsOf(source, { calls = [] } = {}) {
 
     // A multi-line `import {` clause: consume until its `from "…"` or its `;`.
     if (pendingImport) {
-      if (/\bfrom\s*["'][^"']+["']/.test(line) || line.endsWith(";")) pendingImport = false;
+      pendingText += ` ${line}`;
+      if (/\bfrom\s*["'][^"']+["']/.test(line) || line.endsWith(";")) {
+        pendingImport = false;
+        // A multi-line local `export {\n a as b,\n};` is an export list, not an import.
+        const list = LOCAL_EXPORT_LIST.exec(pendingText.trim());
+        if (list) listExport(list[1]);
+      }
       depth = Math.max(0, depth + opens - closes);
       continue;
     }
@@ -150,6 +181,7 @@ export function declarationsOf(source, { calls = [] } = {}) {
         !LOCAL_EXPORT_LIST.test(line);
       if (opensImportClause) {
         pendingImport = true;
+        pendingText = line;
         depth = Math.max(0, depth + opens - closes);
         continue;
       }
@@ -165,8 +197,17 @@ export function declarationsOf(source, { calls = [] } = {}) {
         }
         continue;
       }
-      // `export * from` — the names are not here to bracket. Widen.
-      if (EXPORT_STAR.test(line)) return null;
+      // `export * from` binds no local name and runs no code here, so it is no
+      // declaration (FUT-5471). The names it forwards are not in this file;
+      // the selector carries a change through a star line by the TARGET's
+      // changed names (select.mjs), never through this bracketing, so a file
+      // holding one still brackets its other declarations. A step file
+      // (bracketed calls) keeps refusing: a star line there loads definitions
+      // that bracketing cannot see.
+      if (EXPORT_STAR.test(line)) {
+        if (callRe) return null;
+        continue;
+      }
 
       if (IMPORT_LINE.test(line)) {
         depth = Math.max(0, depth + opens - closes);
@@ -175,10 +216,7 @@ export function declarationsOf(source, { calls = [] } = {}) {
 
       const local = LOCAL_EXPORT_LIST.exec(line);
       if (local) {
-        for (const spec of local[1].split(",").map((x) => x.trim()).filter(Boolean)) {
-          const [orig] = spec.split(/\s+as\s+/).map((x) => x.trim());
-          alsoExported.add(orig.replace(/^type\s+/, ""));
-        }
+        listExport(local[1]);
         continue;
       }
 
@@ -214,7 +252,9 @@ export function declarationsOf(source, { calls = [] } = {}) {
       current = null;
   }
 
-  for (const d of decls) if (boundOf(d).some((n) => alsoExported.has(n))) d.exported = true;
+  const listed = new Set(exportList.map(([orig]) => orig));
+  for (const d of decls) if (boundOf(d).some((n) => listed.has(n))) d.exported = true;
+  Object.defineProperty(decls, "exportList", { value: exportList });
   // A step registered anywhere else — inside an array, a helper, a value on
   // the next line — is a definition this bracketing cannot see, and an edit to
   // it would select nothing. Such a file cannot be bracketed.
@@ -241,13 +281,10 @@ export function reachableExports(source, tainted, options = {}) {
   // file is a list of bracketed calls (a step file), which exports nothing by
   // design and whose calls are read by the caller, not propagated.
   if (!decls.some((d) => d.exported || d.call)) return "*";
-  const hot = spread(decls, tainted);
-  const out = new Set();
   // A hot bracketed call is reported too: it is how a step file with no hot
   // export still counts as reached. No import can name `Given@3`, so it never
   // propagates past this file.
-  for (const d of decls) if ((d.exported || d.call) && hot.has(d.name)) boundOf(d).forEach((n) => out.add(n));
-  return out;
+  return exportedNames(decls, spread(decls, tainted));
 }
 
 /** Every declaration name that can see `tainted`, following references. */
@@ -465,8 +502,7 @@ export function changedDeclarations(base, head, options = {}) {
   const was = new Map(before.map((d) => [keyOf(d), canonical(d.text)]));
   const moved = now.filter((d) => was.get(keyOf(d)) !== canonical(d.text)).flatMap(boundOf);
   for (const d of before) if (!seen.has(keyOf(d))) moved.push(...boundOf(d));
-  const hot = spread(now, moved);
-  return new Set(now.filter((d) => (d.exported || d.call) && hot.has(d.name)).flatMap(boundOf));
+  return exportedNames(now, spread(now, moved));
 }
 
 /**
@@ -485,8 +521,5 @@ export function withinFile(head, names, options = {}) {
   if (names.size === 0) return names;
   const decls = declarationsOf(head, options);
   if (decls === null) return "*";
-  const hot = spread(decls, names);
-  const out = new Set(names);
-  for (const d of decls) if ((d.exported || d.call) && hot.has(d.name)) boundOf(d).forEach((n) => out.add(n));
-  return out;
+  return new Set([...names, ...exportedNames(decls, spread(decls, names))]);
 }
