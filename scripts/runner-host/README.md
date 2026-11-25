@@ -522,9 +522,11 @@ systemctl start ci-runner-image           # rebuild the image now (also weekly)
 ```
 
 Logs go to journald, capped at 2 GB and 30 days
-(`/etc/systemd/journald.conf.d/ci-runner.conf`). Neither the logs nor the
-state files ever hold a token: the JIT config reaches the container by
-environment variable name, and the credential never leaves the host.
+(`/etc/systemd/journald.conf.d/ci-runner.conf`), and a filtered part of them
+to CloudWatch Logs ([Host logs after the host is
+gone](#host-logs-after-the-host-is-gone)). Neither the logs nor the state
+files ever hold a token: the JIT config reaches the container by environment
+variable name, and the credential never leaves the host.
 
 A failed, hung or killed job cannot leave a slot busy. The container is removed
 on every path (done, failed, timeout, `systemctl stop`, a crash of the
@@ -584,6 +586,87 @@ sudo /opt/ci-runner/uninstall.sh
 This stops every slot, deregisters this host's runners, removes the units,
 images, per-job disks and state, and shreds the stored credential. Then delete
 the `CI_RUNNER` repository variable, and CI is back on GitHub's runners.
+
+## Host logs after the host is gone
+
+A fleet host that dies takes its journal with it, and AWS records nothing for
+a host that powers itself off, so a lost runner used to leave only "lost
+communication with the server" (FUT-5281). While a host runs,
+`ci-runner-logs.service` (`host-logs.py`) ships a filtered part of its journal
+to CloudWatch Logs:
+
+- **Where:** log group `/ci-runner/hosts` (`CI_RUNNER_LOG_GROUP`; `off` ships
+  nothing) in the host's own region (eu-north-1, us-east-2, us-east-1), one
+  stream per instance, named by its instance id (`i-0123456789abcdef0`).
+  Kept **7 days**.
+- **What:** kernel lines that kill or stall a job (the OOM killer, hung tasks,
+  a full disk, I/O errors, lockups; not the veth and bridge chatter); every
+  `ci-runner@N` slot's supervisor lines; each slot's runner output (journald
+  tag `ci-runner-N`); the image, credential, prewarm and idle-stop units
+  (without the idle timer's start and finish every minute); docker's and
+  containerd's lifecycle as systemd tells it; the shutdown path (the power key,
+  logind's "powering down", the shutdown targets); an EC2 spot interruption
+  notice or rebalance recommendation, read from the instance metadata every
+  poll; and, when a job ends with **no** result, the last 20 lines of the
+  runner's newest `Runner_*` and `Worker_*` `_diag` file, which the supervisor
+  copies out of the container before removing it.
+- **How it gets there:** every 5 seconds the script reads the journal after
+  its cursor (`/run/ci-runner-logs`, so a cursor never reaches an image) and
+  sends what it kept with `PutLogEvents`, signed with the instance profile's
+  credentials from IMDSv2. Python's standard library only: the Ubuntu image
+  already has python3 for cloud-init, so the image gains no package, no apt
+  repository and no agent, and [packages still never change on a running
+  host](#packages-never-change-on-a-running-host). fluent-bit would have
+  needed its own apt repository at every weekly build and a resident daemon
+  of tens of MB for what is a few lines a minute.
+- **The last lines are flushed.** systemd stops the shipper after every slot
+  (`ci-runner@.service` is `After=ci-runner-logs.service`) and before the
+  network (`After=network-online.target`). On SIGTERM it reads the journal
+  once more, adds which shutdown job systemd has queued
+  (`host-logs: stopping; shutdown job queued: poweroff.target`), and ships. A
+  sudden death (a kernel panic, a reclaim that does not wait) loses at most
+  the last 5 seconds.
+- **No secret leaves the host.** The JIT config never reaches a log
+  ([Operating it](#operating-it)), and every line is scrubbed of token shapes
+  anyway (GitHub tokens, JWTs, AWS key ids, `token=`/`password=` values, any
+  run of 64 or more base64 characters).
+- **It never costs a job.** The slots only `Want` the shipper. It runs at
+  `Nice=10` under `CPUQuota=10%` and `MemoryMax=96M`; an unreachable
+  CloudWatch keeps up to 512 KiB of lines for the next poll. Off EC2 it exits
+  0 and stays down.
+
+**Reading it.** future-pay's `scripts/ci-runner-losses.mjs` reads the stream
+of every lost runner's instance for itself and names a reason (OOM kill,
+the host's own power-off, a spot notice). By hand:
+
+```bash
+aws logs get-log-events --region eu-north-1 --log-group-name /ci-runner/hosts \
+  --log-stream-name i-0123456789abcdef0 --no-start-from-head --limit 100 \
+  --query 'events[].[timestamp,message]' --output text
+aws logs filter-log-events --region eu-north-1 --log-group-name /ci-runner/hosts \
+  --filter-pattern '"Killed process"' --start-time $(date -d '-1 day' +%s000)
+```
+
+No stream for an instance means a host from an image older than this change,
+or one that died before its first poll.
+
+**What it costs.** CloudWatch bills ~US$0.50 per GB ingested, each event's
+bytes plus 26. A busy host-hour (two slots, 18 jobs, every minute's timer and
+veth noise) ships **15,080 bytes in 164 events**, measured by
+`__tests__/host-logs.test.mjs` on a realistic journal; boot and shutdown add
+about 2 KB a host. At about 150 host-hours and 500 boots a day that is ~3 MB,
+**about US$0.002 a day** for the fleet (an estimate from the measured hour,
+not a bill). The cost is also capped in the script, whatever a host logs:
+repeats within 5 minutes are counted, not shipped; ordinary lines draw on
+64 KiB per hour of journal time (`CI_RUNNER_LOGS_HOURLY_BYTES`) and the
+critical ones (kernel, shutdown, spot, `_diag`) on 32 KiB a boot
+(`CI_RUNNER_LOGS_CRITICAL_BYTES`). Forty hosts at that cap all day, with a
+thousand boots, would ship ~91 MiB: under US$0.05 a day.
+
+**Turning it on** needs nothing but the image: the log groups and the
+instance profile's `ci-runner-host-logs` policy (CreateLogStream,
+PutLogEvents, DescribeLogStreams on the three groups) exist, and the weekly
+image refresh carries the unit to every host it launches.
 
 ## Security
 
