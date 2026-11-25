@@ -4,6 +4,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { runBlock } from "./run-block.mjs";
 
 // FUT-5383: Static Gates starts jscpd and knip in the background and their own
 // steps wait for them. This runs the three REAL `run:` blocks of quality.yml
@@ -19,31 +20,6 @@ const STEPS = {
   jscpd: "Copy-paste detection (jscpd)",
   knip: "Unused files/exports/deps (knip)",
 };
-
-/** The `run: |` block of the step with this exact name, dedented. */
-export function runBlock(text, name) {
-  const lines = text.split("\n");
-  const at = lines.findIndex((l) => l.trimStart() === `- name: ${name}`);
-  assert.ok(at >= 0, `quality.yml has no step named "${name}"`);
-  const stepIndent = lines[at].indexOf("-");
-  let i = at + 1;
-  while (i < lines.length && !/^\s*run: \|\s*$/.test(lines[i])) {
-    const ind = lines[i].search(/\S/);
-    assert.ok(ind === -1 || ind > stepIndent, `step "${name}" has no run: | block`);
-    i++;
-  }
-  const body = [];
-  let indent = -1;
-  for (i += 1; i < lines.length; i++) {
-    const line = lines[i];
-    const ind = line.search(/\S/);
-    if (ind === -1) { body.push(""); continue; }
-    if (indent === -1) indent = ind;
-    if (ind < indent) break;
-    body.push(line.slice(indent));
-  }
-  return body.join("\n").trimEnd() + "\n";
-}
 
 const FAKE_PNPM = `#!/bin/bash
 case "$1" in
