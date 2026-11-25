@@ -218,6 +218,18 @@ on:
         type: number
         required: false
         default: 30
+      type-check-alone:
+        description: >-
+          Space-separated packages whose check-types runs by itself, after
+          every other package's, off a pull request (the full type check).
+          For a package whose type check needs most of the runner's memory:
+          turbo starts up to ten tasks at once, and several capped tsc heaps
+          together can exceed the host's memory with no heap error, only an
+          exit 137. Empty (the default) runs one turbo invocation as before.
+          Pull requests (--affected) are unchanged.
+        type: string
+        required: false
+        default: ''
       lint-fingerprint-command:
         description: >-
           OPT-IN. Shell that prints a hex hash of every tracked path that can
@@ -1274,12 +1286,27 @@ jobs:
         shell: bash
         env:
           SELECTION_BASE: ${{ steps.selection.outputs.base-sha }}
+          TYPE_CHECK_ALONE: ${{ inputs.type-check-alone }}
         # PR: --affected (turbo still builds each affected package's upstream
         # deps first, so cross-package type errors are caught). Push: everything.
+        # Off a PR, each `type-check-alone` package runs in a turbo invocation
+        # of its own, after the rest: future-pay FUT-5526, where web's 10.7 GB
+        # type check beside admin's 3.5 GB OOM-killed a 14.1 GB slot.
         run: |
           set -o pipefail
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "$SELECTION_BASE" ]; then
             pnpm turbo run check-types --affected 2>&1 | tee typecheck.log
+          elif [ -n "${TYPE_CHECK_ALONE// /}" ]; then
+            rest=()
+            for pkg in $TYPE_CHECK_ALONE; do rest+=("--filter=!$pkg"); done
+            echo "::group::check-types without:$(printf ' %s' $TYPE_CHECK_ALONE)"
+            pnpm turbo run check-types "${rest[@]}" 2>&1 | tee typecheck.log
+            echo "::endgroup::"
+            for pkg in $TYPE_CHECK_ALONE; do
+              echo "::group::check-types $pkg, alone"
+              pnpm turbo run check-types "--filter=$pkg" 2>&1 | tee -a typecheck.log
+              echo "::endgroup::"
+            done
           else
             pnpm turbo run check-types 2>&1 | tee typecheck.log
           fi

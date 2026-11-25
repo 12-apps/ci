@@ -1871,6 +1871,25 @@ per shard.
       integration-timeout-minutes: 90   # migrations + PGlite on a big schema
 ```
 
+### A package whose type check needs most of the runner
+
+Off a pull request, Type Check runs `turbo run check-types` over every package,
+and turbo starts up to ten of them at once. Each package's `tsc` caps only its
+own heap (`--max-old-space-size`), so several together can exceed the host's
+memory without any one reaching its cap: the job dies with exit 137 and no heap
+error. Name the package that dominates in `type-check-alone`, and the full type
+check runs every other package first, in parallel, then that one by itself:
+
+```yaml
+  static:
+    uses: 12-apps/ci/.github/workflows/monorepo-static.yml@v2
+    with:
+      type-check-alone: web   # 10.7 GB alone; with admin's 3.5 GB it OOM-killed a 14.1 GB slot
+```
+
+Pull requests (`--affected`) are unchanged. It costs the full run the length of
+that package's own check, since nothing runs beside it.
+
 # Running your own gate scripts
 
 `package-gates.yml` runs the gate scripts a consumer already owns. It supplies

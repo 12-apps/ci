@@ -98,6 +98,10 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/static-gates-background.test.mjs
 
+      - name: Type Check runs type-check-alone packages by themselves
+        shell: bash
+        run: node --test .github/workflows/__tests__/type-check-alone.test.mjs
+
       - name: Full-suite signal wiring
         shell: bash
         run: node --test .github/workflows/__tests__/full-suite-signal.test.mjs
