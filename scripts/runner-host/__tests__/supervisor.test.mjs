@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { spawnSync, execFileSync } from "node:child_process";
-import { chmodSync, closeSync, existsSync, mkdtempSync, openSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,7 +30,7 @@ const INSTALL_TOKEN = "ghs_INSTALLATION_TOKEN_VALUE";
  * docker: `inspect ...Running` answers true for `runPolls` calls, then false;
  * `logs` prints `logs`. That is how a job's life is simulated.
  */
-function stubs({ jitFails = false, runPolls = 0, logs = "", staleImage = false, busy = false, drain = false, state = null, daemonDownPolls = 0 } = {}) {
+function stubs({ jitFails = false, runPolls = 0, logs = "", staleImage = false, busy = false, drain = false, state = null, daemonDownPolls = 0, diag = null } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), "supervisor-"));
   const log = path.join(dir, "calls.jsonl");
   const record = (bin) => `#!/usr/bin/env bash
@@ -84,6 +84,8 @@ case "$1" in
       if (( n < ${runPolls} )); then echo true; else echo false; fi
     else echo 4242; fi ;;
   logs) cat "${path.join(dir, "logs.txt")}" ;;
+  # diag: \`docker cp <container>:<dir> -\` streams a tar of the runner's _diag.
+  cp) [[ -f "${dir}/diag.tar" ]] || exit 1; cat "${dir}/diag.tar" ;;
   info) [[ -e "${downFlag}" ]] && exit 1 ;;
   run) echo cid ;;
 esac
@@ -92,6 +94,12 @@ exit 0
   );
   for (const bin of ["curl", "docker"]) chmodSync(path.join(dir, bin), 0o755);
   if (state) writeFileSync(path.join(dir, "slot-1.json"), JSON.stringify(state));
+  if (diag) {
+    const src = path.join(dir, "diag-src", "_diag");
+    mkdirSync(src, { recursive: true });
+    for (const [name, body] of Object.entries(diag)) writeFileSync(path.join(src, name), body);
+    execFileSync("tar", ["-cf", path.join(dir, "diag.tar"), "-C", path.dirname(src), "_diag"]);
+  }
   if (drain) {
     // install.sh touches it AFTER the slot started: an mtime in the future
     // stands for that without sleeping in the test.
@@ -461,4 +469,45 @@ test("refuses to start without its configuration", () => {
   }
   const noKey = runOnce({ CI_RUNNER_TOKEN: "", CI_RUNNER_APP_ID: "1", CI_RUNNER_APP_KEY_FILE: "/nonexistent" });
   assert.equal(noKey.status, 64);
+});
+
+// Assembled at run time, so the file carries no string a secret scanner flags.
+const TOKEN_SHAPED = ["gh", "s_", "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"].join("");
+
+// FUT-5281: a job that ends with NO result (the runner or its worker died)
+// leaves its reason in the runner's _diag, inside the container the cleanup is
+// about to remove. Its last lines reach the journal first, where host-logs.py
+// ships them; a token in them never does.
+test("a job that ends without a result logs the tail of the runner's _diag before the container goes", () => {
+  const worker = Array.from({ length: 30 }, (_, i) => `[2026-11-25 10:00:${String(i).padStart(2, "0")}Z INFO Worker] step ${i}`).join("\n")
+    + `\n[2026-11-25 10:01:00Z ERR  Worker] Unhandled exception: token ${TOKEN_SHAPED} System.IO.IOException: No space left on device\n`;
+  const { stderr, calls } = runOnce({}, {
+    runPolls: 2,
+    logs: "Running job: e2e 2/4\n",
+    diag: {
+      "Runner_20261125-095900-utc.log": "[2026-11-25 09:59:00Z INFO Runner] old run\n",
+      "Runner_20261125-100000-utc.log": "[2026-11-25 10:00:00Z INFO Runner] Listening for Jobs\n[2026-11-25 10:01:01Z ERR  Runner] Runner listener exited with error code 1\n",
+      "Worker_20261125-100005-utc.log": worker,
+    },
+  });
+  assert.match(stderr, /diag Runner_20261125-100000-utc\.log: \[2026-11-25 10:01:01Z ERR  Runner\] Runner listener exited with error code 1/);
+  assert.doesNotMatch(stderr, /old run/, "only the newest Runner_ file");
+  assert.match(stderr, /diag Worker_20261125-100005-utc\.log: .*No space left on device/);
+  assert.doesNotMatch(stderr, /step 10$/m, "only the last 20 lines of a file");
+  assert.match(stderr, /step 11$/m);
+  assert.ok(!stderr.includes(TOKEN_SHAPED), "a token in the _diag never reaches the journal");
+  assert.match(stderr, /diag Worker_20261125-100005-utc\.log: .*token <redacted> System/);
+  const cp = calls.findIndex((c) => c.bin === "docker" && c.argv[0] === "cp");
+  const rm = calls.findIndex((c, i) => i > cp && c.bin === "docker" && c.argv[0] === "rm");
+  assert.ok(cp !== -1, "the _diag was read");
+  assert.equal(calls[cp].argv[1], "ci-runner-1:/home/runner/actions-runner/_diag");
+  assert.ok(rm > cp, "read before the container is removed");
+});
+
+test("a job that ends with a result, even a failed one, reads no _diag", () => {
+  for (const result of ["Succeeded", "Failed", "Canceled"]) {
+    const { calls, stderr } = runOnce({}, { runPolls: 2, logs: `Running job: lint\nJob lint completed with result: ${result}\n`, diag: { "Runner_1.log": "x\n" } });
+    assert.equal(calls.filter((c) => c.bin === "docker" && c.argv[0] === "cp").length, 0, result);
+    assert.doesNotMatch(stderr, /diag /, result);
+  }
 });

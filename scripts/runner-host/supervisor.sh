@@ -296,6 +296,31 @@ container_running() {
 }
 
 
+# A job that ended with no result (the runner or its worker died, or the cap
+# killed it) leaves its reason in the runner's own diagnostic logs, inside the
+# container this slot is about to remove. Their last lines go to the journal
+# first, where host-logs.py ships them to CloudWatch (FUT-5281): the newest
+# Runner_* and Worker_* file, DIAG_LINES lines each, token shapes masked.
+diag_dir=/home/runner/actions-runner/_diag
+diag_lines="${CI_RUNNER_DIAG_LINES:-20}"
+diag_tail() {
+  local tmp f name kind
+  tmp=$(mktemp -d) || return 0
+  if timeout 20 docker cp "${container}:${diag_dir}" - 2>/dev/null | tar -x -C "$tmp" 2>/dev/null; then
+    for kind in Runner Worker; do
+      f=$(find "$tmp" -type f -name "${kind}_*.log" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -n 1 | cut -d' ' -f2- || true)
+      [[ -n "$f" ]] || continue
+      name=$(basename "$f")
+      tail -n "$diag_lines" "$f" | cut -c1-400 \
+        | sed -E 's/(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/<redacted>/g; s/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/<redacted>/g; s/[A-Za-z0-9+\/_=-]{64,}/<redacted>/g' \
+        | while IFS= read -r line; do log "diag ${name}: ${line}"; done || true
+    done
+  else
+    log "diag: the runner's _diag could not be read from ${container}"
+  fi
+  rm -rf "$tmp"
+}
+
 # Watches the container until it exits: records the job it picked up, keeps
 # the heartbeat fresh, and kills it if the job outlives its cap.
 watch_job() {
@@ -313,6 +338,7 @@ watch_job() {
       fi
     elif (( $(date +%s) - started_at > job_timeout )); then
       fail "job '${job}' exceeded ${job_timeout}s; killing it"
+      diag_tail
       docker rm -f "$container" >/dev/null 2>&1 || true
       return 0
     fi
@@ -322,6 +348,8 @@ watch_job() {
   result=$(docker logs "$container" 2>&1 | grep -o 'completed with result: [A-Za-z]*' | tail -n1 | awk '{print $4}' || true)
   if [[ -n "$job" && "$result" != "Succeeded" ]]; then
     fail "job '${job}' ended with result: ${result:-unknown}"
+    # A Failed or Canceled job ended normally; one with no result did not.
+    [[ -n "$result" ]] || diag_tail
   fi
 }
 

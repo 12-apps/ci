@@ -39,11 +39,12 @@ for m in /var/lib/ci-runner/slot-*; do mountpoint -q "$m" 2>/dev/null && umount 
 rm -f /etc/systemd/system/ci-runner@.service /etc/systemd/system/ci-runner-image.service \
       /etc/systemd/system/ci-runner-image.timer /etc/systemd/system/ci-runner-idle.service \
       /etc/systemd/system/ci-runner-idle.timer /etc/systemd/system/ci-runner-credential.service \
+      /etc/systemd/system/ci-runner-logs.service /etc/systemd/system/ci-runner-prewarm.service \
       /etc/systemd/journald.conf.d/ci-runner.conf \
       /etc/sysctl.d/90-ci-runner.conf /usr/local/bin/ci-runner-status
 systemctl daemon-reload
 systemctl restart systemd-journald 2>/dev/null || true
-rm -rf "$prefix" /var/lib/ci-runner /run/ci-runner
+rm -rf "$prefix" /var/lib/ci-runner /run/ci-runner /run/ci-runner-logs
 # The credential last: shred what can be shredded.
 [[ -d /etc/ci-runner ]] && find /etc/ci-runner -type f -exec shred -u {} + 2>/dev/null
 rm -rf /etc/ci-runner

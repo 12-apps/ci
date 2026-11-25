@@ -13,6 +13,10 @@
 # (default `auto`, 90% of RAM / slots at each job start), CI_RUNNER_DISK (per job, e.g.
 # 40G), CI_RUNNER_JOB_TIMEOUT_MINUTES (default 360).
 #
+# CI_RUNNER_LOG_GROUP: the CloudWatch Logs group the host's own logs are
+# shipped to while it runs (default /ci-runner/hosts; `off` ships nothing).
+# Only on EC2, in the host's region, one stream per instance (host-logs.py).
+#
 # CI_RUNNER_IDLE_MINUTES: power the host off after this long with no job
 # (default 0, never). Set it only once something starts the host again when a
 # job is queued — wake/README.md — or queued jobs wait for a person.
@@ -111,7 +115,7 @@ sysctl --quiet --system
 install -d "$prefix"
 install -m 0644 "$here/Dockerfile" "$prefix/Dockerfile"
 install -m 0755 "$here/entrypoint.sh" "$here/localhost.sh" "$here/supervisor.sh" "$here/build-image.sh" \
-  "$here/status.sh" "$here/uninstall.sh" "$here/idle-stop.sh" "$here/fetch-credential.sh" "$here/job-usage.sh" "$prefix/"
+  "$here/status.sh" "$here/uninstall.sh" "$here/idle-stop.sh" "$here/fetch-credential.sh" "$here/job-usage.sh" "$here/host-logs.py" "$prefix/"
 ln -sf "$prefix/status.sh" /usr/local/bin/ci-runner-status
 
 # Runner and supervisor logs go to journald; cap what they can take.
@@ -145,6 +149,7 @@ CI_RUNNER_TOKEN_PARAMETER=${CI_RUNNER_TOKEN_PARAMETER:-}
 CI_RUNNER_REGION=${CI_RUNNER_REGION:-}
 CI_RUNNER_IMAGE=${CI_RUNNER_IMAGE:-ci-runner:latest}
 CI_RUNNER_BASE_IMAGE=${CI_RUNNER_BASE_IMAGE:-ubuntu:24.04}
+CI_RUNNER_LOG_GROUP=${CI_RUNNER_LOG_GROUP:-/ci-runner/hosts}
 ENV
 umask 022
 
@@ -175,6 +180,10 @@ Description=GitHub Actions runner slot %i (one job per container)
 After=docker.service network-online.target
 Wants=network-online.target ci-runner-credential.service
 After=ci-runner-credential.service
+# After the log shipper, so at shutdown every slot stops (and logs why) BEFORE
+# the shipper's final flush. Wants, not Requires: no log problem stops a job.
+Wants=ci-runner-logs.service
+After=ci-runner-logs.service
 # Wants, not Requires: with Requires a docker restart STOPPED every slot, and
 # the supervisor's stop removes its container with the job inside (FUT-5281).
 # The supervisor waits out a daemon that does not answer (docker_grace), and
@@ -273,6 +282,35 @@ RestartSec=10
 WantedBy=multi-user.target
 UNIT
 
+# The host's own logs, shipped while it runs, so the reason a host died is
+# still readable once it is gone (FUT-5281, host-logs.py). Ordered so that
+# systemd stops it LAST among the kit's units and before the network: the
+# slots are After= it (above), and it is After=network-online.target.
+cat > /etc/systemd/system/ci-runner-logs.service <<UNIT
+[Unit]
+Description=Ship this host's CI logs to CloudWatch Logs (CI_RUNNER_LOG_GROUP)
+Wants=network-online.target
+After=network-online.target systemd-journald.service
+ConditionPathExists=${envfile}
+
+[Service]
+Type=simple
+EnvironmentFile=${envfile}
+ExecStart=/usr/bin/python3 -B ${prefix}/host-logs.py
+# Light by construction, and capped so it can never take from a job.
+Nice=10
+CPUQuota=10%
+MemoryMax=96M
+# The final flush: one journal read and one PutLogEvents, 5 s each at most.
+TimeoutStopSec=30
+# Off EC2 or with CI_RUNNER_LOG_GROUP=off it exits 0 and stays down.
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
 # A host launched from the image reads its disk lazily from the snapshot, at
 # ~116 MiB/s the first time a block is touched (measured 2026-09-25). Reading
 # the warm pnpm store once at boot, while the runner registers and the first
@@ -293,7 +331,9 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable ci-runner-credential.service ci-runner-prewarm.service
+systemctl enable ci-runner-credential.service ci-runner-prewarm.service ci-runner-logs.service
+# Restarting the shipper touches no job; it resumes from its saved cursor.
+systemctl restart ci-runner-logs.service
 systemctl enable --now ci-runner-image.timer ci-runner-idle.timer
 # Running slots are DRAINED, never restarted: a restart removes the job a slot
 # is running. Each finishes its job (or releases its waiting runner at once),
