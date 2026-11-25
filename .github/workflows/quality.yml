@@ -228,6 +228,20 @@ on:
         type: string
         required: false
         default: '.e2e-content-exceptions.json'
+      static-gates-fingerprint-command:
+        description: >-
+          Opt-in (FUT-4559): a consumer shell that prints a 32-128 hex-digit
+          hash of the PULL REQUEST HEAD's tree as the Static Gates read it
+          (the step exports PR_HEAD_SHA for it). When set, a ready run whose
+          hash, Node, runner, engine and gate inputs match an earlier PASSING
+          run of the same pull request skips the install and the gates that
+          read only the checked-out tree (complexity, flakiness, jscpd, knip,
+          DataViews, the page and spec scans). The three ratchets that diff
+          against the base branch and the flaky-quarantine check (it reads
+          the clock) still run on a hit. Empty (the default) changes nothing.
+        type: string
+        required: false
+        default: ''
       # ── Timeout overrides ──────────────────────────────────────────────
       # Every job here is bounded so a HANG fails in minutes rather than
       # running to GitHub's six-hour default. The defaults are sized from
@@ -298,15 +312,74 @@ jobs:
         with:
           # Full history: several gates diff the branch against its merge base.
           fetch-depth: 0
+
+      # ── Reuse this pull request's own green verdict (opt-in, FUT-4559) ──
+      # The owner's rule (2026-11-07): on a pull request, compare against the
+      # PR's own last tested head, never against the base branch. The consumer
+      # hashes the PR HEAD's tree (PR_HEAD_SHA, not the merge checkout) over
+      # every path a gate can read; the action folds in the engine, the caller
+      # workflows, the Node and the runner, and the key material below folds
+      # in every input that changes what a gate checks. A hit means this exact
+      # head already passed every gate on an earlier run of this PR.
+      #
+      # What a hit skips and what it does not, by what each step reads:
+      #   - the TREE gates (complexity, flakiness, jscpd, knip, DataViews, the
+      #     page and spec scans) read only the checked-out files. They are
+      #     gated on the install below, so a hit skips them with it;
+      #   - the three RATCHETS (.quality-exceptions, and the e2e coverage and
+      #     content exceptions) diff the merge base with the base branch
+      #     against HEAD, so their answer moves when the base branch moves even
+      #     if the PR head did not. They run on a hit, with no install: git and
+      #     node builtins only;
+      #   - the flaky-quarantine check compares each entry's expiry with
+      #     today's date, so it runs on a hit too (node builtins only).
+      # The tree gates run over the MERGE checkout, so a hit also leaves out
+      # what the base branch merged since that run. That is the owner's rule,
+      # as for Lint, Type Check and Build since FUT-4557: a base-branch-only
+      # break is not this PR's.
+      - name: Resolve Node for the verdict
+        id: verdict-node
+        if: ${{ inputs.static-gates-fingerprint-command != '' && github.event_name == 'pull_request' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Look up a recorded lane verdict
+        id: lane-verdict
+        if: ${{ inputs.static-gates-fingerprint-command != '' && github.event_name == 'pull_request' }}
+        uses: 12-apps/ci/.github/actions/lane-verdict@v2
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        with:
+          lane: static-gates
+          fingerprint-command: ${{ inputs.static-gates-fingerprint-command }}
+          key-material: |
+            node=${{ inputs.node-version }}
+            vars=${{ toJSON(vars) }}
+            tree=pr-head
+            run-knip=${{ inputs.run-knip }}
+            run-data-views=${{ inputs.run-data-views }}
+            flakiness-targets=${{ inputs.flakiness-targets }}
+            nextjs-app-dirs=${{ inputs.nextjs-app-dirs }}
+            loading-must-render=${{ inputs.loading-must-render }}
+            e2e-coverage=${{ inputs.e2e-coverage-app-dirs }}|${{ inputs.e2e-coverage-spec-suffix }}|${{ inputs.e2e-coverage-page-file }}|${{ inputs.e2e-coverage-exempt-globs }}|${{ inputs.e2e-coverage-exceptions }}
+            e2e-content=${{ inputs.e2e-content-app-dirs }}|${{ inputs.e2e-content-spec-suffix }}|${{ inputs.e2e-content-exempt-globs }}|${{ inputs.e2e-content-min-assertions }}|${{ inputs.e2e-content-exceptions }}
+      - name: Say what a verdict hit still runs
+        if: ${{ steps.lane-verdict.outputs.hit == 'true' }}
+        shell: bash
+        run: |
+          echo "::notice::Static Gates: this pull request head already passed every gate. The install and the tree gates are skipped; the three base-branch ratchets and the flaky-quarantine expiry check still run."
+      # pnpm stays on a hit: the quarantine check is a `pnpm quality:quarantine`.
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           run_install: false
       - uses: actions/setup-node@v4
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         with:
-          node-version: ${{ inputs.node-version }}
+          node-version: ${{ steps.verdict-node.outputs.node-version || inputs.node-version }}
           cache: ${{ !(runner.environment == 'self-hosted' && vars.CI_PNPM_STORE == 'warm') && 'pnpm' || '' }}
       - name: Install dependencies
         id: install
+        if: ${{ steps.lane-verdict.outputs.hit != 'true' }}
         shell: bash
         run: |
           set -o pipefail
@@ -406,7 +479,7 @@ jobs:
           fi
           exit "$(cat "$gate.exit")"
       - name: Validate flaky-quarantine.json
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ !cancelled() && (steps.install.outcome == 'success' || steps.lane-verdict.outputs.hit == 'true') }}
         shell: bash
         run: |
           set -o pipefail
@@ -448,7 +521,7 @@ jobs:
       # Self-contained (pure git + bash); needs no consumer script. No-ops when
       # the repo has no `.quality-exceptions` file.
       - name: Enforce .quality-exceptions burn-down (shrink-only + touch-must-fix)
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ !cancelled() && (steps.install.outcome == 'success' || steps.lane-verdict.outputs.hit == 'true') }}
         shell: bash
         env:
           BASE_REF: ${{ github.base_ref || 'main' }}
@@ -743,7 +816,7 @@ jobs:
           console.log(`OK: ${pageDirs.length} route segment(s), ${specFiles.length} co-located ${SUFFIX} spec(s); ${exSet.size} grandfathered.`);
           EOF
       - name: Enforce exceptions ratchet (shrink-only + touch-must-fix)
-        if: ${{ !cancelled() && steps.install.outcome == 'success' && inputs.e2e-coverage-app-dirs != '' }}
+        if: ${{ !cancelled() && (steps.install.outcome == 'success' || steps.lane-verdict.outputs.hit == 'true') && inputs.e2e-coverage-app-dirs != '' }}
         env:
           APP_DIRS: ${{ inputs.e2e-coverage-app-dirs }}
           SPEC_SUFFIX: ${{ inputs.e2e-coverage-spec-suffix }}
@@ -1097,7 +1170,7 @@ jobs:
           console.log(`OK: ${specFiles.length} ${SUFFIX} spec(s) scanned; ${weak.size} weak (all grandfathered); ${exSet.size} listed.`);
           EOF
       - name: Enforce exceptions ratchet (shrink-only + touch-must-fix)
-        if: ${{ !cancelled() && steps.install.outcome == 'success' && inputs.e2e-content-app-dirs != '' }}
+        if: ${{ !cancelled() && (steps.install.outcome == 'success' || steps.lane-verdict.outputs.hit == 'true') && inputs.e2e-content-app-dirs != '' }}
         env:
           APP_DIRS: ${{ inputs.e2e-content-app-dirs }}
           SPEC_SUFFIX: ${{ inputs.e2e-content-spec-suffix }}
@@ -1175,6 +1248,16 @@ jobs:
           if (fail) process.exit(1);
           console.log(`✓ ${process.env.HEAD_FILE} ratchet OK (shrink-only; no touched spec left grandfathered).`);
           EOF
+
+      # LAST step: only a job whose every step passed records, never after a
+      # hit (the hit did not run the tree gates), never without a key.
+      - name: Record the lane verdict
+        if: ${{ success() && steps.lane-verdict.outputs.key != '' && steps.lane-verdict.outputs.hit != 'true' }}
+        uses: 12-apps/ci/.github/actions/lane-verdict@v2
+        with:
+          mode: record
+          lane: static-gates
+          key: ${{ steps.lane-verdict.outputs.key }}
 
   e2e-affected:
     name: E2E (affected only)

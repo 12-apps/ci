@@ -1001,7 +1001,23 @@ keyed on `src/pages/<route>/index.tsx` passes `^index\.tsx$`),
 `e2e-content-app-dirs` (default empty — opt-in e2e content-quality gate),
 `e2e-content-spec-suffix` (default `.e2e.ts`), `e2e-content-exempt-globs`
 (default `.journey.,.global.`), `e2e-content-min-assertions` (default `2`),
-`e2e-content-exceptions` (default `.e2e-content-exceptions.json`).
+`e2e-content-exceptions` (default `.e2e-content-exceptions.json`),
+`static-gates-fingerprint-command` (default empty — opt-in verdict reuse, below).
+
+### Static Gates verdict reuse (opt-in, FUT-4559)
+
+Pass `static-gates-fingerprint-command`: a shell that prints a 32-128 hex-digit
+hash of the **pull request head's** tree (the step exports `PR_HEAD_SHA`) over
+every path a gate can read. On a pull request, a run whose hash, Node, runner,
+engine, caller workflows and gate inputs match an earlier passing run of the
+same PR skips the install and the gates that read only the checked-out tree
+(complexity, flakiness, jscpd, knip, DataViews, the page and spec scans).
+The `.quality-exceptions` burn-down and the two e2e exceptions ratchets diff
+the merge base with the base branch, so their answer moves when the base
+branch moves: they run on a hit, with no install. So does the flaky-quarantine
+check, which compares expiry dates with today. The verdict is recorded only
+by a run whose every step passed. A command that fails or prints no hash
+means no lookup, and the job runs in full.
 
 ### Next.js loading-coverage gate (opt-in)
 
