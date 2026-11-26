@@ -241,6 +241,14 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/deploy-prune-keeps-compose-images.test.mjs
 
+      # The reusable OpenTofu plan/apply (FUT-3934): a missing credential
+      # skips with a notice instead of failing, every credential present runs
+      # the plan, apply is reachable only from a push to the default branch and
+      # is never cancelled, and the checks need no credential at all.
+      - name: IaC plan/apply
+        shell: bash
+        run: node --test .github/workflows/__tests__/iac.test.mjs
+
       # The pin a reader copies, against the major this repo actually supports.
       #
       # These drifted apart and nothing compared them: README.md said `@v2` in

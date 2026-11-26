@@ -42,6 +42,8 @@ const PINNED = new Map([
   ["deploy-aws.yml:deploy", "scripts/deploy/aws.mjs runs the aws CLI ubuntu-latest ships preinstalled"],
   ["runner-image-refresh.yml:refresh", "it replaces the fleet's image, so it cannot wait on the fleet; and it runs the aws CLI"],
   ["conflict-restack.yml:restack", "holds a PAT: a job that can push belongs on a runner recycled per job, with no input to move it"],
+  ["iac.yml:plan", "holds the IaC providers' tokens (Hostinger, Cloudflare) and the state role: a runner recycled per job, with no input to move it"],
+  ["iac.yml:apply", "holds the tokens that BUY machines and rewrite DNS: a runner recycled per job, with no input to move it"],
 ]);
 
 const isReusable = (source) => /^ {2}workflow_call:/m.test(source);

@@ -2973,3 +2973,72 @@ change token permissions or grant access to a fleet. Existing private consumers
 that omit it retain their configured runner. For post-merge regeneration, both
 explicit and inherited choices must be ephemeral per job, as its existing
 secret-isolation contract requires.
+
+# Consuming IaC plan/apply
+
+`iac.yml` checks, plans and applies ONE OpenTofu root per call. On a pull
+request it runs `tofu fmt -check`, `init -backend=false`, `validate`, `tofu
+test` when the root has a `tests/` directory, and then `plan`. The plan runs
+under a reviewer-less plan environment, and its output is ONE comment per root
+that each run edits in place. On a push to the default branch it applies under
+the root's own environment. Apply runs in a concurrency group per root
+(`iac-<working_directory>`) that is never cancelled.
+
+## A. Caller workflow (consumer `.github/workflows/infra.yml`)
+
+```yaml
+on:
+  pull_request:
+    paths: ['infra/**']
+  push:
+    branches: [main]
+    paths: ['infra/**']
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  dev:
+    uses: 12-apps/ci/.github/workflows/iac.yml@v2
+    with:
+      working_directory: infra/envs/dev
+      apply_environment: infra-dev
+      required_secrets: HOSTINGER_API_TOKEN
+    secrets: inherit
+  prod:
+    needs: dev
+    uses: 12-apps/ci/.github/workflows/iac.yml@v2
+    with:
+      working_directory: infra/envs/prod
+      apply_environment: infra-prod
+      required_secrets: HOSTINGER_API_TOKEN
+    secrets: inherit
+```
+
+Leave out `apply_environment` to only check a directory, such as a module with
+its own `tests/`.
+
+## B. What each environment holds
+
+| name | kind | read by |
+|---|---|---|
+| `IAC_AWS_ROLE_ARN` | variable | the S3 state backend, through OIDC (`id-token: write`). The plan environment's role is read-only. |
+| `HOSTINGER_API_TOKEN` | secret | the `hostinger/hostinger` provider |
+| `CLOUDFLARE_API_TOKEN` | secret | the `cloudflare/cloudflare` provider |
+
+`required_secrets` names the secrets that a root's providers need. A name the
+workflow does not export is an error, because the plan would otherwise skip
+forever while the secret exists. Adding a provider means adding its variable
+in both places in `iac.yml`.
+
+## C. Before the credentials exist
+
+Until the environment holds every item in B, plan and apply **skip**. The job
+stays green and posts a notice, a step summary and the plan comment, each
+naming what is missing. The checks in the first job still run. A root can
+therefore land, and be reviewed as code, before the owner creates its
+credentials. GitHub creates an environment the first time a job names it, and
+it creates it with no reviewers. Add the required reviewers to every apply
+environment that matters before you add its secrets.

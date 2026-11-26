@@ -1,0 +1,388 @@
+name: IaC · OpenTofu
+
+# Reusable plan/apply for ONE OpenTofu root (or a module, checked only).
+#
+#   pull_request   `tofu fmt -check`, `init -backend=false`, `validate` and,
+#                  when the root has a tests/ directory, `tofu test` (mocked
+#                  providers, no credentials); then `plan` under the
+#                  reviewer-less plan environment, posted as ONE pull-request
+#                  comment per root, updated in place.
+#   push to main   the same checks, then `apply` under the root's own
+#                  environment (give the environments that matter required
+#                  reviewers: the job waits for them).
+#
+# Credentials never sit in the caller's YAML. The plan and apply jobs read them
+# from the environment they run under (`secrets: inherit`):
+#   - each name in `required_secrets` (the providers' own variables:
+#     HOSTINGER_API_TOKEN, CLOUDFLARE_API_TOKEN);
+#   - the environment VARIABLE `IAC_AWS_ROLE_ARN`, an OIDC role for the S3
+#     state backend (read-only for the plan environment).
+# Until they exist, plan and apply SKIP with a notice naming what is missing,
+# and the checks above still run: a root can land before its credentials do.
+#
+# Serialization: OpenTofu's S3 lock (`use_lockfile`) plus one concurrency group
+# per root for apply (`iac-<working_directory>`, never cancelled: a cancelled
+# apply is a half-applied root). The plan runs `-lock=false`, because a
+# read-only plan role cannot write the lock object.
+#
+# Caller (one job per root, ordered by `needs:`):
+#
+#   permissions:
+#     contents: read
+#     pull-requests: write
+#     id-token: write
+#   jobs:
+#     prod:
+#       uses: 12-apps/ci/.github/workflows/iac.yml@v2
+#       with:
+#         working_directory: infra/envs/prod
+#         apply_environment: infra-prod
+#         required_secrets: HOSTINGER_API_TOKEN
+#       secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: The root (or module) directory, relative to the repository root
+        type: string
+        required: true
+      plan_environment:
+        description: The environment the plan runs under (no reviewers, read-only credentials)
+        type: string
+        required: false
+        default: infra-plan
+      apply_environment:
+        description: The environment apply runs under. Empty = a module, checked only (no plan, no apply)
+        type: string
+        required: false
+        default: ''
+      required_secrets:
+        description: Comma-separated secrets the root's providers read (HOSTINGER_API_TOKEN, CLOUDFLARE_API_TOKEN)
+        type: string
+        required: false
+        default: ''
+      tofu_version:
+        description: The OpenTofu release to run
+        type: string
+        required: false
+        default: '1.11.1'
+      aws_region:
+        description: The state bucket's region
+        type: string
+        required: false
+        default: us-east-1
+
+# Least privilege at the source; the two jobs that need more declare it.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check · ${{ inputs.working_directory }}
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Bound so a HANG fails in minutes instead of running to
+    # GitHub's six-hour default; see job-timeouts.test.mjs.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install OpenTofu
+        shell: bash
+        env:
+          TOFU_VERSION: ${{ inputs.tofu_version }}
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) arch=amd64 ;;
+            aarch64|arm64) arch=arm64 ;;
+            *) echo "::error::no OpenTofu build for $(uname -m)"; exit 1 ;;
+          esac
+          dir="$RUNNER_TEMP/tofu"
+          mkdir -p "$dir"
+          cd "$dir"
+          tarball="tofu_${TOFU_VERSION}_linux_${arch}.tar.gz"
+          base="https://github.com/opentofu/opentofu/releases/download/v${TOFU_VERSION}"
+          curl -fsSLO --retry 3 "$base/$tarball"
+          curl -fsSLO --retry 3 "$base/tofu_${TOFU_VERSION}_SHA256SUMS"
+          # The release's own checksum, or nothing runs.
+          grep " ${tarball}\$" "tofu_${TOFU_VERSION}_SHA256SUMS" | sha256sum -c -
+          tar -xzf "$tarball" tofu
+          echo "$dir" >> "$GITHUB_PATH"
+
+      - name: Format
+        shell: bash
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          tofu version
+          tofu fmt -check -recursive -diff
+
+      - name: Validate
+        shell: bash
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          tofu init -backend=false -input=false -no-color
+          tofu validate -no-color
+
+      # Mocked providers only (`mock_provider`), so no credentials and nothing bought.
+      - name: Test
+        shell: bash
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          if [ -d tests ] && ls tests/*.tftest.hcl >/dev/null 2>&1; then
+            tofu test -no-color
+          else
+            echo "no tests/*.tftest.hcl here"
+          fi
+
+  plan:
+    name: Plan · ${{ inputs.working_directory }}
+    needs: check
+    if: ${{ github.event_name == 'pull_request' && inputs.apply_environment != '' }}
+    # Pinned: this job holds the providers' tokens. It belongs on a runner
+    # recycled per job, with no input to move it; see runner-selection.test.mjs.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: ${{ inputs.plan_environment }}
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check credentials
+        id: creds
+        shell: bash
+        env:
+          IAC_PHASE: plan
+          IAC_WORKDIR: ${{ inputs.working_directory }}
+          IAC_ENVIRONMENT: ${{ inputs.plan_environment }}
+          REQUIRED_SECRETS: ${{ inputs.required_secrets }}
+          IAC_AWS_ROLE_ARN: ${{ vars.IAC_AWS_ROLE_ARN }}
+          HOSTINGER_API_TOKEN: ${{ secrets.HOSTINGER_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          missing=""
+          for name in $(printf '%s' "$REQUIRED_SECRETS" | tr ',' ' '); do
+            case "$name" in
+              HOSTINGER_API_TOKEN|CLOUDFLARE_API_TOKEN) ;;
+              *) echo "::error::required_secrets names $name, which iac.yml does not pass to tofu"; exit 1 ;;
+            esac
+            if [ -z "${!name:-}" ]; then missing="${missing:+$missing, }secret $name"; fi
+          done
+          if [ -z "${IAC_AWS_ROLE_ARN:-}" ]; then missing="${missing:+$missing, }variable IAC_AWS_ROLE_ARN"; fi
+          if [ -n "$missing" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "missing=$missing" >> "$GITHUB_OUTPUT"
+            echo "::notice title=IaC $IAC_PHASE skipped ($IAC_WORKDIR)::missing in the $IAC_ENVIRONMENT environment: $missing. fmt and validate ran; the $IAC_PHASE runs once these exist."
+            {
+              echo "### IaC $IAC_PHASE skipped: \`$IAC_WORKDIR\`"
+              echo
+              echo "Missing in the \`$IAC_ENVIRONMENT\` environment: $missing."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Authenticate to the state bucket
+        if: ${{ steps.creds.outputs.ready == 'true' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ inputs.aws_region }}
+          role-to-assume: ${{ vars.IAC_AWS_ROLE_ARN }}
+          role-session-name: iac-plan
+
+      - name: Install OpenTofu
+        if: ${{ steps.creds.outputs.ready == 'true' }}
+        shell: bash
+        env:
+          TOFU_VERSION: ${{ inputs.tofu_version }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/tofu"
+          mkdir -p "$dir"
+          cd "$dir"
+          tarball="tofu_${TOFU_VERSION}_linux_amd64.tar.gz"
+          base="https://github.com/opentofu/opentofu/releases/download/v${TOFU_VERSION}"
+          curl -fsSLO --retry 3 "$base/$tarball"
+          curl -fsSLO --retry 3 "$base/tofu_${TOFU_VERSION}_SHA256SUMS"
+          grep " ${tarball}\$" "tofu_${TOFU_VERSION}_SHA256SUMS" | sha256sum -c -
+          tar -xzf "$tarball" tofu
+          echo "$dir" >> "$GITHUB_PATH"
+
+      - name: Plan
+        id: plan
+        if: ${{ steps.creds.outputs.ready == 'true' }}
+        shell: bash
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          HOSTINGER_API_TOKEN: ${{ secrets.HOSTINGER_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -uo pipefail
+          tofu init -input=false -no-color > "$RUNNER_TEMP/iac-plan.txt" 2>&1 || { cat "$RUNNER_TEMP/iac-plan.txt"; echo "exit=1" >> "$GITHUB_OUTPUT"; exit 0; }
+          tofu plan -input=false -no-color -lock=false -detailed-exitcode > "$RUNNER_TEMP/iac-plan.txt" 2>&1
+          code=$?
+          cat "$RUNNER_TEMP/iac-plan.txt"
+          # 0 = no changes, 2 = changes, anything else = the plan failed.
+          echo "exit=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Write the comment
+        id: comment
+        shell: bash
+        env:
+          IAC_WORKDIR: ${{ inputs.working_directory }}
+          IAC_ENVIRONMENT: ${{ inputs.plan_environment }}
+          READY: ${{ steps.creds.outputs.ready }}
+          MISSING: ${{ steps.creds.outputs.missing }}
+          PLAN_EXIT: ${{ steps.plan.outputs.exit }}
+        run: |
+          set -euo pipefail
+          body="$RUNNER_TEMP/iac-comment.md"
+          {
+            echo "<!-- iac-plan:$IAC_WORKDIR -->"
+            if [ "$READY" != "true" ]; then
+              echo "### \`$IAC_WORKDIR\`: plan skipped"
+              echo
+              echo "Missing in the \`$IAC_ENVIRONMENT\` environment: $MISSING. \`fmt\` and \`validate\` ran."
+            else
+              case "$PLAN_EXIT" in
+                0) verdict="no changes" ;;
+                2) verdict="changes" ;;
+                *) verdict="**failed**" ;;
+              esac
+              echo "### \`$IAC_WORKDIR\`: plan, $verdict"
+              echo
+              echo '```'
+              # A comment holds 65,536 characters; keep the tail, where the summary is.
+              tail -c 60000 "$RUNNER_TEMP/iac-plan.txt"
+              echo '```'
+            fi
+          } > "$body"
+          echo "file=$body" >> "$GITHUB_OUTPUT"
+
+      # ONE comment per root, found by its marker and edited in place. A fork's
+      # token cannot comment, and a fork has no secrets either: the notice and
+      # the step summary above are its report.
+      - name: Post the comment
+        if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: actions/github-script@v7
+        env:
+          BODY_FILE: ${{ steps.comment.outputs.file }}
+          IAC_WORKDIR: ${{ inputs.working_directory }}
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync(process.env.BODY_FILE, 'utf8');
+            const marker = `<!-- iac-plan:${process.env.IAC_WORKDIR} -->`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
+            const mine = comments.find((c) => c.body && c.body.startsWith(marker));
+            if (mine) await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+            else await github.rest.issues.createComment({ owner, repo, issue_number, body });
+
+      - name: Fail on a failed plan
+        if: ${{ steps.creds.outputs.ready == 'true' && steps.plan.outputs.exit != '0' && steps.plan.outputs.exit != '2' }}
+        shell: bash
+        run: |
+          echo "::error::tofu plan failed; the output is in the step above and on the pull request."
+          exit 1
+
+  apply:
+    name: Apply · ${{ inputs.working_directory }}
+    needs: check
+    if: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.apply_environment != '' }}
+    # Pinned for the same reason as plan: it holds the write tokens.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: ${{ inputs.apply_environment }}
+    concurrency:
+      group: iac-${{ inputs.working_directory }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check credentials
+        id: creds
+        shell: bash
+        env:
+          IAC_PHASE: apply
+          IAC_WORKDIR: ${{ inputs.working_directory }}
+          IAC_ENVIRONMENT: ${{ inputs.apply_environment }}
+          REQUIRED_SECRETS: ${{ inputs.required_secrets }}
+          IAC_AWS_ROLE_ARN: ${{ vars.IAC_AWS_ROLE_ARN }}
+          HOSTINGER_API_TOKEN: ${{ secrets.HOSTINGER_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          missing=""
+          for name in $(printf '%s' "$REQUIRED_SECRETS" | tr ',' ' '); do
+            case "$name" in
+              HOSTINGER_API_TOKEN|CLOUDFLARE_API_TOKEN) ;;
+              *) echo "::error::required_secrets names $name, which iac.yml does not pass to tofu"; exit 1 ;;
+            esac
+            if [ -z "${!name:-}" ]; then missing="${missing:+$missing, }secret $name"; fi
+          done
+          if [ -z "${IAC_AWS_ROLE_ARN:-}" ]; then missing="${missing:+$missing, }variable IAC_AWS_ROLE_ARN"; fi
+          if [ -n "$missing" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "missing=$missing" >> "$GITHUB_OUTPUT"
+            echo "::notice title=IaC $IAC_PHASE skipped ($IAC_WORKDIR)::missing in the $IAC_ENVIRONMENT environment: $missing. fmt and validate ran; the $IAC_PHASE runs once these exist."
+            {
+              echo "### IaC $IAC_PHASE skipped: \`$IAC_WORKDIR\`"
+              echo
+              echo "Missing in the \`$IAC_ENVIRONMENT\` environment: $missing."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Authenticate to the state bucket
+        if: ${{ steps.creds.outputs.ready == 'true' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ inputs.aws_region }}
+          role-to-assume: ${{ vars.IAC_AWS_ROLE_ARN }}
+          role-session-name: iac-apply
+
+      - name: Install OpenTofu
+        if: ${{ steps.creds.outputs.ready == 'true' }}
+        shell: bash
+        env:
+          TOFU_VERSION: ${{ inputs.tofu_version }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/tofu"
+          mkdir -p "$dir"
+          cd "$dir"
+          tarball="tofu_${TOFU_VERSION}_linux_amd64.tar.gz"
+          base="https://github.com/opentofu/opentofu/releases/download/v${TOFU_VERSION}"
+          curl -fsSLO --retry 3 "$base/$tarball"
+          curl -fsSLO --retry 3 "$base/tofu_${TOFU_VERSION}_SHA256SUMS"
+          grep " ${tarball}\$" "tofu_${TOFU_VERSION}_SHA256SUMS" | sha256sum -c -
+          tar -xzf "$tarball" tofu
+          echo "$dir" >> "$GITHUB_PATH"
+
+      - name: Apply
+        if: ${{ steps.creds.outputs.ready == 'true' }}
+        shell: bash
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          HOSTINGER_API_TOKEN: ${{ secrets.HOSTINGER_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          tofu init -input=false -no-color
+          tofu apply -input=false -no-color -auto-approve
