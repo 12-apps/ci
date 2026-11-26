@@ -71,6 +71,13 @@ runuser -u runner -- env ${NODE_EXTRA_CA_CERTS:+NODE_EXTRA_CA_CERTS="$NODE_EXTRA
     sleep 0.5
   done
   [[ \$pong == +PONG ]] || { echo \"smoke: service container not reachable on localhost\" >&2; exit 1; }
+  # A container the job starts has its memory accounted: docker stats reads
+  # a number and a limit, never 0B / 0B (cgroup-nest.sh, FUT-5708).
+  usage=\$(docker stats --no-stream --format \"{{.MemUsage}}\" svc)
+  echo \"smoke: a services: container reads \$usage\"
+  case \"\$usage\" in
+    *\"/ 0B\"|--*) echo \"smoke: docker stats reads a running container as \$usage: no memory accounting\" >&2; exit 1 ;;
+  esac
 
   # Chromium on the baked-in libraries only: no --with-deps here.
   nv=v24.9.0
