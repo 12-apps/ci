@@ -102,6 +102,14 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/type-check-alone.test.mjs
 
+      - name: experiment-bucket
+        shell: bash
+        run: node --test .github/actions/experiment-bucket/__tests__/*.test.mjs
+
+      - name: Experiment bucket wiring
+        shell: bash
+        run: node --test .github/workflows/__tests__/experiment-bucket.test.mjs
+
       - name: Full-suite signal wiring
         shell: bash
         run: node --test .github/workflows/__tests__/full-suite-signal.test.mjs

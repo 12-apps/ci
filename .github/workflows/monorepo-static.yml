@@ -218,6 +218,28 @@ on:
         type: number
         required: false
         default: 30
+      experiments-file:
+        description: >-
+          Repo-relative path of the consumer's CI experiment registry (JSON),
+          read from the DEFAULT branch through the API, never from the pull
+          request's tree, so a pull request cannot put itself into an
+          experiment. Empty (the default) turns the bucket step off and the
+          `experiment` output is always '' (control). Each pull_request run
+          gets a bucket, the last digit of its run id; the registry says which
+          experiment holds which digits from which moment (see
+          .github/actions/experiment-bucket). Off a pull request every run is
+          control. It fails open: an unreadable registry is control, with a
+          warning, never a red job.
+        type: string
+        required: false
+        default: ''
+      experiments-off:
+        description: >-
+          Experiment names switched off at once (spaces or commas), typically a
+          repository variable, so an experiment can be stopped without a commit.
+        type: string
+        required: false
+        default: ''
       type-check-alone:
         description: >-
           Space-separated packages whose check-types runs by itself, after
@@ -410,6 +432,16 @@ on:
           `contains(fromJSON(needs.<job>.outputs.scripts), '<script>')`.
           Never empty — falls back to `[]`.
         value: ${{ jobs.changes.outputs.scripts }}
+      experiment:
+        description: >-
+          The CI experiment this run is in, or '' for control (always '' when
+          `experiments-file` is empty or off a pull request). Gate a knob with
+          `needs.<job>.outputs.experiment == '<name>'`. Jobs of THIS workflow
+          are not switched by it: their runner and inputs are fixed at call time.
+        value: ${{ jobs.changes.outputs.experiment }}
+      experiment-digit:
+        description: The run's bucket digit (0-9), '' when the bucket step is off.
+        value: ${{ jobs.changes.outputs.experiment-digit }}
 
 # Least-privilege, enforced at the source: the default is the read-only floor,
 # and the two jobs that need more declare it themselves.
@@ -457,9 +489,13 @@ jobs:
     # list from the API rather than from the checkout. Without it the filter
     # returns nothing and every downstream lane is selected off an empty change
     # set — green, fast, and testing nothing.
+    #
+    # `actions: read` is for the experiment bucket, which reads the run's own
+    # creation time; callers already grant it for the retry gate.
     permissions:
       contents: read
       pull-requests: read
+      actions: read
     name: Detect Changes
     runs-on: ${{ inputs.light-runner || inputs.runner || vars.CI_RUNNER || 'ubuntu-latest' }}
     # Bound so a HANG fails in minutes instead of running to
@@ -488,7 +524,21 @@ jobs:
       # are separate JOBS — a `steps.` context does not cross a job boundary, so
       # they read it through `needs.changes.outputs.stack-base`.
       stack-base: ${{ steps.stackbase.outputs.value }}
+      experiment: ${{ steps.experiment.outputs.experiment }}
+      experiment-digit: ${{ steps.experiment.outputs.digit }}
     steps:
+      # Which CI experiment this run is in. First, and before the checkout: it
+      # reads only the API (the registry on the default branch, the run's
+      # creation time), so it costs one second and cannot be steered by the
+      # pull request's own tree. Skipped unless the caller opted in.
+      - name: Experiment bucket
+        id: experiment
+        if: ${{ inputs.experiments-file != '' }}
+        uses: 12-apps/ci/.github/actions/experiment-bucket@v2
+        with:
+          file: ${{ inputs.experiments-file }}
+          off: ${{ inputs.experiments-off }}
+
       # Resolved before the checkout, because the checkout's depth depends on
       # the answer. Empty unless the caller opted in AND this pull request is
       # actually in a stack — `stack` is absent on an unstacked pull request and
