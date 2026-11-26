@@ -257,10 +257,71 @@ jobs:
 
           # Reclaim disk FIRST — before git or docker write anything. The
           # persistent box accumulates superseded image tags + build cache, and a
-          # full disk fails even git ("cannot write .git/config.lock"). Removes
-          # unused images/containers/networks + build cache only; named volumes
-          # (postgres_data) are preserved.
-          docker system prune -af || true
+          # full disk fails even git ("cannot write .git/config.lock"), so this
+          # stays at the very top. Named volumes (postgres_data) are never touched.
+          #
+          # It KEEPS the images the compose project on the box names (FUT-3975).
+          # This was `docker system prune -af`, which deletes every image no
+          # running container uses. The services of the `tools` profile
+          # (migrate, demo-seed, …) only ever run as `compose run --rm`, so
+          # their images were deleted on every deploy and every deploy pulled
+          # them again in full, even when not one of their layers had changed.
+          #
+          # What it keeps: the images `docker compose --profile tools config
+          # --images` names in /app as it stands BEFORE this deploy syncs it —
+          # the release now live, which is also the rollback target. The new
+          # release then pulls only the layers that differ from it. What still
+          # goes: stopped containers, unused networks, all build cache, dangling
+          # layers, and every tagged image the compose file does not name (an
+          # older tag, another namespace). A release kept here is dropped by the
+          # deploy after next, once the compose file stops naming it.
+          #
+          # Why not prune after the rollout instead: the pull needs the room, and
+          # the prune exists because a pull on a full disk failed (2026-07-03).
+          # Why the compose file rather than a tag match: an image's tag is the
+          # consumer's business (a sha, `main`, a pinned postgres); the compose
+          # file is the one list of what this stack runs.
+          #
+          # Disk still wins, and it fails safe both ways: with no /app yet, or a
+          # compose config that cannot be read, nothing is kept (the old
+          # behaviour); and if the docker root is still below DEPLOY_MIN_FREE_MB
+          # afterwards, every unused image goes as before and this pull is a full one.
+          reclaim_disk() {
+            local app_dir="$1" min_free_mb="${DEPLOY_MIN_FREE_MB:-3072}"
+            local refs="" keep="" id ref free
+            docker container prune -f >/dev/null 2>&1 || true
+            docker network prune -f >/dev/null 2>&1 || true
+            docker builder prune -af >/dev/null 2>&1 || true
+            docker image prune -f >/dev/null 2>&1 || true
+            if [ -d "$app_dir" ]; then
+              # Secrets may be needed to interpolate the file, so ask through
+              # Doppler first; DOPPLER_TOKEN is only exported further down.
+              refs=$(cd "$app_dir" && {
+                DOPPLER_TOKEN="$DOPPLER_TOKEN" doppler run -- docker compose --profile tools config --images 2>/dev/null \
+                  || docker compose --profile tools config --images 2>/dev/null
+              }) || refs=""
+            fi
+            # Compared by image ID: `config --images` prints a ref as written
+            # (docker.io/library/postgres:16), `image ls` in its short form.
+            for ref in $refs; do
+              id=$(docker image inspect --format '{{.Id}}' "$ref" 2>/dev/null) && keep="$keep $id"
+            done
+            n=$(printf '%s\n' $keep | sort -u | grep -c .) || n=0
+            echo "Reclaiming disk; keeping the ${n} image(s) the compose file names."
+            docker image ls --no-trunc --format '{{.ID}} {{.Repository}}:{{.Tag}}' 2>/dev/null \
+              | while read -r id ref; do
+                  case " $keep " in *" $id "*) continue ;; esac
+                  case "$ref" in *"<none>"*) ref="$id" ;; esac
+                  # No -f: an image a container still uses is refused, not removed.
+                  docker image rm "$ref" >/dev/null 2>&1 || true
+                done || true
+            free=$(df -Pm "$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /)" 2>/dev/null | awk 'NR==2 {print $4}') || free=""
+            if [ -n "$free" ] && [ "$free" -lt "$min_free_mb" ]; then
+              echo "::warning::only ${free} MB free after reclaiming (want ${min_free_mb}); removing every unused image, so this deploy pulls in full."
+              docker image prune -af >/dev/null 2>&1 || true
+            fi
+          }
+          reclaim_disk /app
 
           # x-access-token: prefix — GitHub Actions/App tokens (ghs_…) authenticate
           # as the username "x-access-token"; using the token as a bare username
@@ -306,8 +367,8 @@ jobs:
           # mid-layer (`failed to copy: … connection reset by peer`) used to
           # fail the whole deploy on the first one, and a new deploy cannot
           # build on the old attempt: the prune at the top of this script
-          # deletes every image a running container does not use, so each
-          # deploy starts every new layer from zero. Inside the loop, every
+          # deletes every image the compose file does not name, so the next
+          # deploy starts a failed one's new layers from zero. Inside the loop, every
           # layer an attempt finished stays in the local store, so the next
           # attempt fetches only what is missing. Bounded: a registry that is
           # really down still fails the deploy, after the last attempt.
