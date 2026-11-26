@@ -898,7 +898,11 @@ alone, without the nesting, on the same GitHub VM.
 
 **Results:**
 - Counterexample (`245ac92f4`, the smoke check alone): the "Runner host image" Self Tests job failed (job 140176057019): `smoke: a services: container reads 0B / 0B`, the same reading as the fleet.
-- Fix (the commit that adds `cgroup-nest.sh`): the same Self Tests job on it, recorded on 12-apps/ci#234 and FUT-5708.
+- Fix (`20c8d28`): the same job passed (job 140178115376): `smoke: a services: container reads
+  3.863MiB / 15.61GiB`. Its log also showed the single write of all nine controllers refused
+  (`Device or resource busy`): the kernel rejects a whole list when it rejects any one. Moving the
+  processes out of the root is what counted, since runc then enables what a container needs. The
+  script now writes one controller at a time and names only the ones refused.
 - `node --test` over the cgroup-nest, image-context and job-usage suites: 14/14.
 
 **Side effect, by design:** a limit a job's own compose or `docker run` sets (`mem_limit`,

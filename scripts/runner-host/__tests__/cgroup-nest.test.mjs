@@ -31,7 +31,8 @@ test("cgroup v2: the processes move to init and every controller is delegated", 
   const cg = cgroup({ "cgroup.controllers": "cpuset cpu io memory pids\n", "cgroup.procs": "1\n27\n", "cgroup.subtree_control": "" });
   const r = run(cg);
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(readFileSync(path.join(cg, "cgroup.subtree_control"), "utf8"), "+cpuset +cpu +io +memory +pids\n");
+  // A regular file keeps the last write; the kernel's file accumulates each.
+  assert.equal(readFileSync(path.join(cg, "cgroup.subtree_control"), "utf8"), "+pids\n");
   assert.equal(readFileSync(path.join(cg, "init", "cgroup.procs"), "utf8"), "27\n", "each pid is written to the leaf");
 });
 
@@ -47,7 +48,7 @@ test("a refused delegation warns and still exits 0, so it never costs a job", ()
   const cg = cgroup({ "cgroup.controllers": "memory\n", "cgroup.procs": "1\n", "cgroup.subtree_control": "<dir>" });
   const r = run(cg);
   assert.equal(r.status, 0);
-  assert.match(r.stderr, /could not enable 'memory' for the job's containers/);
+  assert.match(r.stderr, /the kernel refused to delegate: memory$/m);
 });
 
 test("the image installs it and the entrypoint runs it before the sampler and dockerd", () => {

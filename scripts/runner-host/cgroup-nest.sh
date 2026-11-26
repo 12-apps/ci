@@ -39,7 +39,13 @@ for _ in 1 2 3 4 5; do
   [[ -s "$cg/cgroup.procs" ]] || break
 done
 
-controllers=$(sed -e 's/^ *//' -e 's/ *$//' -e 's/  */ /g' "$cg/cgroup.controllers")
-[[ -n "$controllers" ]] || exit 0
-echo "+${controllers// / +}" > "$cg/cgroup.subtree_control" \
-  || warn "could not enable '${controllers}' for the job's containers; they keep no accounting"
+# One write per controller: the kernel refuses a whole list when it refuses any
+# one of it (`Device or resource busy` on a GitHub VM, 2026-11-26, for a list
+# of nine). runc enables what a container needs on its own once the root is
+# empty, so a refused controller is named here and costs nothing else.
+refused=()
+read -r -a controllers < "$cg/cgroup.controllers" || true
+for c in "${controllers[@]}"; do
+  echo "+$c" > "$cg/cgroup.subtree_control" 2>/dev/null || refused+=("$c")
+done
+(( ${#refused[@]} == 0 )) || warn "the kernel refused to delegate: ${refused[*]}"
