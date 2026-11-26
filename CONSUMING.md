@@ -2973,3 +2973,84 @@ change token permissions or grant access to a fleet. Existing private consumers
 that omit it retain their configured runner. For post-merge regeneration, both
 explicit and inherited choices must be ephemeral per job, as its existing
 secret-isolation contract requires.
+
+# Consuming IaC plan/apply
+
+`iac.yml` checks, plans and applies ONE OpenTofu root per call. On a pull
+request it runs `tofu fmt -check`, `init -backend=false`, `validate`, `tofu
+test` when the root has a `tests/` directory, and then `plan -refresh=false`.
+The plan runs under a reviewer-less plan environment, and its output is ONE
+comment per root that each run edits in place. A newer push cancels an older
+plan. On a push to the default branch it applies under the root's own
+environment. Apply runs in a concurrency group per root
+(`iac-<working_directory>`, `cancel-in-progress: false`): a running apply is
+never cancelled, and GitHub drops an apply that is only queued behind it in
+favour of the newer one.
+
+## A. Caller workflow (consumer `.github/workflows/infra.yml`)
+
+```yaml
+on:
+  pull_request:
+    paths: ['infra/**']
+  push:
+    branches: [main]
+    paths: ['infra/**']
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  dev:
+    uses: 12-apps/ci/.github/workflows/iac.yml@v2
+    with:
+      working_directory: infra/envs/dev
+      apply_environment: infra-dev
+      required_secrets: HOSTINGER_API_TOKEN   # apply only; plan_secrets defaults to none
+    secrets: inherit
+  prod:
+    needs: dev
+    uses: 12-apps/ci/.github/workflows/iac.yml@v2
+    with:
+      working_directory: infra/envs/prod
+      apply_environment: infra-prod
+      required_secrets: HOSTINGER_API_TOKEN
+    secrets: inherit
+```
+
+Leave out `apply_environment` to only check a directory, such as a module with
+its own `tests/`.
+
+## B. What each environment holds
+
+| name | kind | plan environment | apply environment |
+|---|---|---|---|
+| `IAC_AWS_ROLE_ARN` | variable | a role that reads the state | a role that reads and writes it |
+| `HOSTINGER_API_TOKEN` | secret | **never** (no read-only token exists; the plan gets a placeholder) | yes |
+| `CLOUDFLARE_API_TOKEN` | secret | a DNS-read token, when the root lists it in `plan_secrets` | a DNS-edit token |
+
+`required_secrets` names what apply needs and `plan_secrets` what the plan
+needs. A name the job does not export is an error, because the gate would
+otherwise skip forever while the secret exists. Adding a provider means adding
+its variable in `iac.yml`.
+
+**What the plan environment exposes.** It has no reviewers, and the plan runs
+the pull request's own code. Anyone who can push a branch to the repository
+can therefore read what that environment holds: its secrets, and everything
+the state-read role can read. State holds every sensitive attribute the roots
+write, so never put a token that can change anything in the plan environment,
+and treat read access to state as access to whatever state contains. Without
+refresh, the plan compares the code with the state, and drift shows up only
+when apply plans again with the real token.
+
+## C. Before the credentials exist
+
+Until the environment holds every item in B, plan and apply **skip**. The job
+stays green and posts a notice, a step summary and the plan comment, each
+naming what is missing. The checks in the first job still run. A root can
+therefore land, and be reviewed as code, before the owner creates its
+credentials. GitHub creates an environment the first time a job names it, and
+it creates it with no reviewers. Add the required reviewers to every apply
+environment that matters before you add its secrets.
