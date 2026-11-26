@@ -152,6 +152,7 @@ RUN test -n "$RUNNER_VERSION" \
 
 COPY entrypoint.sh /usr/local/bin/ci-runner-entrypoint
 COPY localhost.sh /usr/local/bin/ci-runner-localhost
+COPY cgroup-nest.sh /usr/local/bin/ci-runner-cgroup-nest
 # The runner runs a hook only from a `.sh` path, and one file serves both: the
 # name it is called by picks the mode (job-usage.sh).
 COPY job-usage.sh /usr/local/bin/ci-runner-job-usage

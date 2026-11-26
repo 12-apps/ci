@@ -877,3 +877,37 @@ task replays the OLD stamp.
 
 **Revert if:** the unit concurrency still exceeds the leg's fork count after a re-run, or a leg
 that executed is marked replayed. Rollback: revert this PR. A stamped map is then read as before.
+
+## E-015 — A slot's containers get its cgroup controllers (FUT-5708)
+
+**Date:** 2026-11-26 · **Status:** Fix proven on the Self Tests VM; fleet proof follows the image refresh
+
+**Question:** why does `docker stats` read every container a job starts as `0B / 0B` on the
+self-hosted fleet, and can the slot image delegate the controllers without costing a job?
+
+**Baseline:** future-pay's `Memory tighten` run 45887319544 (main 9e0b60959) printed, from inside
+a fleet slot: `cgroup v2 cgroupfs, Docker 29.10.1`, an empty `cgroup.subtree_control`, and
+`a running redis reads: 0B / 0B`. The entrypoint started `dockerd` with no cgroup v2 nesting
+step, so the slot's private cgroup namespace enabled no controller for its children.
+
+**Method:** `cgroup-nest.sh` (`ci-runner-cgroup-nest`) moves every process into an `init` leaf
+and writes the root's `cgroup.controllers` into `cgroup.subtree_control`, as `docker:dind` does.
+The entrypoint runs it before the usage sampler and `dockerd`. `smoke.sh` runs it the same way and
+checks that its `services:` container reads a real limit. Counterexample first: the smoke check
+alone, without the nesting, on the same GitHub VM.
+
+**Results:**
+- Counterexample (`245ac92f4`, the smoke check alone): the "Runner host image" Self Tests job failed (job 140176057019): `smoke: a services: container reads 0B / 0B`, the same reading as the fleet.
+- Fix (the commit that adds `cgroup-nest.sh`): the same Self Tests job on it, recorded on 12-apps/ci#234 and FUT-5708.
+- `node --test` over the cgroup-nest, image-context and job-usage suites: 14/14.
+
+**Side effect, by design:** a limit a job's own compose or `docker run` sets (`mem_limit`,
+`--memory`) is now enforced on the fleet, as it is on `ubuntu-latest`. `job-usage.sh` reads the
+slot's root cgroup, which counts every descendant, so the usage line is unchanged.
+
+**Regression watch:** after the next `runner-image-refresh`, the first week of
+`ci-runner-usage` lines (`usage-report.mjs`) against the week before: wall time and
+`peakWorkingSetMiB` per lane, and any job newly killed by a limit it sets itself.
+
+**Revert if:** a job that passed on the old image fails on a limit it now gets, or the usage line
+changes for the same job. Rollback: revert this PR and refresh the image.

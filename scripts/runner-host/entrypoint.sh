@@ -17,6 +17,11 @@ unset RUNNER_JITCONFIG
 # `localhost` must be 127.0.0.1 alone, as on ubuntu-latest (localhost.sh).
 ci-runner-localhost
 
+# The job's own containers get memory, cpu and io accounting, so `docker stats`
+# reads them (cgroup-nest.sh). Before the sampler and dockerd start, while this
+# script is the container's only process.
+ci-runner-cgroup-nest
+
 # What the job uses, sampled for the container's life (job-usage.sh). The
 # runner's start/complete hooks (ACTIONS_RUNNER_HOOK_JOB_*, set in the image)
 # read it and print one `ci-runner-usage` line into the job's log.

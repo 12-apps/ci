@@ -23,6 +23,11 @@ test "$(id -u)" = 0
 ci-runner-localhost
 grep -q "^unset HOSTNAME$" /usr/local/bin/ci-runner-entrypoint \
   || { echo "smoke: the entrypoint lets the Docker HOSTNAME reach the job" >&2; exit 1; }
+# Then the controllers are delegated to the containers the job starts
+# (cgroup-nest.sh), before dockerd: checked below on the services: container.
+grep -q "^ci-runner-cgroup-nest$" /usr/local/bin/ci-runner-entrypoint \
+  || { echo "smoke: the entrypoint does not delegate the cgroup controllers" >&2; exit 1; }
+ci-runner-cgroup-nest
 dockerd >/var/log/dockerd.log 2>&1 &
 for _ in $(seq 1 120); do docker info >/dev/null 2>&1 && break; sleep 0.5; done
 # What the job uses (job-usage.sh): the sampler the entrypoint starts, and the
