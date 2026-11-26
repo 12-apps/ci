@@ -61,7 +61,8 @@ function gate(job, env) {
   }
 }
 
-const ALL = { REQUIRED_SECRETS: "HOSTINGER_API_TOKEN", HOSTINGER_API_TOKEN: "x", IAC_AWS_ROLE_ARN: "arn:aws:iam::1:role/r" };
+const EXPORTED = "HOSTINGER_API_TOKEN,CLOUDFLARE_API_TOKEN";
+const ALL = { REQUIRED_SECRETS: "HOSTINGER_API_TOKEN", IAC_EXPORTED: EXPORTED, HOSTINGER_API_TOKEN: "x", IAC_AWS_ROLE_ARN: "arn:aws:iam::1:role/r" };
 
 test("it is reusable and declares the three inputs the caller passes", () => {
   assert.match(source, /^ {2}workflow_call:/m);
@@ -109,7 +110,7 @@ test("the two jobs gate on the same credential check", () => {
 });
 
 test("no credential: the gate SKIPS, green, with a notice naming what is missing", () => {
-  const r = gate("plan", { REQUIRED_SECRETS: "HOSTINGER_API_TOKEN" });
+  const r = gate("plan", { REQUIRED_SECRETS: "HOSTINGER_API_TOKEN", IAC_EXPORTED: EXPORTED });
   assert.equal(r.status, 0, "a missing credential must not fail the job");
   assert.match(r.output, /^ready=false$/m);
   assert.match(r.stdout, /^::notice title=IaC plan skipped \(infra\/envs\/prod\)::.*secret HOSTINGER_API_TOKEN.*variable IAC_AWS_ROLE_ARN/m);
@@ -133,15 +134,46 @@ test("every credential present: the gate lets the plan run", () => {
 test("a required secret the workflow does not pass to tofu is an error, not a skip", () => {
   const r = gate("apply", { ...ALL, REQUIRED_SECRETS: "HOSTINGER_API_TOKEN,DO_API_TOKEN" });
   assert.equal(r.status, 1, "a name the workflow never exports would skip forever while the secret exists");
-  assert.match(r.stdout, /::error::required_secrets names DO_API_TOKEN/);
+  assert.match(r.stdout, /::error::apply needs DO_API_TOKEN, which iac.yml does not pass to tofu in this job/);
 });
 
-test("each secret the gate accepts is exported to the step that runs tofu", () => {
-  const accepted = /case "\$name" in\n\s+([A-Z_|]+)\)/.exec(source)[1].split("|");
-  for (const job of ["plan", "apply"]) {
-    const run = jobText(job).split(/\n {6}- /).find((s) => /^name: (Plan|Apply)\n/.test(s));
-    for (const name of accepted) assert.match(run, new RegExp(`${name}: \\$\\{\\{ secrets\\.${name} \\}\\}`), `${job} does not pass ${name} to tofu`);
+/** The comma list a job's gate step sets as IAC_EXPORTED. */
+const exportedBy = (job) => /IAC_EXPORTED: ([A-Z_,]+)/.exec(jobText(job))[1].split(",");
+
+test("each secret a job's gate accepts is exported to the step that runs tofu", () => {
+  for (const [job, step] of [["plan", "Plan"], ["apply", "Apply"]]) {
+    const run = jobText(job).split(/\n {6}- /).find((s) => s.startsWith(`name: ${step}\n`));
+    for (const name of exportedBy(job)) assert.match(run, new RegExp(`${name}: \\$\\{\\{ secrets\\.${name} \\}\\}`), `${job} does not pass ${name} to tofu`);
   }
+});
+
+test("the reviewer-less plan never receives a token that can change anything", () => {
+  const plan = jobText("plan");
+  // Hostinger has no read-only token: it buys and cancels machines.
+  assert.doesNotMatch(plan, /secrets\.HOSTINGER_API_TOKEN/, "the plan job reads the Hostinger token");
+  assert.deepEqual(exportedBy("plan"), ["CLOUDFLARE_API_TOKEN"]);
+  assert.match(plan, /REQUIRED_SECRETS: \$\{\{ inputs\.plan_secrets \}\}/, "the plan gate must check plan_secrets, not apply's required_secrets");
+  assert.match(plan, /HOSTINGER_API_TOKEN: plan-runs-without-provider-credentials/);
+  assert.match(plan, /tofu plan [^\n]*-refresh=false/, "with no provider token the plan must not refresh");
+  assert.match(source, /^ {6}plan_secrets:[\s\S]*?default: ''$/m, "plan_secrets must default to none");
+});
+
+test("a Hostinger root's plan gate does not wait for a Hostinger token", () => {
+  const r = gate("plan", { REQUIRED_SECRETS: "", IAC_EXPORTED: "CLOUDFLARE_API_TOKEN", IAC_AWS_ROLE_ARN: "arn:aws:iam::1:role/r" });
+  assert.equal(r.status, 0);
+  assert.match(r.output, /^ready=true$/m);
+  const refused = gate("plan", { REQUIRED_SECRETS: "HOSTINGER_API_TOKEN", IAC_EXPORTED: "CLOUDFLARE_API_TOKEN", HOSTINGER_API_TOKEN: "x", IAC_AWS_ROLE_ARN: "r" });
+  assert.equal(refused.status, 1, "plan_secrets naming the Hostinger token must be refused, not satisfied");
+});
+
+test("a newer push replaces an older plan; a running apply is never replaced", () => {
+  assert.match(jobText("plan"), /concurrency:\n\s+group: iac-plan-\$\{\{ github\.event\.pull_request\.number \}\}-\$\{\{ inputs\.working_directory \}\}\n\s+cancel-in-progress: true/);
+});
+
+test("the actions that hold the OIDC token and the PR write scope are pinned by sha", () => {
+  const refs = [...source.matchAll(/uses: ((?:aws-actions|actions\/github-script)[^\s@]*)@(\S+)/g)];
+  assert.ok(refs.length >= 3);
+  for (const [, action, ref] of refs) assert.match(ref, /^[0-9a-f]{40}$/, `${action}@${ref} is a mutable tag`);
 });
 
 test("the plan comment is ONE per root, updated in place", () => {

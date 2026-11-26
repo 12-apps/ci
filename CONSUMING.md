@@ -2978,11 +2978,14 @@ secret-isolation contract requires.
 
 `iac.yml` checks, plans and applies ONE OpenTofu root per call. On a pull
 request it runs `tofu fmt -check`, `init -backend=false`, `validate`, `tofu
-test` when the root has a `tests/` directory, and then `plan`. The plan runs
-under a reviewer-less plan environment, and its output is ONE comment per root
-that each run edits in place. On a push to the default branch it applies under
-the root's own environment. Apply runs in a concurrency group per root
-(`iac-<working_directory>`) that is never cancelled.
+test` when the root has a `tests/` directory, and then `plan -refresh=false`.
+The plan runs under a reviewer-less plan environment, and its output is ONE
+comment per root that each run edits in place. A newer push cancels an older
+plan. On a push to the default branch it applies under the root's own
+environment. Apply runs in a concurrency group per root
+(`iac-<working_directory>`, `cancel-in-progress: false`): a running apply is
+never cancelled, and GitHub drops an apply that is only queued behind it in
+favour of the newer one.
 
 ## A. Caller workflow (consumer `.github/workflows/infra.yml`)
 
@@ -3005,7 +3008,7 @@ jobs:
     with:
       working_directory: infra/envs/dev
       apply_environment: infra-dev
-      required_secrets: HOSTINGER_API_TOKEN
+      required_secrets: HOSTINGER_API_TOKEN   # apply only; plan_secrets defaults to none
     secrets: inherit
   prod:
     needs: dev
@@ -3022,16 +3025,25 @@ its own `tests/`.
 
 ## B. What each environment holds
 
-| name | kind | read by |
-|---|---|---|
-| `IAC_AWS_ROLE_ARN` | variable | the S3 state backend, through OIDC (`id-token: write`). The plan environment's role is read-only. |
-| `HOSTINGER_API_TOKEN` | secret | the `hostinger/hostinger` provider |
-| `CLOUDFLARE_API_TOKEN` | secret | the `cloudflare/cloudflare` provider |
+| name | kind | plan environment | apply environment |
+|---|---|---|---|
+| `IAC_AWS_ROLE_ARN` | variable | a role that reads the state | a role that reads and writes it |
+| `HOSTINGER_API_TOKEN` | secret | **never** (no read-only token exists; the plan gets a placeholder) | yes |
+| `CLOUDFLARE_API_TOKEN` | secret | a DNS-read token, when the root lists it in `plan_secrets` | a DNS-edit token |
 
-`required_secrets` names the secrets that a root's providers need. A name the
-workflow does not export is an error, because the plan would otherwise skip
-forever while the secret exists. Adding a provider means adding its variable
-in both places in `iac.yml`.
+`required_secrets` names what apply needs and `plan_secrets` what the plan
+needs. A name the job does not export is an error, because the gate would
+otherwise skip forever while the secret exists. Adding a provider means adding
+its variable in `iac.yml`.
+
+**What the plan environment exposes.** It has no reviewers, and the plan runs
+the pull request's own code. Anyone who can push a branch to the repository
+can therefore read what that environment holds: its secrets, and everything
+the state-read role can read. State holds every sensitive attribute the roots
+write, so never put a token that can change anything in the plan environment,
+and treat read access to state as access to whatever state contains. Without
+refresh, the plan compares the code with the state, and drift shows up only
+when apply plans again with the real token.
 
 ## C. Before the credentials exist
 

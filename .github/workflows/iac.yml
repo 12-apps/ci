@@ -4,26 +4,38 @@ name: IaC · OpenTofu
 #
 #   pull_request   `tofu fmt -check`, `init -backend=false`, `validate` and,
 #                  when the root has a tests/ directory, `tofu test` (mocked
-#                  providers, no credentials); then `plan` under the
-#                  reviewer-less plan environment, posted as ONE pull-request
-#                  comment per root, updated in place.
+#                  providers, no credentials); then `plan -refresh=false` under
+#                  the reviewer-less plan environment, posted as ONE
+#                  pull-request comment per root, updated in place.
 #   push to main   the same checks, then `apply` under the root's own
 #                  environment (give the environments that matter required
 #                  reviewers: the job waits for them).
 #
 # Credentials never sit in the caller's YAML. The plan and apply jobs read them
 # from the environment they run under (`secrets: inherit`):
-#   - each name in `required_secrets` (the providers' own variables:
+#   - apply: each name in `required_secrets` (the providers' own variables:
 #     HOSTINGER_API_TOKEN, CLOUDFLARE_API_TOKEN);
-#   - the environment VARIABLE `IAC_AWS_ROLE_ARN`, an OIDC role for the S3
-#     state backend (read-only for the plan environment).
+#   - plan: only the names in `plan_secrets` (default none). The plan
+#     environment has NO reviewers, and the plan runs the pull request's own
+#     code, so anyone who can push a branch here can make that code print
+#     whatever the environment holds. A provider token that can buy or
+#     destroy (Hostinger has no read-only token) must never be there. The
+#     plan therefore runs `-refresh=false`: it compares the code with the
+#     state, and a provider that is listed in `required_secrets` but not in
+#     `plan_secrets` gets a placeholder token. Drift shows up at apply time,
+#     which plans again with the real token under the reviewed environment.
+#   - both: the environment VARIABLE `IAC_AWS_ROLE_ARN`, an OIDC role for
+#     the S3 state backend. The plan environment's role only reads state,
+#     but whatever state holds is readable by anyone who can push a branch.
 # Until they exist, plan and apply SKIP with a notice naming what is missing,
 # and the checks above still run: a root can land before its credentials do.
 #
 # Serialization: OpenTofu's S3 lock (`use_lockfile`) plus one concurrency group
-# per root for apply (`iac-<working_directory>`, never cancelled: a cancelled
-# apply is a half-applied root). The plan runs `-lock=false`, because a
-# read-only plan role cannot write the lock object.
+# per root for apply (`iac-<working_directory>`, `cancel-in-progress: false`,
+# so a RUNNING apply is never cancelled; GitHub still drops an apply that is
+# only queued behind it for a newer one, and that newer run applies the newest
+# main). The plan runs `-lock=false`, because the plan role cannot write the
+# lock object.
 #
 # Caller (one job per root, ordered by `needs:`):
 #
@@ -37,7 +49,8 @@ name: IaC · OpenTofu
 #       with:
 #         working_directory: infra/envs/prod
 #         apply_environment: infra-prod
-#         required_secrets: HOSTINGER_API_TOKEN
+#         required_secrets: HOSTINGER_API_TOKEN   # apply only
+#         plan_secrets: ''                        # the plan gets none
 #       secrets: inherit
 
 on:
@@ -48,7 +61,7 @@ on:
         type: string
         required: true
       plan_environment:
-        description: The environment the plan runs under (no reviewers, read-only credentials)
+        description: The environment the plan runs under (no reviewers; holds only the plan_secrets and a state-read role)
         type: string
         required: false
         default: infra-plan
@@ -58,7 +71,12 @@ on:
         required: false
         default: ''
       required_secrets:
-        description: Comma-separated secrets the root's providers read (HOSTINGER_API_TOKEN, CLOUDFLARE_API_TOKEN)
+        description: Comma-separated secrets the root's providers read at apply (HOSTINGER_API_TOKEN, CLOUDFLARE_API_TOKEN)
+        type: string
+        required: false
+        default: ''
+      plan_secrets:
+        description: The subset of required_secrets the PLAN environment holds. Only a token that cannot change anything belongs here
         type: string
         required: false
         default: ''
@@ -146,6 +164,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: ${{ inputs.plan_environment }}
+    # A newer push replaces an older plan, so the comment shows the newest one.
+    concurrency:
+      group: iac-plan-${{ github.event.pull_request.number }}-${{ inputs.working_directory }}
+      cancel-in-progress: true
     permissions:
       contents: read
       pull-requests: write
@@ -162,17 +184,18 @@ jobs:
           IAC_PHASE: plan
           IAC_WORKDIR: ${{ inputs.working_directory }}
           IAC_ENVIRONMENT: ${{ inputs.plan_environment }}
-          REQUIRED_SECRETS: ${{ inputs.required_secrets }}
+          REQUIRED_SECRETS: ${{ inputs.plan_secrets }}
+          # The plan job exports these and no other provider token.
+          IAC_EXPORTED: CLOUDFLARE_API_TOKEN
           IAC_AWS_ROLE_ARN: ${{ vars.IAC_AWS_ROLE_ARN }}
-          HOSTINGER_API_TOKEN: ${{ secrets.HOSTINGER_API_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
           missing=""
           for name in $(printf '%s' "$REQUIRED_SECRETS" | tr ',' ' '); do
-            case "$name" in
-              HOSTINGER_API_TOKEN|CLOUDFLARE_API_TOKEN) ;;
-              *) echo "::error::required_secrets names $name, which iac.yml does not pass to tofu"; exit 1 ;;
+            case ",$IAC_EXPORTED," in
+              *",$name,"*) ;;
+              *) echo "::error::$IAC_PHASE needs $name, which iac.yml does not pass to tofu in this job"; exit 1 ;;
             esac
             if [ -z "${!name:-}" ]; then missing="${missing:+$missing, }secret $name"; fi
           done
@@ -192,7 +215,7 @@ jobs:
 
       - name: Authenticate to the state bucket
         if: ${{ steps.creds.outputs.ready == 'true' }}
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           aws-region: ${{ inputs.aws_region }}
           role-to-assume: ${{ vars.IAC_AWS_ROLE_ARN }}
@@ -222,12 +245,15 @@ jobs:
         shell: bash
         working-directory: ${{ inputs.working_directory }}
         env:
-          HOSTINGER_API_TOKEN: ${{ secrets.HOSTINGER_API_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # NOT a credential: the plan environment holds no Hostinger token.
+          # The provider will not configure without some value, and with
+          # -refresh=false nothing calls the API to check this one.
+          HOSTINGER_API_TOKEN: plan-runs-without-provider-credentials
         run: |
           set -uo pipefail
           tofu init -input=false -no-color > "$RUNNER_TEMP/iac-plan.txt" 2>&1 || { cat "$RUNNER_TEMP/iac-plan.txt"; echo "exit=1" >> "$GITHUB_OUTPUT"; exit 0; }
-          tofu plan -input=false -no-color -lock=false -detailed-exitcode > "$RUNNER_TEMP/iac-plan.txt" 2>&1
+          tofu plan -input=false -no-color -lock=false -refresh=false -detailed-exitcode > "$RUNNER_TEMP/iac-plan.txt" 2>&1
           code=$?
           cat "$RUNNER_TEMP/iac-plan.txt"
           # 0 = no changes, 2 = changes, anything else = the plan failed.
@@ -272,7 +298,7 @@ jobs:
       # the step summary above are its report.
       - name: Post the comment
         if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           BODY_FILE: ${{ steps.comment.outputs.file }}
           IAC_WORKDIR: ${{ inputs.working_directory }}
@@ -299,7 +325,7 @@ jobs:
     name: Apply · ${{ inputs.working_directory }}
     needs: check
     if: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.apply_environment != '' }}
-    # Pinned for the same reason as plan: it holds the write tokens.
+    # Pinned to GitHub's image for the same reason as plan: it holds the write tokens.
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment: ${{ inputs.apply_environment }}
@@ -322,6 +348,7 @@ jobs:
           IAC_WORKDIR: ${{ inputs.working_directory }}
           IAC_ENVIRONMENT: ${{ inputs.apply_environment }}
           REQUIRED_SECRETS: ${{ inputs.required_secrets }}
+          IAC_EXPORTED: HOSTINGER_API_TOKEN,CLOUDFLARE_API_TOKEN
           IAC_AWS_ROLE_ARN: ${{ vars.IAC_AWS_ROLE_ARN }}
           HOSTINGER_API_TOKEN: ${{ secrets.HOSTINGER_API_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -329,9 +356,9 @@ jobs:
           set -euo pipefail
           missing=""
           for name in $(printf '%s' "$REQUIRED_SECRETS" | tr ',' ' '); do
-            case "$name" in
-              HOSTINGER_API_TOKEN|CLOUDFLARE_API_TOKEN) ;;
-              *) echo "::error::required_secrets names $name, which iac.yml does not pass to tofu"; exit 1 ;;
+            case ",$IAC_EXPORTED," in
+              *",$name,"*) ;;
+              *) echo "::error::$IAC_PHASE needs $name, which iac.yml does not pass to tofu in this job"; exit 1 ;;
             esac
             if [ -z "${!name:-}" ]; then missing="${missing:+$missing, }secret $name"; fi
           done
@@ -351,7 +378,7 @@ jobs:
 
       - name: Authenticate to the state bucket
         if: ${{ steps.creds.outputs.ready == 'true' }}
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           aws-region: ${{ inputs.aws_region }}
           role-to-assume: ${{ vars.IAC_AWS_ROLE_ARN }}
