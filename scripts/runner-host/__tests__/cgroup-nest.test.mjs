@@ -48,7 +48,7 @@ test("a refused delegation warns and still exits 0, so it never costs a job", ()
   const cg = cgroup({ "cgroup.controllers": "memory\n", "cgroup.procs": "1\n", "cgroup.subtree_control": "<dir>" });
   const r = run(cg);
   assert.equal(r.status, 0);
-  assert.match(r.stderr, /the kernel refused to delegate: memory$/m);
+  assert.match(r.stderr, /the kernel refused to delegate: memory \(processes still in the root: 1:/);
 });
 
 test("the image installs it and the entrypoint runs it before the sampler and dockerd", () => {
