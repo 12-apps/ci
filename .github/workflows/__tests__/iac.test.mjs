@@ -188,3 +188,44 @@ test("the OpenTofu download is checked against the release's own checksums", () 
   assert.equal(installs.length, 3);
   for (const step of installs) assert.match(step, /SHA256SUMS" \| sha256sum -c -/);
 });
+
+// GitHub runs `shell: bash` as `bash --noprofile --norc -eo pipefail {0}`, so
+// the Plan block is executed that way, against a stub tofu. A plan with changes
+// (exit 2) once ended the step before its output was printed: the DNS plan of
+// 12-apps/future-pay#5914 failed red with nothing to read (FUT-3934).
+function planStep(planExit) {
+  const dir = mkdtempSync(path.join(tmpdir(), "iac-plan-"));
+  try {
+    const bin = path.join(dir, "bin");
+    execFileSync("mkdir", [bin]);
+    writeFileSync(path.join(bin, "tofu"), `#!/usr/bin/env bash\nif [ "$1" = plan ]; then echo "Plan: 1 to add, 0 to change, 0 to destroy."; exit ${planExit}; fi\necho init ok\n`, { mode: 0o755 });
+    const script = path.join(dir, "plan.sh");
+    writeFileSync(script, runBlock(jobText("plan"), "Plan"));
+    const out = path.join(dir, "out");
+    writeFileSync(out, "");
+    let status = 0;
+    let stdout = "";
+    try {
+      stdout = execFileSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", script], {
+        env: { PATH: `${bin}:${process.env.PATH}`, GITHUB_OUTPUT: out, RUNNER_TEMP: dir },
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (error) {
+      status = error.status;
+      stdout = error.stdout;
+    }
+    return { status, stdout, output: readFileSync(out, "utf8") };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+for (const [planExit, meaning] of [[0, "no changes"], [2, "changes"], [1, "a failed plan"]]) {
+  test(`under bash -e, a plan exiting ${planExit} (${meaning}) is printed and its code recorded`, () => {
+    const r = planStep(planExit);
+    assert.equal(r.status, 0, "the Plan step itself must not fail; the later steps judge the code");
+    assert.match(r.stdout, /Plan: 1 to add/);
+    assert.match(r.output, new RegExp(`^exit=${planExit}$`, "m"));
+  });
+}
