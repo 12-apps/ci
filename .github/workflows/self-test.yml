@@ -235,6 +235,12 @@ jobs:
         shell: bash
         run: node --test .github/workflows/__tests__/deploy-pull-retry.test.mjs
 
+      # The deploy's disk reclaim keeps the images the compose file names, the
+      # tools profile's included, and still frees the rest first (FUT-3975).
+      - name: Deploy prune keeps compose images
+        shell: bash
+        run: node --test .github/workflows/__tests__/deploy-prune-keeps-compose-images.test.mjs
+
       # The pin a reader copies, against the major this repo actually supports.
       #
       # These drifted apart and nothing compared them: README.md said `@v2` in
