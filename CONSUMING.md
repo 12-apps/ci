@@ -245,6 +245,28 @@ auto-discovered too). See `.github/deploy/README.md` for the full schema.
   `${IMAGE_NAMESPACE}-<svc>:${IMAGE_TAG}`, plus the Dockerfiles.
 - **static / worker:** the build command + `outputPath`, or a `wrangler.toml`.
 
+### What a DigitalOcean redeploy keeps on disk
+
+Before it touches git or pulls anything, the redeploy reclaims disk on the
+droplet: a full disk fails the pull's layer extraction and even git. It removes
+stopped containers, unused networks, all build cache and dangling layers, and
+then every image that `docker compose --profile tools config --images`, read in
+`/app` before this deploy syncs it, does **not** name. Named volumes are never
+touched.
+
+So the images of the release now live are kept, the `tools` profile's included
+(`migrate`, `demo-seed`: services that only ever run as `compose run --rm` and
+so never have a running container), and the new release pulls only the layers
+that differ from them. An older tag or another namespace is removed; a kept
+release goes at the deploy after next, once the compose file stops naming it.
+This used to be `docker system prune -af`, which deleted every image no running
+container used, so each deploy pulled the tools images again in full (FUT-3975).
+
+Disk still wins over the cache. With no `/app` yet, or a compose file that
+cannot be read, nothing is kept. If less than `DEPLOY_MIN_FREE_MB` (default
+3072) is free on the docker root afterwards, every unused image is removed, as
+before, and that deploy pulls in full; the run shows a `::warning::`.
+
 ### Optional: fixture reset on every deploy (`demo-seed`)
 
 A repo that keeps disposable demo/e2e fixture data on the deployed environment
