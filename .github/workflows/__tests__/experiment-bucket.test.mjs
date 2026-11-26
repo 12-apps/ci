@@ -42,6 +42,7 @@ test("the bucket is the first step of Detect Changes, and only when opted in", (
   assert.match(step, /uses: 12-apps\/ci\/\.github\/actions\/experiment-bucket@v2/);
   assert.match(step, /file: \$\{\{ inputs\.experiments-file \}\}/);
   assert.match(step, /off: \$\{\{ inputs\.experiments-off \}\}/);
+  assert.match(step, /continue-on-error: true/, "a broken bucket step must never turn Detect Changes red");
 });
 
 test("Detect Changes may read the run (actions: read) and still cannot write", () => {

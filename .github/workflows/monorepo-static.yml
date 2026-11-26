@@ -534,6 +534,9 @@ jobs:
       - name: Experiment bucket
         id: experiment
         if: ${{ inputs.experiments-file != '' }}
+        # Fails open: a broken bucket step leaves the run in control and never
+        # turns Detect Changes, and with it the whole pipeline, red.
+        continue-on-error: true
         uses: 12-apps/ci/.github/actions/experiment-bucket@v2
         with:
           file: ${{ inputs.experiments-file }}

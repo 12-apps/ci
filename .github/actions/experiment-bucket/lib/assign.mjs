@@ -27,7 +27,8 @@ export function digitsAt(experiment, at) {
   if (start === null || start === undefined || end === undefined || at < start) return [];
   if (end !== null && at >= end) return [];
   let current = [];
-  for (const step of experiment.allocation ?? []) {
+  const steps = Array.isArray(experiment.allocation) ? experiment.allocation : [];
+  for (const step of steps) {
     const from = time(step?.from);
     if (from === null || from === undefined || from > at) continue;
     current = Array.isArray(step.digits) ? step.digits : [];

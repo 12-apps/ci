@@ -81,3 +81,10 @@ test("over ids in a row, each digit gets a tenth", () => {
   for (let i = 45000000000; i < 45000001000; i++) counts[digitOf(i)]++;
   assert.deepEqual(counts, Array(10).fill(100));
 });
+
+test("an allocation that is not a list is ignored, never thrown on", () => {
+  for (const allocation of [5, {}, "x", null]) {
+    const r = assign({ runId: "12", event: "pull_request", createdAt: "2026-11-28T12:00:00Z", registry: { experiments: [{ name: "a", start: "2026-11-01T00:00:00Z", allocation }] } });
+    assert.equal(r.experiment, "");
+  }
+});

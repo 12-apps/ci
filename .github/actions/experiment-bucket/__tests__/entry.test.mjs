@@ -83,3 +83,27 @@ test("an API that is down leaves the run in control and exits 0", async () => {
   assert.equal(r.err, null);
   assert.match(r.out, /^experiment=$/m);
 });
+
+test("a hung API costs the timeout, not the job's limit, and the run is control", async () => {
+  const { createServer: make } = await import("node:http");
+  const server = make(() => {}); // never answers
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const started = Date.now();
+  const r = await run({ GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`, RUN_ID: "1239", EXPERIMENT_BUCKET_TIMEOUT_MS: "300" });
+  server.closeAllConnections?.();
+  server.close();
+  assert.equal(r.err, null);
+  assert.match(r.out, /^experiment=$/m);
+  assert.ok(Date.now() - started < 5000, "two bounded calls");
+});
+
+test("a registry that makes the assignment throw leaves the run in control and exits 0", async () => {
+  const api = await fakeApi({
+    "/repos/o/r/actions/runs/1239": { created_at: "2026-11-28T12:00:00Z" },
+    "/repos/o/r/contents/.github/ci-experiments.json": JSON.stringify({ control: 7, experiments: [{ name: "a", start: "2026-11-01T00:00:00Z", allocation: [{ from: "2026-11-01T00:00:00Z", digits: [9] }] }] }),
+  });
+  const r = await run({ GITHUB_API_URL: api.url, RUN_ID: "1239" });
+  api.server.close();
+  assert.equal(r.err, null);
+  assert.match(r.out, /^experiment=/m);
+});
