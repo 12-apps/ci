@@ -28,7 +28,12 @@ const SESSION_TOKEN = "fake-imds-session-credential";
 const shaped = (...parts) => parts.join("");
 const KEY_ID = shaped("AS", "IA", "EXAMPLEINSTANCE1");
 
-const t0 = Date.parse("2026-11-25T10:00:00Z");
+// The fixture journal starts an hour before the run, in whole seconds. It was a
+// fixed date, and once that date was more than 23 h behind the clock the
+// shipper's own lines (stamped with the real time) went into a batch of their
+// own, as `put` splits any batch spanning over 23 h (CloudWatch refuses 24 h):
+// the SIGTERM case began failing a day after it landed (FUT-5677).
+const t0 = Math.floor((Date.now() - 3600_000) / 1000) * 1000;
 let seq = 0;
 /** One journal entry as `journalctl -o json` prints it. */
 function entry(fields, offsetS = 0) {
