@@ -23,6 +23,11 @@ test "$(id -u)" = 0
 ci-runner-localhost
 grep -q "^unset HOSTNAME$" /usr/local/bin/ci-runner-entrypoint \
   || { echo "smoke: the entrypoint lets the Docker HOSTNAME reach the job" >&2; exit 1; }
+# Then the controllers are delegated to the containers the job starts
+# (cgroup-nest.sh), before dockerd: checked below on the services: container.
+grep -q "^ci-runner-cgroup-nest$" /usr/local/bin/ci-runner-entrypoint \
+  || { echo "smoke: the entrypoint does not delegate the cgroup controllers" >&2; exit 1; }
+ci-runner-cgroup-nest
 dockerd >/var/log/dockerd.log 2>&1 &
 for _ in $(seq 1 120); do docker info >/dev/null 2>&1 && break; sleep 0.5; done
 # What the job uses (job-usage.sh): the sampler the entrypoint starts, and the
@@ -71,6 +76,13 @@ runuser -u runner -- env ${NODE_EXTRA_CA_CERTS:+NODE_EXTRA_CA_CERTS="$NODE_EXTRA
     sleep 0.5
   done
   [[ \$pong == +PONG ]] || { echo \"smoke: service container not reachable on localhost\" >&2; exit 1; }
+  # A container the job starts has its memory accounted: docker stats reads
+  # a number and a limit, never 0B / 0B (cgroup-nest.sh, FUT-5708).
+  usage=\$(docker stats --no-stream --format \"{{.MemUsage}}\" svc)
+  echo \"smoke: a services: container reads \$usage\"
+  case \"\$usage\" in
+    *\"/ 0B\"|--*) echo \"smoke: docker stats reads a running container as \$usage: no memory accounting\" >&2; exit 1 ;;
+  esac
 
   # Chromium on the baked-in libraries only: no --with-deps here.
   nv=v24.9.0
