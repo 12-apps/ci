@@ -478,6 +478,50 @@ smoke — is skipped: red in seconds, with nothing scheduled. Pair it with the
 ([affected-plan README](./.github/actions/affected-plan/README.md)), which uses
 the same parse to select only the tests a migration can affect.
 
+### CI experiments in random buckets of the same days (opt-in)
+
+```yaml
+static:
+  uses: 12-apps/ci/.github/workflows/monorepo-static.yml@v2
+  with:
+    experiments-file: .github/ci-experiments.json
+    experiments-off: ${{ vars.CI_EXPERIMENTS_OFF }}   # stop one at once, no commit
+```
+
+`Detect Changes` puts every `pull_request` run in a bucket, the last digit of
+its run id (a re-run keeps it), and reads the registry from the **default
+branch** through the API, never from the pull request's tree. The registry
+says which experiment holds which digits from which moment; the run's creation
+time picks the allocation in force. Off a pull request every run is control.
+The answer is the tier's `experiment` output, `''` for control:
+
+```yaml
+some-job:
+  needs: static
+  runs-on: ${{ needs.static.outputs.experiment == 'plans-on-medium' && vars.CI_MEDIUM_RUNNER || vars.CI_LIGHT_RUNNER }}
+```
+
+The registry (`control` digits are never assigned):
+
+```json
+{
+  "version": 1,
+  "control": [0, 1],
+  "experiments": [
+    { "name": "plans-on-medium", "start": "2026-11-27T15:00:00-03:00", "end": null,
+      "allocation": [ { "from": "2026-11-27T15:00:00-03:00", "digits": [2, 3] } ] }
+  ]
+}
+```
+
+Comparing an arm with control is the consumer's job: each run logs
+`ci-experiment run=<id> digit=<d> experiment=<name|control>`, and the digit is
+also recomputable from the run id alone. Jobs inside this workflow are NOT
+switched by the output, because their runner and inputs are fixed when the
+caller calls it. It fails open: an unreadable registry or API puts the run in
+control with a warning, never a red job. See
+[`experiment-bucket`](./.github/actions/experiment-bucket/README.md).
+
 ### Replaying last run's failures first — the retry gate (opt-in)
 
 Every selector in this pipeline answers *what could this diff have broken?*

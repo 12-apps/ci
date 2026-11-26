@@ -1,0 +1,43 @@
+name: 'CI experiment bucket'
+description: >-
+  Put this workflow run in a CI experiment's arm or in control. The bucket is
+  the last digit of the run id (a re-run keeps it); the consumer's registry,
+  read from its DEFAULT branch, says which experiment holds which digits from
+  which moment. Fails open: anything unreadable leaves the run in control.
+
+inputs:
+  file:
+    description: Repo-relative path of the registry JSON on the default branch.
+    required: true
+  off:
+    description: Experiment names switched off at once (spaces or commas), e.g. from a repository variable.
+    required: false
+    default: ''
+  token:
+    description: A token that can read the repository's contents and Actions runs.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  experiment:
+    description: The experiment this run is in, or '' for control.
+    value: ${{ steps.assign.outputs.experiment }}
+  digit:
+    description: The run's bucket digit (0-9).
+    value: ${{ steps.assign.outputs.digit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Assign the run to an experiment or to control
+      id: assign
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        FILE: ${{ inputs.file }}
+        OFF: ${{ inputs.off }}
+        REPO: ${{ github.repository }}
+        RUN_ID: ${{ github.run_id }}
+        EVENT: ${{ github.event_name }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: node "$GITHUB_ACTION_PATH/assign.mjs"
