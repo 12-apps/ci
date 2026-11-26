@@ -253,8 +253,10 @@ jobs:
         run: |
           set -uo pipefail
           tofu init -input=false -no-color > "$RUNNER_TEMP/iac-plan.txt" 2>&1 || { cat "$RUNNER_TEMP/iac-plan.txt"; echo "exit=1" >> "$GITHUB_OUTPUT"; exit 0; }
-          tofu plan -input=false -no-color -lock=false -refresh=false -detailed-exitcode > "$RUNNER_TEMP/iac-plan.txt" 2>&1
-          code=$?
+          # `shell: bash` is `bash -e`: a bare plan exiting 2 (changes) would end
+          # the step here, before the output is printed or the comment written.
+          code=0
+          tofu plan -input=false -no-color -lock=false -refresh=false -detailed-exitcode > "$RUNNER_TEMP/iac-plan.txt" 2>&1 || code=$?
           cat "$RUNNER_TEMP/iac-plan.txt"
           # 0 = no changes, 2 = changes, anything else = the plan failed.
           echo "exit=$code" >> "$GITHUB_OUTPUT"
