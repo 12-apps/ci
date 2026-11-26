@@ -903,6 +903,10 @@ alone, without the nesting, on the same GitHub VM.
   (`Device or resource busy`): the kernel rejects a whole list when it rejects any one. Moving the
   processes out of the root is what counted, since runc then enables what a container needs. The
   script now writes one controller at a time and names only the ones refused.
+- One controller at a time was still refused (`1f7b416`, job 140180587851): the move had stopped
+  after one round, because a cgroupfs file reports size 0 and `[[ -s cgroup.procs ]]` was false.
+  Re-reading the list with `mapfile` until it is empty (`4c2c1d8`, job 140183012933): no
+  controller refused, `smoke: a services: container reads 3.996MiB / 15.61GiB`.
 - `node --test` over the cgroup-nest, image-context and job-usage suites: 14/14.
 
 **Side effect, by design:** a limit a job's own compose or `docker run` sets (`mem_limit`,
