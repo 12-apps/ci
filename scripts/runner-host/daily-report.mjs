@@ -9,12 +9,14 @@
 //     [--template ci-runner-fleet-future-pay-ci] [--label future-pay-ci] \
 //     [--workflow ci.yml] [--budget 100] [--baseline 0.69] [--out dir] [--pdf]
 //     [--suite-gate full-suite.yml] [--deploys cd.yml,qa-cd.yml] [--deploy-tail post-cd.yml]
-//     [--no-actions] [--aws-only | --aws-from aws.json]
+//     [--action-sample 20|all] [--no-actions] [--aws-only | --aws-from aws.json]
 //
 // The cost per action (merge, full suite, deploy; see "cost per action" below)
-// reads every run of the window and the jobs of the runs whose workflow uses
-// the fleet: roughly one call per fleet run on top of the usage half.
-// --no-actions skips it and the report falls back to one cost per merge.
+// lists every run of the window and reads the jobs of every suite and deploy
+// run and of --action-sample runs per other workflow a day (runsWithJobs):
+// about 500 calls a day on future-pay, on top of the usage half. `all` reads
+// every run (~1,500 a day). --no-actions skips it and the report falls back
+// to one cost per merge.
 //
 // Writes report.json and report.html into --out (and report.pdf with --pdf,
 // through a headless Chromium: CHROME_PATH, else Playwright's, else
@@ -134,12 +136,13 @@ export const onFleet = (job, label) => Boolean(job.runner_name) && (job.labels ?
  * attempt of every run, and the suites and rollouts started per day (by the
  * run's creation). A re-run attempt copies the jobs that already passed (new
  * id, same name, runner, start and end): each is counted once (E-240). A job
- * with no runner, off the fleet, or ending before it starts is left out.
+ * with no runner, off the fleet, or ending before it starts is left out. A
+ * sampled run's minutes count `weight` times (runsWithJobs).
  */
 export function actionsByDay(runs, { label, ...opts }) {
   const minutes = {};
   const counts = {};
-  for (const { run, jobs } of runs) {
+  for (const { run, jobs, weight = 1 } of runs) {
     const action = actionOf(run, opts);
     const counted = countedAction(run, opts);
     if (counted) {
@@ -155,7 +158,7 @@ export function actionsByDay(runs, { label, ...opts }) {
       const ms = Date.parse(j.completed_at) - Date.parse(j.started_at);
       if (!(ms > 0)) continue;
       const d = j.started_at.slice(0, 10);
-      (minutes[d] ??= {})[action] = (minutes[d][action] ?? 0) + ms / 60000;
+      (minutes[d] ??= {})[action] = (minutes[d][action] ?? 0) + (weight * ms) / 60000;
     }
   }
   return { minutes, counts };
@@ -705,7 +708,11 @@ ${
 }
 <p class="note">Gasto = conta AWS menos impostos, Route 53 e ${usd(r.baseline)}/dia que a conta custa sem CI. Merges = PRs mesclados no dia (UTC). Pushes = execuções do ${esc(r.workflow)} disparadas por PR.${
   hasActions
-    ? " O gasto do dia é dividido entre as ações pelos minutos de job na frota: merge = execuções de PR e o push em main; suíte = suíte completa em main (a diária, as iniciadas à mão e os re-runs); deploy = deploy de produção ou QA e o smoke depois dele; outros = manutenção agendada, que não entra em nenhuma média. Por push = gasto do dia inteiro por push."
+    ? ` O gasto do dia é dividido entre as ações pelos minutos de job na frota: merge = execuções de PR e o push em main; suíte = suíte completa em main (a diária, as iniciadas à mão e os re-runs); deploy = deploy de produção ou QA e o smoke depois dele; outros = manutenção agendada, que não entra em nenhuma média. ${
+        r.actionSample === "all" || r.actionSample === undefined
+          ? "Todas as execuções foram lidas."
+          : `Suítes e deploys: todas as execuções lidas. Merge e outros: estimados por uma amostra de ${esc(r.actionSample)} execuções por workflow por dia, então a divisão é aproximada.`
+      } Por push = gasto do dia inteiro por push.`
     : ""
 }${estimated.length ? " * provisório." : ""}</p>
 
@@ -893,35 +900,41 @@ async function listRuns(repo, from, to) {
 /**
  * The runs created from the day before the window up to `until`, each with
  * the jobs of all its attempts (actionsByDay files a job by its own start, and
- * a run created late on one day runs jobs on the next).
+ * a run created late on one day runs jobs on the next), and the weight its
+ * minutes carry.
  *
- * The repository makes about 1,000 runs a day, and most of its workflows run
- * on GitHub's own runners, which cost the fleet nothing. So each day the jobs
- * of `sample` runs per workflow are read first; a workflow none of them ran on
- * the fleet keeps its other runs that day without jobs (they still count as
- * suites or rollouts, which the run alone says). The allowance is checked
- * every few hundred calls.
+ * future-pay makes 1,300–1,500 runs a day, and 22 to 25 of its ~25 workflows
+ * touch the fleet (measured 2026-11-25/26), so reading every run is ~10,000
+ * calls a week, twice a token's hourly allowance. Instead:
+ * - every suite and deploy run is read (a dozen a day): their cost is exact;
+ * - of every other workflow, `sample` runs a day are read, spread evenly over
+ *   the day's list, and each stands for `runs / sample` of its workflow: the
+ *   merges' and the upkeep's minutes are an estimate.
+ * Unread runs are kept with no jobs and weight 0, so a suite or rollout among
+ * them would still be counted. `sample: Infinity` reads every run.
  */
-export async function runsWithJobs({ listDay, jobsOf, days, until, label, sample = 5, spare = async () => {} }) {
+export async function runsWithJobs({ listDay, jobsOf, days, until, sample = 20, spare = async () => {}, ...opts }) {
   const from = Date.parse(`${days[0]}T00:00:00Z`) - DAY;
   const out = [];
   for (let t = from; t < Date.parse(`${until}T00:00:00Z`); t += DAY) {
     const day = new Date(t).toISOString().slice(0, 10);
     await spare();
     const runs = (await listDay(new Date(t).toISOString(), new Date(t + DAY).toISOString())).filter((x) => x.conclusion !== "skipped");
+    const toRead = [];
     const byWorkflow = new Map();
-    for (const run of runs) byWorkflow.set(run.workflow_id, [...(byWorkflow.get(run.workflow_id) ?? []), run]);
-    const firsts = [...byWorkflow.values()].flatMap((rs) => rs.slice(0, sample));
-    const sampled = await pool(firsts, 4, async (run) => ({ run, jobs: await jobsOf(run) }));
-    out.push(...sampled);
-    const fleet = new Set(sampled.filter(({ jobs }) => jobs.some((j) => onFleet(j, label))).map(({ run }) => run.workflow_id));
-    const rest = [...byWorkflow.entries()].flatMap(([id, rs]) => rs.slice(sample).map((run) => ({ run, read: fleet.has(id) })));
-    const toRead = rest.filter((x) => x.read).map((x) => x.run);
-    out.push(...rest.filter((x) => !x.read).map(({ run }) => ({ run, jobs: [] })));
-    console.error(`${day}: ${runs.length} runs, ${fleet.size} of ${byWorkflow.size} workflows on the fleet; reading the jobs of ${firsts.length + toRead.length}`);
+    for (const run of runs) {
+      if (["suite", "deploy"].includes(actionOf(run, opts))) toRead.push({ run, weight: 1 });
+      else byWorkflow.set(run.workflow_id, [...(byWorkflow.get(run.workflow_id) ?? []), run]);
+    }
+    for (const rs of byWorkflow.values()) {
+      const n = Math.min(sample, rs.length);
+      const picked = new Set(Array.from({ length: n }, (_, i) => Math.floor((i * rs.length) / n)));
+      rs.forEach((run, i) => (picked.has(i) ? toRead.push({ run, weight: rs.length / n }) : out.push({ run, jobs: [], weight: 0 })));
+    }
+    console.error(`${day}: ${runs.length} runs in ${byWorkflow.size} workflows; reading the jobs of ${toRead.length}`);
     for (let i = 0; i < toRead.length; i += 300) {
-      await spare();
-      out.push(...(await pool(toRead.slice(i, i + 300), 4, async (run) => ({ run, jobs: await jobsOf(run) }))));
+      if (i) await spare();
+      out.push(...(await pool(toRead.slice(i, i + 300), 4, async ({ run, weight }) => ({ run, weight, jobs: await jobsOf(run) }))));
     }
   }
   return out;
@@ -1069,6 +1082,7 @@ async function main() {
     deploys: args.deploys ? String(args.deploys).split(",") : ACTION_DEFAULTS.deploys,
     deployTail: args["deploy-tail"] ? String(args["deploy-tail"]).split(",") : ACTION_DEFAULTS.deployTail,
   };
+  const actionSample = args["action-sample"] === "all" ? Infinity : Number(args["action-sample"] ?? 20);
   let byAction = null;
   if (!args["no-actions"]) {
     console.error("cost per action: every run's jobs…");
@@ -1077,12 +1091,14 @@ async function main() {
       jobsOf: (run) => runJobs(ghJson, repo, run.id, "all"),
       days,
       until,
-      label,
+      sample: actionSample,
       spare: () => spare(reserve),
+      ...actionOpts,
     });
     byAction = actionsByDay(runs, { label, ...actionOpts });
   }
   const report = { repo, until, generated: new Date().toISOString().slice(0, 16) + "Z", window: `${fromH}:00–${toH}:00`, workflow, baseline, budget, offset, templates: tpl, days: [] };
+  if (byAction) report.actionSample = Number.isFinite(actionSample) ? actionSample : "all";
   for (const day of days) {
     console.error(`${day}: counts…`);
     const pushes = (await ghJson(`/repos/${repo}/actions/workflows/${workflow}/runs?event=pull_request&created=${day}&per_page=1`)).total_count;

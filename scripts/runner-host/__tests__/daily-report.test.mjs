@@ -219,32 +219,44 @@ test("costPerAction splits the day's cost by fleet minutes and averages each sha
   assert.equal(costPerAction({ ci: 5, minutes: { merge: 10, suite: 2 }, counts: { merge: 0, suite: 0 } }).merge.per, null, "a day with no merge has no cost per merge");
 });
 
-test("runsWithJobs reads every run of a fleet workflow and only a sample of one that never reaches the fleet", async () => {
+test("runsWithJobs reads every suite and deploy, samples the rest evenly, and weighs the sample up to the whole", async () => {
+  // 40 pull request runs of 4 fleet minutes each, 10 of them sampled: the
+  // merges' minutes are estimated at 40 × 4 = 160, from 10 calls, not 40.
+  const prs = Array.from({ length: 40 }, (_, i) => run(100 + i, "ci.yml", "pull_request", "2026-11-26T10:00:00Z", "ci"));
   const listed = [
-    ...Array.from({ length: 7 }, (_, i) => run(100 + i, "ci.yml", "pull_request", "2026-11-26T10:00:00Z", "ci")),
-    ...Array.from({ length: 7 }, (_, i) => run(200 + i, "commitlint-enforce.yml", "pull_request_target", "2026-11-26T10:00:00Z", "lint")),
+    ...prs,
     run(300, "ci.yml", "workflow_dispatch", "2026-11-26T11:00:00Z", "ci"),
-    { ...run(301, "ci.yml", "pull_request", "2026-11-26T11:00:00Z", "ci"), conclusion: "skipped" },
+    run(301, "ci.yml", "workflow_dispatch", "2026-11-26T12:00:00Z", "ci"),
+    run(400, "qa-cd.yml", "schedule", "2026-11-26T08:07:00Z", "qa"),
+    { ...run(500, "ci.yml", "pull_request", "2026-11-26T11:00:00Z", "ci"), conclusion: "skipped" },
   ];
   const read = [];
+  const minutesOf = { 300: 400, 301: 300, 400: 30 };
   const out = await runsWithJobs({
     listDay: async (from) => (from.startsWith("2026-11-26") ? listed : []),
     jobsOf: async (r) => {
       read.push(r.id);
-      return r.workflow_id === "ci" ? [job("Unit", "2026-11-26T10:01:00Z", 4)] : [job("Commit message", "2026-11-26T10:01:00Z", 1, { labels: ["ubuntu-latest"] })];
+      return [job("work", "2026-11-26T12:00:00Z", minutesOf[r.id] ?? 4)];
     },
     days: ["2026-11-26"],
     until: "2026-11-27",
-    label: "future-pay-ci",
-    sample: 5,
+    sample: 10,
   });
-  assert.equal(read.filter((id) => id >= 200 && id < 300).length, 5, "five runs of the GitHub-hosted workflow, not seven");
-  assert.equal(read.filter((id) => id >= 100 && id < 200 || id === 300).length, 8, "every run of the fleet workflow");
-  assert.ok(!read.includes(301) && !out.some(({ run: r }) => r.id === 301), "a skipped run is not read");
-  assert.equal(out.length, 15, "the unread runs are kept, so a suite or a rollout among them is still counted");
+  const prRead = read.filter((id) => id >= 100 && id < 200).sort((a, b) => a - b);
+  assert.equal(prRead.length, 10, "ten of the forty pull request runs");
+  assert.deepEqual(prRead, [100, 104, 108, 112, 116, 120, 124, 128, 132, 136], "spread over the day's list, not its first ten");
+  assert.ok([300, 301, 400].every((id) => read.includes(id)), "every suite and deploy run is read");
+  assert.ok(!read.includes(500) && !out.some(({ run: r }) => r.id === 500), "a skipped run is neither read nor kept");
+  assert.equal(out.length, 43, "the unread runs are kept with no jobs, so a count among them is not lost");
   const { counts, minutes } = actionsByDay(out, { label: "future-pay-ci" });
-  assert.deepEqual(counts["2026-11-26"], { suite: 1 });
-  assert.equal(minutes["2026-11-26"].merge, 28);
+  assert.deepEqual(counts["2026-11-26"], { suite: 2, deploy: 1 });
+  assert.equal(minutes["2026-11-26"].merge, 160, "10 sampled runs × 4 min × weight 4");
+  assert.equal(minutes["2026-11-26"].suite, 700, "suites are exact");
+  assert.equal(minutes["2026-11-26"].deploy, 30, "deploys are exact");
+
+  read.length = 0;
+  await runsWithJobs({ listDay: async () => prs, jobsOf: async (r) => (read.push(r.id), []), days: ["2026-11-26"], until: "2026-11-27", sample: Infinity });
+  assert.equal(read.length, 80, "sample Infinity reads every run, on both listed days");
 });
 
 test("renderHtml shows the cost per merge, per suite and per deploy, and keeps one cost per merge without them", () => {
