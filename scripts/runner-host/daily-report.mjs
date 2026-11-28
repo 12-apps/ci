@@ -30,11 +30,11 @@
 //
 // ## The window
 //
-// Days are UTC and --until is exclusive. The default is the day before
-// yesterday, so the window ends on the last day Cost Explorer has settled:
-// yesterday and today never enter the week (E-237's rule, the same one). Cost
-// Explorer still revises its last days for a while; a day that is listed as
-// `estimated` is shown with a mark, and an explicit --until can reach it.
+// Days are UTC and --until is exclusive. The default is yesterday, so the last
+// day in the window is the day before yesterday: yesterday and today never
+// enter the week, because Cost Explorer is still filling them in (the same
+// "complete days up to the day before yesterday" rule the cost-per-merge
+// verdicts read). Days it still marks `estimated` carry a mark in the report.
 //
 // Per-job usage is read from every fleet job's log (usage-report.mjs), one
 // API call per job. A whole day is ~3000 calls and seven of them would spend
@@ -69,6 +69,9 @@ const DAY = 86_400_000;
 const HOUR = 3_600_000;
 
 // ── days and categories ─────────────────────────────────────────────────────
+
+/** The default --until: yesterday (UTC), so the window's last day is the day before yesterday. */
+export const defaultUntil = (now = Date.now()) => new Date(now - DAY).toISOString().slice(0, 10);
 
 /** The `n` UTC days before `until` (exclusive), oldest first. */
 export function windowDays(until, n) {
@@ -388,10 +391,6 @@ const GROUPS = [
   { label: "Rede", color: "#1baf7a", cats: ["egress", "nat", "public-ip"] },
   { label: "Outros", color: "#eda100", cats: ["other"] },
 ];
-// The bar is the whole account; the number on it is the CI cost the headline
-// and the table use (the account less Tax, Route 53 and the baseline). The grey
-// top segment is that baseline, so the bar and the number are read together.
-const BASE_COLOR = "#c9c7bf";
 const RESULT = { success: "passou", failure: "falhou", cancelled: "cancelada", timed_out: "estourou o tempo" };
 
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
@@ -451,7 +450,7 @@ function columns(days, segments, { height = 170, label = (v) => br(v, 2) } = {})
             : `<rect x="${x}" y="${top1}" width="${bar}" height="${h}" fill="${s.color}"/>`;
         })
         .join("");
-      return `${shapes}<text x="${x + bar / 2}" y="${y(totals[i]) - 5}" class="val">${esc(label(totals[i], d))}</text><text x="${x + bar / 2}" y="${height - 6}" class="day">${dm(d.day)}</text>`;
+      return `${shapes}<text x="${x + bar / 2}" y="${y(totals[i]) - 5}" class="val">${esc(label(totals[i]))}</text><text x="${x + bar / 2}" y="${height - 6}" class="day">${dm(d.day)}</text>`;
     })
     .join("");
   return `<svg viewBox="0 0 ${width} ${height}" class="chart" role="img">${grid}<line x1="0" x2="${width}" y1="${y(0)}" y2="${y(0)}" class="axis"/>${cols}</svg>`;
@@ -494,7 +493,7 @@ export function renderHtml(r) {
   const last = days[days.length - 1];
 
   const kpi = (value, label, note = "") => `<div class="kpi"><div class="kv">${esc(value)}</div><div class="kl">${esc(label)}</div>${note ? `<div class="kn">${esc(note)}</div>` : ""}</div>`;
-  const legend = [...GROUPS.map((g) => `<span class="key"><i style="background:${g.color}"></i>${esc(g.label)}</span>`), `<span class="key"><i style="background:${BASE_COLOR}"></i>base da conta sem CI</span>`].join("");
+  const legend = GROUPS.map((g) => `<span class="key"><i style="background:${g.color}"></i>${esc(g.label)}</span>`).join("");
   const finding = (a, i) => `<li><div class="ft"><b>${i + 1}.</b> ${esc(a.title)}</div>${a.why ? `<div class="fw">${esc(a.why)}</div>` : ""}${a.evidence ? `<div class="fe">${esc(a.evidence)}</div>` : ""}</li>`;
 
   // Jobs: the heaviest of the last measured day, against their own week.
@@ -564,7 +563,7 @@ ${kpi(usd(ciTotal / Math.max(pushes, 1)), "por push de PR", `${pushes} pushes`)}
 
 <h2>Gasto por dia (US$)</h2>
 <div class="legend">${legend}</div>
-${columns(days, (d) => [...GROUPS.map((g) => ({ value: groupCost(d, g), color: g.color })), { value: r.baseline ?? 0, color: BASE_COLOR }], { label: (v, d) => br(d.cost?.ci ?? v, 0) })}
+${columns(days, (d) => GROUPS.map((g) => ({ value: groupCost(d, g), color: g.color })), { label: (v) => br(v, 0) })}
 ${estimated.length ? `<p class="note">${estimated.join(" e ")}: valores provisórios da AWS, ainda podem mudar.</p>` : ""}
 
 <h2>O que investigar</h2>
@@ -845,7 +844,7 @@ async function main() {
     console.error("usage: GITHUB_TOKEN=… daily-report.mjs --repo owner/name [--days 7] [--until YYYY-MM-DD] [--out dir] [--pdf]");
     process.exit(64);
   }
-  const until = args.until ?? new Date(Date.now() - 2 * DAY).toISOString().slice(0, 10);
+  const until = args.until ?? defaultUntil();
   const days = windowDays(until, Number(args.days ?? 7));
   const [fromH, toH] = String(args.window ?? "14-17").split("-").map(Number);
   const workflow = args.workflow ?? "ci.yml";

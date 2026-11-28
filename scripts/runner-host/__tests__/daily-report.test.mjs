@@ -5,7 +5,7 @@ import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { anomalies, awsFromFile, category, diskChanges, disksInEffect, costByDay, offHours, reduceUsage, regionOf, renderHtml, taggedByDay, windowDays, windowUtilization } from "../daily-report.mjs";
+import { anomalies, awsFromFile, category, defaultUntil, diskChanges, disksInEffect, costByDay, offHours, reduceUsage, regionOf, renderHtml, taggedByDay, windowDays, windowUtilization } from "../daily-report.mjs";
 
 // The report is read as a phone notification and turned into tickets. A day
 // off by one, a cost filed under the wrong category or a rule that never fires
@@ -13,6 +13,16 @@ import { anomalies, awsFromFile, category, diskChanges, disksInEffect, costByDay
 
 test("windowDays: the n UTC days before until, oldest first, until excluded", () => {
   assert.deepEqual(windowDays("2026-10-03", 3), ["2026-09-30", "2026-10-01", "2026-10-02"]);
+});
+
+test("the default window leaves out yesterday and today, and keeps the day before yesterday", () => {
+  // A run at 02:04 in Brasília on 2026-11-28 is 05:04 UTC the same day.
+  for (const now of ["2026-11-28T05:04:00Z", "2026-11-28T00:00:00Z", "2026-11-28T23:59:59Z"]) {
+    const days = windowDays(defaultUntil(Date.parse(now)), 7);
+    assert.equal(days.at(-1), "2026-11-26", now);
+    assert.equal(days[0], "2026-11-20", now);
+    assert.ok(!days.includes("2026-11-27") && !days.includes("2026-11-28"), now);
+  }
 });
 
 test("category and regionOf read Cost Explorer's usage types", () => {
