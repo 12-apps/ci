@@ -332,7 +332,7 @@ export async function runJobs(get, repo, runId, filter = "all") {
   return out;
 }
 
-async function pool(items, n, fn) {
+export async function pool(items, n, fn) {
   const out = [];
   let i = 0;
   await Promise.all(

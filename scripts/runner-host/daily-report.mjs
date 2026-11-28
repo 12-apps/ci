@@ -8,7 +8,13 @@
 //     [--until YYYY-MM-DD] [--window 14-17] [--regions us-east-1,us-east-2,eu-north-1] \
 //     [--template ci-runner-fleet-future-pay-ci] [--label future-pay-ci] \
 //     [--workflow ci.yml] [--budget 100] [--baseline 0.69] [--out dir] [--pdf]
-//     [--aws-only | --aws-from aws.json]
+//     [--suite-gate full-suite.yml] [--deploys cd.yml,qa-cd.yml] [--deploy-tail post-cd.yml]
+//     [--no-actions] [--aws-only | --aws-from aws.json]
+//
+// The cost per action (merge, full suite, deploy; see "cost per action" below)
+// reads every run of the window and the jobs of the runs whose workflow uses
+// the fleet: roughly one call per fleet run on top of the usage half.
+// --no-actions skips it and the report falls back to one cost per merge.
 //
 // Writes report.json and report.html into --out (and report.pdf with --pdf,
 // through a headless Chromium: CHROME_PATH, else Playwright's, else
@@ -63,7 +69,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { collect, describeError, fetchRetrying, hostAndSlot, percentile, runJobs, summarizeJobs } from "./usage-report.mjs";
+import { collect, describeError, fetchRetrying, hostAndSlot, percentile, pool, runJobs, summarizeJobs } from "./usage-report.mjs";
 
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
@@ -77,6 +83,99 @@ export const defaultUntil = (now = Date.now()) => new Date(now - DAY).toISOStrin
 export function windowDays(until, n) {
   const end = Date.parse(`${until}T00:00:00Z`);
   return Array.from({ length: n }, (_, i) => new Date(end - (n - i) * DAY).toISOString().slice(0, 10));
+}
+
+// ── cost per action ─────────────────────────────────────────────────────────
+//
+// The day's CI cost is one number for everything the fleet ran. Divided by
+// merges alone it charges every merge with the full suites and the deploys of
+// that day, so a day with nine hand-started suites looks like dearer merges.
+// Instead the cost is split by fleet job-minutes into the action each run
+// served, and each share is divided by its own count:
+//
+// - merge: a pull request's runs and the push to main that lands it;
+// - suite: the full suite (`--workflow` dispatched, and the gate that does it),
+//   whether the daily cron started it, a person, an agent or a re-run;
+// - deploy: a production or QA rollout (`--deploys`) and its smoke
+//   (`--deploy-tail`), counted once per rollout run;
+// - other: scheduled upkeep and other hand starts. Shown, never averaged.
+
+export const ACTIONS = ["merge", "suite", "deploy", "other"];
+const MERGE_EVENTS = new Set(["pull_request", "pull_request_target", "merge_group", "push"]);
+export const ACTION_DEFAULTS = { workflow: "ci.yml", suiteGate: "full-suite.yml", deploys: ["cd.yml", "qa-cd.yml"], deployTail: ["post-cd.yml"] };
+
+/** `.github/workflows/ci.yml@refs/heads/main` → `ci.yml`. */
+const workflowFile = (run) => String(run.path ?? "").split("@")[0].split("/").pop();
+
+/** The action a workflow run served. */
+export function actionOf(run, opts = {}) {
+  const { workflow, suiteGate, deploys, deployTail } = { ...ACTION_DEFAULTS, ...opts };
+  const file = workflowFile(run);
+  if (deploys.includes(file) || deployTail.includes(file)) return "deploy";
+  if (file === suiteGate || (file === workflow && run.event === "workflow_dispatch")) return "suite";
+  if (MERGE_EVENTS.has(run.event)) return "merge";
+  return "other";
+}
+
+/** Whether the run starts an action that is counted: a suite or a rollout (merges are counted apart). */
+export function countedAction(run, opts = {}) {
+  const { workflow, deploys } = { ...ACTION_DEFAULTS, ...opts };
+  const file = workflowFile(run);
+  if (deploys.includes(file)) return "deploy";
+  if (file === workflow && run.event === "workflow_dispatch") return "suite";
+  return null;
+}
+
+/** A job that ran on the fleet: it got a runner, and a label of it is `label` or `label-*`. */
+export const onFleet = (job, label) => Boolean(job.runner_name) && (job.labels ?? []).some((l) => l === label || l.startsWith(`${label}-`));
+
+/**
+ * Fleet job-minutes per UTC day (by the job's start) and action, over every
+ * attempt of every run, and the suites and rollouts started per day (by the
+ * run's creation). A re-run attempt copies the jobs that already passed (new
+ * id, same name, runner, start and end): each is counted once (E-240). A job
+ * with no runner, off the fleet, or ending before it starts is left out.
+ */
+export function actionsByDay(runs, { label, ...opts }) {
+  const minutes = {};
+  const counts = {};
+  for (const { run, jobs } of runs) {
+    const action = actionOf(run, opts);
+    const counted = countedAction(run, opts);
+    if (counted) {
+      const d = String(run.created_at).slice(0, 10);
+      (counts[d] ??= {})[counted] = (counts[d][counted] ?? 0) + 1;
+    }
+    const seen = new Set();
+    for (const j of jobs) {
+      if (!j.started_at || !j.completed_at || !onFleet(j, label)) continue;
+      const key = [j.name, j.runner_name, j.started_at, j.completed_at].join("\u0000");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const ms = Date.parse(j.completed_at) - Date.parse(j.started_at);
+      if (!(ms > 0)) continue;
+      const d = j.started_at.slice(0, 10);
+      (minutes[d] ??= {})[action] = (minutes[d][action] ?? 0) + ms / 60000;
+    }
+  }
+  return { minutes, counts };
+}
+
+/**
+ * The day's CI cost split by fleet job-minutes into each action, and the
+ * average per action: `{ merge: { count, minutes, cost, per }, … }`. With no
+ * fleet minutes there is nothing to split by, and every cost is null.
+ */
+export function costPerAction({ ci, minutes = {}, counts = {} }) {
+  const total = ACTIONS.reduce((a, k) => a + (minutes[k] ?? 0), 0);
+  const out = {};
+  for (const k of ACTIONS) {
+    const m = minutes[k] ?? 0;
+    const cost = total > 0 && Number.isFinite(ci) ? (ci * m) / total : null;
+    const count = k === "other" ? null : (counts[k] ?? 0);
+    out[k] = { count, minutes: m, cost, per: cost !== null && count ? cost / count : null };
+  }
+  return out;
 }
 
 /** A Cost Explorer usage type, by what it pays for. */
@@ -491,8 +590,17 @@ export function renderHtml(r) {
   const tickets = r.anomalies.filter((a) => a.severity === "ticket");
   const watch = r.anomalies.filter((a) => a.severity === "watch");
   const last = days[days.length - 1];
+  // Cost per action (see "cost per action"): the week's share of each, over its own count.
+  const hasActions = days.some((d) => d.actions);
+  const week = Object.fromEntries(
+    ACTIONS.map((k) => {
+      const c = sum((d) => d.actions?.[k]?.cost);
+      const n = sum((d) => d.actions?.[k]?.count);
+      return [k, { cost: c, count: n, per: n ? c / n : null }];
+    }),
+  );
 
-  const kpi = (value, label, note = "") => `<div class="kpi"><div class="kv">${esc(value)}</div><div class="kl">${esc(label)}</div>${note ? `<div class="kn">${esc(note)}</div>` : ""}</div>`;
+  const kpi =(value, label, note = "") => `<div class="kpi"><div class="kv">${esc(value)}</div><div class="kl">${esc(label)}</div>${note ? `<div class="kn">${esc(note)}</div>` : ""}</div>`;
   const legend = GROUPS.map((g) => `<span class="key"><i style="background:${g.color}"></i>${esc(g.label)}</span>`).join("");
   const finding = (a, i) => `<li><div class="ft"><b>${i + 1}.</b> ${esc(a.title)}</div>${a.why ? `<div class="fw">${esc(a.why)}</div>` : ""}${a.evidence ? `<div class="fe">${esc(a.evidence)}</div>` : ""}</li>`;
 
@@ -522,7 +630,7 @@ h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
 h2 { font-size: 13px; margin: 18px 0 6px; }
 .sub, .muted { color: var(--ink2); }
 .note { color: var(--muted); font-size: 9.5px; margin: 4px 0 0; }
-.kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 14px 0 4px; }
+.kpis { display: grid; grid-template-columns: repeat(${hasActions ? 5 : 4}, 1fr); gap: 8px; margin: 14px 0 4px; }
 .kpi { background: var(--soft); border-radius: 8px; padding: 10px 12px; }
 .kv { font-size: 19px; font-weight: 650; font-variant-numeric: tabular-nums; }
 .kl { color: var(--ink2); }
@@ -557,8 +665,15 @@ ul.plain { margin: 4px 0; padding-left: 16px; }
 <div class="kpis">
 ${kpi(usd(ciTotal), "gasto em 7 dias")}
 ${kpi(`${usd(monthly, 0)}/mês`, "ritmo de gasto", `meta ${usd(r.budget, 0)} · ${br(monthly / r.budget, 1)}× acima`)}
-${kpi(usd(ciTotal / Math.max(merges, 1)), "por merge", `${merges} merges`)}
-${kpi(usd(ciTotal / Math.max(pushes, 1)), "por push de PR", `${pushes} pushes`)}
+${
+  hasActions
+    ? [
+        kpi(usd(week.merge.per), "por merge", `${week.merge.count} merges`),
+        kpi(usd(week.suite.per), "por suíte completa", `${week.suite.count} suítes · ${usd(week.suite.cost)}`),
+        kpi(usd(week.deploy.per), "por deploy", `${week.deploy.count} deploys · ${usd(week.deploy.cost)}`),
+      ].join("\n")
+    : [kpi(usd(ciTotal / Math.max(merges, 1)), "por merge", `${merges} merges`), kpi(usd(ciTotal / Math.max(pushes, 1)), "por push de PR", `${pushes} pushes`)].join("\n")
+}
 </div>
 
 <h2>Gasto por dia (US$)</h2>
@@ -572,15 +687,30 @@ ${watch.length ? `<h2>Para observar</h2><ol class="findings watch">${watch.map(f
 
 <div class="page"></div>
 <h2>Dia a dia</h2>
-${table(
-  ["dia", "merges", "pushes de PR", "gasto", "por merge", "por push"],
-  days.map((d) => [dm(d.day) + (d.cost?.estimated ? " *" : ""), d.merges, d.pushes, usd(d.cost?.ci), usd(d.perMerge), usd(d.perPush)]),
-  { num: [1, 2, 3, 4, 5] },
-)}
-<p class="note">Gasto = conta AWS menos impostos, Route 53 e ${usd(r.baseline)}/dia que a conta custa sem CI. Merges = PRs mesclados no dia (UTC). Pushes = execuções do ${esc(r.workflow)} disparadas por PR.${estimated.length ? " * provisório." : ""}</p>
+${
+  hasActions
+    ? table(
+        ["dia", "gasto", "merges", "por merge", "suítes", "por suíte", "deploys", "por deploy", "outros", "por push"],
+        days.map((d) => {
+          const a = d.actions ?? {};
+          return [dm(d.day) + (d.cost?.estimated ? " *" : ""), usd(d.cost?.ci), d.merges, usd(a.merge?.per), a.suite?.count ?? "–", usd(a.suite?.per), a.deploy?.count ?? "–", usd(a.deploy?.per), usd(a.other?.cost), usd(d.perPush)];
+        }),
+        { num: [1, 2, 3, 4, 5, 6, 7, 8, 9] },
+      )
+    : table(
+        ["dia", "merges", "pushes de PR", "gasto", "por merge", "por push"],
+        days.map((d) => [dm(d.day) + (d.cost?.estimated ? " *" : ""), d.merges, d.pushes, usd(d.cost?.ci), usd(d.perMerge), usd(d.perPush)]),
+        { num: [1, 2, 3, 4, 5] },
+      )
+}
+<p class="note">Gasto = conta AWS menos impostos, Route 53 e ${usd(r.baseline)}/dia que a conta custa sem CI. Merges = PRs mesclados no dia (UTC). Pushes = execuções do ${esc(r.workflow)} disparadas por PR.${
+  hasActions
+    ? " O gasto do dia é dividido entre as ações pelos minutos de job na frota: merge = execuções de PR e o push em main; suíte = suíte completa em main (a diária, as iniciadas à mão e os re-runs); deploy = deploy de produção ou QA e o smoke depois dele; outros = manutenção agendada, que não entra em nenhuma média. Por push = gasto do dia inteiro por push."
+    : ""
+}${estimated.length ? " * provisório." : ""}</p>
 
 <h2>Custo por merge (US$)</h2>
-${columns(days, (d) => [{ value: d.perMerge ?? 0, color: "#2a78d6" }], { height: 130 })}
+${columns(days, (d) => [{ value: (hasActions ? d.actions?.merge?.per : d.perMerge) ?? 0, color: "#2a78d6" }], { height: 130 })}
 
 <h2>Para onde foi o dinheiro (US$ por dia)</h2>
 ${table(
@@ -738,6 +868,65 @@ async function mergesByDay(repo, days, until) {
   }
 }
 
+/**
+ * Every workflow run created in [from, to) (ISO instants). The runs list
+ * answers at most 1,000 runs for one filter, so a range that holds more is
+ * read in two halves instead of being cut short.
+ */
+async function listRuns(repo, from, to) {
+  const range = `${from.replace(/\.\d{3}Z$/, "Z")}..${new Date(Date.parse(to) - 1000).toISOString().replace(/\.\d{3}Z$/, "Z")}`;
+  const first = await ghJson(`/repos/${repo}/actions/runs?created=${range}&per_page=100&page=1`);
+  if (first.total_count > 1000) {
+    const mid = new Date((Date.parse(from) + Date.parse(to)) / 2).toISOString();
+    if (Date.parse(to) - Date.parse(from) <= HOUR) throw new Error(`runs ${range}: ${first.total_count} runs in an hour, more than the list can return`);
+    return [...(await listRuns(repo, from, mid)), ...(await listRuns(repo, mid, to))];
+  }
+  const runs = [...first.workflow_runs];
+  for (let page = 2; runs.length < first.total_count; page++) {
+    const r = await ghJson(`/repos/${repo}/actions/runs?created=${range}&per_page=100&page=${page}`);
+    if (!r.workflow_runs.length) break;
+    runs.push(...r.workflow_runs);
+  }
+  return runs;
+}
+
+/**
+ * The runs created from the day before the window up to `until`, each with
+ * the jobs of all its attempts (actionsByDay files a job by its own start, and
+ * a run created late on one day runs jobs on the next).
+ *
+ * The repository makes about 1,000 runs a day, and most of its workflows run
+ * on GitHub's own runners, which cost the fleet nothing. So each day the jobs
+ * of `sample` runs per workflow are read first; a workflow none of them ran on
+ * the fleet keeps its other runs that day without jobs (they still count as
+ * suites or rollouts, which the run alone says). The allowance is checked
+ * every few hundred calls.
+ */
+export async function runsWithJobs({ listDay, jobsOf, days, until, label, sample = 5, spare = async () => {} }) {
+  const from = Date.parse(`${days[0]}T00:00:00Z`) - DAY;
+  const out = [];
+  for (let t = from; t < Date.parse(`${until}T00:00:00Z`); t += DAY) {
+    const day = new Date(t).toISOString().slice(0, 10);
+    await spare();
+    const runs = (await listDay(new Date(t).toISOString(), new Date(t + DAY).toISOString())).filter((x) => x.conclusion !== "skipped");
+    const byWorkflow = new Map();
+    for (const run of runs) byWorkflow.set(run.workflow_id, [...(byWorkflow.get(run.workflow_id) ?? []), run]);
+    const firsts = [...byWorkflow.values()].flatMap((rs) => rs.slice(0, sample));
+    const sampled = await pool(firsts, 4, async (run) => ({ run, jobs: await jobsOf(run) }));
+    out.push(...sampled);
+    const fleet = new Set(sampled.filter(({ jobs }) => jobs.some((j) => onFleet(j, label))).map(({ run }) => run.workflow_id));
+    const rest = [...byWorkflow.entries()].flatMap(([id, rs]) => rs.slice(sample).map((run) => ({ run, read: fleet.has(id) })));
+    const toRead = rest.filter((x) => x.read).map((x) => x.run);
+    out.push(...rest.filter((x) => !x.read).map(({ run }) => ({ run, jobs: [] })));
+    console.error(`${day}: ${runs.length} runs, ${fleet.size} of ${byWorkflow.size} workflows on the fleet; reading the jobs of ${firsts.length + toRead.length}`);
+    for (let i = 0; i < toRead.length; i += 300) {
+      await spare();
+      out.push(...(await pool(toRead.slice(i, i + 300), 4, async (run) => ({ run, jobs: await jobsOf(run) }))));
+    }
+  }
+  return out;
+}
+
 async function dispatches(repo, workflow, days, until) {
   const runs = (await ghJson(`/repos/${repo}/actions/workflows/${workflow}/runs?event=workflow_dispatch&created=${days[0]}..${until}&per_page=100`)).workflow_runs.filter(
     (x) => x.created_at.slice(0, 10) < until,
@@ -874,6 +1063,25 @@ async function main() {
 
   console.error("merges…");
   const merged = await mergesByDay(repo, days, until);
+  const actionOpts = {
+    workflow,
+    suiteGate: args["suite-gate"] ?? ACTION_DEFAULTS.suiteGate,
+    deploys: args.deploys ? String(args.deploys).split(",") : ACTION_DEFAULTS.deploys,
+    deployTail: args["deploy-tail"] ? String(args["deploy-tail"]).split(",") : ACTION_DEFAULTS.deployTail,
+  };
+  let byAction = null;
+  if (!args["no-actions"]) {
+    console.error("cost per action: every run's jobs…");
+    const runs = await runsWithJobs({
+      listDay: (from, to) => listRuns(repo, from, to),
+      jobsOf: (run) => runJobs(ghJson, repo, run.id, "all"),
+      days,
+      until,
+      label,
+      spare: () => spare(reserve),
+    });
+    byAction = actionsByDay(runs, { label, ...actionOpts });
+  }
   const report = { repo, until, generated: new Date().toISOString().slice(0, 16) + "Z", window: `${fromH}:00–${toH}:00`, workflow, baseline, budget, offset, templates: tpl, days: [] };
   for (const day of days) {
     console.error(`${day}: counts…`);
@@ -890,7 +1098,8 @@ async function main() {
     const collected = await collect({ repo, since: iso(from - HOUR), until: iso(to + 15 * 60_000), label });
     const usage = reduceUsage(collected, { from, to, slots: Number(args.slots ?? 2), idleMinutes: Number(args["idle-minutes"] ?? 2) });
     const c = cost.all[day];
-    report.days.push({ day, pushes, merges, cost: c, tagged: cost.tagged[day], perPush: c && pushes ? c.ci / pushes : null, perMerge: c && merges ? c.ci / merges : null, usage });
+    const actions = byAction ? costPerAction({ ci: c?.ci, minutes: byAction.minutes[day], counts: { merge: merges, ...byAction.counts[day] } }) : null;
+    report.days.push({ day, pushes, merges, cost: c, tagged: cost.tagged[day], perPush: c && pushes ? c.ci / pushes : null, perMerge: c && merges ? c.ci / merges : null, actions, usage });
   }
   console.error("dispatches…");
   report.dispatches = await dispatches(repo, workflow, days, until);

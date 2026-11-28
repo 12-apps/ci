@@ -5,7 +5,7 @@ import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { anomalies, awsFromFile, category, defaultUntil, diskChanges, disksInEffect, costByDay, offHours, reduceUsage, regionOf, renderHtml, taggedByDay, windowDays, windowUtilization } from "../daily-report.mjs";
+import { ACTIONS, actionOf, actionsByDay, anomalies, awsFromFile, category, costPerAction, countedAction, defaultUntil, diskChanges, disksInEffect, costByDay, offHours, runsWithJobs, reduceUsage, regionOf, renderHtml, taggedByDay, windowDays, windowUtilization } from "../daily-report.mjs";
 
 // The report is read as a phone notification and turned into tickets. A day
 // off by one, a cost filed under the wrong category or a rule that never fires
@@ -148,6 +148,115 @@ test("weekend per-push cost and egress that already stopped are not findings", (
   );
   const found = keys({ days, templates: [tpl("us-east-1")], dispatches: [] });
   assert.ok(!found.some((k) => k.startsWith("ticket:per-push") || k === "ticket:egress"), found.join(", "));
+});
+
+// Cost per action. On 2026-11-26 nine full suites ran on main, and the one
+// cost per merge read US$ 0.33 while the merges' own share was ~US$ 0.28.
+const run = (id, path, event, created = "2026-11-26T10:00:00Z", workflow_id = path) => ({ id, path: `.github/workflows/${path}`, event, created_at: created, workflow_id, conclusion: "success" });
+const job = (name, start, minutes, { runner = "eu-north-1b-ip-1-1", labels = ["future-pay-ci"] } = {}) => ({
+  name,
+  runner_name: runner,
+  labels,
+  started_at: start,
+  completed_at: new Date(Date.parse(start) + minutes * 60000).toISOString(),
+});
+
+test("actionOf: a pull request and its push are a merge, the dispatched suite and its gate a suite, CD and its smoke a deploy", () => {
+  assert.equal(actionOf(run(1, "ci.yml", "pull_request")), "merge");
+  assert.equal(actionOf(run(2, "post-merge-regen.yml", "push")), "merge");
+  assert.equal(actionOf(run(3, "commitlint-enforce.yml", "pull_request_target")), "merge");
+  assert.equal(actionOf(run(4, "ci.yml", "workflow_dispatch")), "suite");
+  assert.equal(actionOf(run(5, "full-suite.yml", "schedule")), "suite");
+  assert.equal(actionOf(run(6, "cd.yml", "workflow_dispatch")), "deploy");
+  assert.equal(actionOf(run(7, "qa-cd.yml", "schedule")), "deploy");
+  assert.equal(actionOf(run(8, "post-cd.yml", "workflow_dispatch")), "deploy");
+  assert.equal(actionOf(run(9, "memory-tighten.yml", "schedule")), "other");
+  assert.equal(actionOf(run(10, "runner-image-refresh.yml", "workflow_dispatch")), "other");
+  assert.equal(actionOf(run(11, "my-ci.yml", "workflow_dispatch"), { workflow: "my-ci.yml" }), "suite");
+  // Only a suite run and a rollout are counted; the gate and the smoke ride along.
+  assert.equal(countedAction(run(4, "ci.yml", "workflow_dispatch")), "suite");
+  assert.equal(countedAction(run(5, "full-suite.yml", "schedule")), null);
+  assert.equal(countedAction(run(8, "post-cd.yml", "workflow_dispatch")), null);
+  assert.equal(countedAction(run(7, "qa-cd.yml", "schedule")), "deploy");
+});
+
+test("actionsByDay counts a re-run's copied jobs once, leaves out GitHub's runners, and files a job by its start", () => {
+  const suite = {
+    run: run(1, "ci.yml", "workflow_dispatch", "2026-11-26T23:50:00Z"),
+    jobs: [
+      job("Unit 1/2", "2026-11-26T23:55:00Z", 10),
+      job("Unit 1/2", "2026-11-26T23:55:00Z", 10), // attempt 2's copy of the passed job
+      job("Unit 2/2", "2026-11-27T00:10:00Z", 20), // re-run on the next day
+      job("Unit 2/2", "2026-11-26T23:55:00Z", 5), // attempt 1's failure: real work, counted
+    ],
+  };
+  const pr = {
+    run: run(2, "ci.yml", "pull_request"),
+    jobs: [
+      job("Lint", "2026-11-26T10:00:00Z", 3, { labels: ["future-pay-ci-medium"] }),
+      job("Commit message", "2026-11-26T10:00:00Z", 1, { labels: ["ubuntu-latest"] }),
+      job("Cancelled before a runner", "2026-11-26T10:00:00Z", 7, { runner: null }),
+      { ...job("Skipped", "2026-11-26T10:05:00Z", 0), completed_at: "2026-11-26T10:04:00Z" },
+    ],
+  };
+  const deploy = { run: run(3, "qa-cd.yml", "schedule", "2026-11-26T08:07:00Z"), jobs: [job("Build image", "2026-11-26T08:08:00Z", 12)] };
+  const { minutes, counts } = actionsByDay([suite, pr, deploy], { label: "future-pay-ci" });
+  assert.deepEqual(minutes["2026-11-26"], { suite: 15, merge: 3, deploy: 12 });
+  assert.deepEqual(minutes["2026-11-27"], { suite: 20 });
+  assert.deepEqual(counts, { "2026-11-26": { suite: 1, deploy: 1 } });
+});
+
+test("costPerAction splits the day's cost by fleet minutes and averages each share over its own count", () => {
+  const a = costPerAction({ ci: 37.18, minutes: { merge: 8000, suite: 3200, deploy: 400, other: 400 }, counts: { merge: 111, suite: 9, deploy: 2 } });
+  const shares = ACTIONS.reduce((s, k) => s + a[k].cost, 0);
+  assert.ok(Math.abs(shares - 37.18) < 1e-9, "the shares add up to the day's cost");
+  assert.ok(Math.abs(a.merge.per - (37.18 * 8000) / 12000 / 111) < 1e-9);
+  assert.ok(Math.abs(a.suite.per - (37.18 * 3200) / 12000 / 9) < 1e-9);
+  assert.equal(a.other.count, null);
+  assert.equal(a.other.per, null, "upkeep is shown, never averaged");
+  const none = costPerAction({ ci: 5, minutes: {}, counts: { merge: 3 } });
+  assert.equal(none.merge.cost, null, "no fleet minutes, nothing to split by");
+  assert.equal(costPerAction({ ci: 5, minutes: { merge: 10, suite: 2 }, counts: { merge: 0, suite: 0 } }).merge.per, null, "a day with no merge has no cost per merge");
+});
+
+test("runsWithJobs reads every run of a fleet workflow and only a sample of one that never reaches the fleet", async () => {
+  const listed = [
+    ...Array.from({ length: 7 }, (_, i) => run(100 + i, "ci.yml", "pull_request", "2026-11-26T10:00:00Z", "ci")),
+    ...Array.from({ length: 7 }, (_, i) => run(200 + i, "commitlint-enforce.yml", "pull_request_target", "2026-11-26T10:00:00Z", "lint")),
+    run(300, "ci.yml", "workflow_dispatch", "2026-11-26T11:00:00Z", "ci"),
+    { ...run(301, "ci.yml", "pull_request", "2026-11-26T11:00:00Z", "ci"), conclusion: "skipped" },
+  ];
+  const read = [];
+  const out = await runsWithJobs({
+    listDay: async (from) => (from.startsWith("2026-11-26") ? listed : []),
+    jobsOf: async (r) => {
+      read.push(r.id);
+      return r.workflow_id === "ci" ? [job("Unit", "2026-11-26T10:01:00Z", 4)] : [job("Commit message", "2026-11-26T10:01:00Z", 1, { labels: ["ubuntu-latest"] })];
+    },
+    days: ["2026-11-26"],
+    until: "2026-11-27",
+    label: "future-pay-ci",
+    sample: 5,
+  });
+  assert.equal(read.filter((id) => id >= 200 && id < 300).length, 5, "five runs of the GitHub-hosted workflow, not seven");
+  assert.equal(read.filter((id) => id >= 100 && id < 200 || id === 300).length, 8, "every run of the fleet workflow");
+  assert.ok(!read.includes(301) && !out.some(({ run: r }) => r.id === 301), "a skipped run is not read");
+  assert.equal(out.length, 15, "the unread runs are kept, so a suite or a rollout among them is still counted");
+  const { counts, minutes } = actionsByDay(out, { label: "future-pay-ci" });
+  assert.deepEqual(counts["2026-11-26"], { suite: 1 });
+  assert.equal(minutes["2026-11-26"].merge, 28);
+});
+
+test("renderHtml shows the cost per merge, per suite and per deploy, and keeps one cost per merge without them", () => {
+  const base = { repo: "o/r", until: "2026-11-27", generated: "2026-11-27T05:00:00Z", window: "14:00–17:00", workflow: "ci.yml", baseline: 0.69, budget: 100, offset: -3, templates: [tpl("us-east-1")], dispatches: [], anomalies: [] };
+  const actions = costPerAction({ ci: 20, minutes: { merge: 600, suite: 300, deploy: 60, other: 40 }, counts: { merge: 40, suite: 2, deploy: 1 } });
+  const html = renderHtml({ ...base, days: [day("2026-11-26", { actions })] });
+  assert.ok(html.includes("por suíte completa") && html.includes("por deploy"), "the three KPIs");
+  assert.ok(html.includes("US$ 0,30"), "per merge is the merges' share: 20 × 600/1000 / 40");
+  assert.ok(html.includes("US$ 3,00") && html.includes("US$ 1,20"), "per suite 20 × 300/1000 / 2, per deploy 20 × 60/1000 / 1");
+  assert.ok(html.includes("repeat(5, 1fr)"));
+  const old = renderHtml({ ...base, days: [day("2026-11-26")] });
+  assert.ok(old.includes("por push de PR") && !old.includes("por suíte completa") && old.includes("repeat(4, 1fr)"), "a report without actions keeps its old shape");
 });
 
 test("regions handing out different disks is drift", () => {
